@@ -5,8 +5,14 @@ import { EventEmitter } from 'node:events'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-// @ts-expect-error collab engine scripts are JS-only CLI modules under test.
-import { dispatchLifecycle } from '../engine/dispatch_lifecycle.mjs'
+// Engine modules are JS-only (.mjs) without .d.ts stubs yet. Cast through any
+// so the dispatchLifecycle invocation typechecks; once the platform agent ships
+// types, drop the cast.
+import { dispatchLifecycle as dispatchLifecycleRaw } from '../engine/dispatch_lifecycle.mjs'
+const dispatchLifecycle = dispatchLifecycleRaw as (
+  options: Record<string, unknown>,
+  hooks?: Record<string, unknown>,
+) => Promise<{ disposition: string; exitCode: number }>
 
 const testDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(testDir, '..')
@@ -87,6 +93,7 @@ const createTempRepo = () => {
   tempRoots.push(root)
   mkdirSync(join(root, 'agents'), { recursive: true })
   mkdirSync(join(root, 'engine', 'drivers'), { recursive: true })
+  mkdirSync(join(root, '.collab'), { recursive: true })
   writeFileSync(
     join(root, 'package.json'),
     JSON.stringify({ name: 'collab-engine-test-test', private: true, type: 'module' }, null, 2) + '\n',
