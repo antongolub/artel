@@ -187,11 +187,13 @@ const readEvents = () => {
 }
 
 const summarizeEvent = (e) => {
-  if (e.type === 'claim') {
+  // dispatch.start / dispatch.end are canonical (DESIGN.md §4.5); legacy
+  // 'claim' / 'release' accepted for one back-compat cycle.
+  if (e.type === 'dispatch.start' || e.type === 'claim') {
     const actor = e.owner_role || 'agent'
     return `${actor} claimed ${e.task}${e.branch ? ` on ${e.branch}` : ''}`
   }
-  if (e.type === 'release') {
+  if (e.type === 'dispatch.end' || e.type === 'release') {
     const actor = e.owner_role || 'agent'
     return `${actor} released ${e.task} (${e.disposition || 'unknown'})`
   }
@@ -280,6 +282,10 @@ const getRecentDispatches = (n = 5) => {
       let role = null
       let engine = null
       let task = null
+      let usage = null
+      let retryCount = 0
+      let dispatchId = null
+      let traceId = null
       const metaPath = join(dir, `${base}.meta`)
       if (existsSync(metaPath)) {
         try {
@@ -287,6 +293,10 @@ const getRecentDispatches = (n = 5) => {
           role = meta.role
           engine = meta.engine
           task = meta.task
+          usage = meta.usage || null
+          retryCount = meta.retryCount || 0
+          dispatchId = meta.dispatchId || null
+          traceId = meta.traceId || null
         } catch {}
       }
       // Legacy fallback: detect from filename (`<role>-<task>.out`) and content
@@ -301,7 +311,7 @@ const getRecentDispatches = (n = 5) => {
         task = role !== '?' && f.startsWith(role + '-') ? base.slice(role.length + 1) : base
       }
       const version = probeEngineVersion(engine)
-      return { role, mtime: stat.mtimeMs, summary, engine, version, task }
+      return { role, mtime: stat.mtimeMs, summary, engine, version, task, usage, retryCount, dispatchId, traceId }
     })
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, n)
@@ -594,7 +604,7 @@ const renderRunning = (dispatcher, procs) => {
 
 const renderRecent = (items) => {
   const cols = process.stdout.columns || 120
-  const trunc = Math.min(110, cols - 80)
+  const trunc = Math.min(110, cols - 100)
   let out = `\n${bold('RECENT')} ${dim('(last 5 dispatches)')}\n`
   if (!items.length) return out + `  ${dim('(none)')}\n`
   for (const item of items) {
@@ -602,8 +612,15 @@ const renderRecent = (items) => {
     const role = cyan(item.role.padEnd(13))
     const exec = `${item.engine} ${item.version}`
     const task = item.task ? truncate(item.task, 28).padEnd(30) : ' '.repeat(30)
+    // Suffix with usage / retry signals when present (DESIGN.md §C5–C6).
+    const annot = []
+    if (item.usage && (item.usage.tokens_in || item.usage.tokens_out)) {
+      annot.push(`${fmt(item.usage.tokens_in || 0)}/${fmt(item.usage.tokens_out || 0)}t`)
+    }
+    if (item.retryCount > 0) annot.push(yellow(`r${item.retryCount}`))
+    const annotStr = annot.length ? `${dim('[')}${annot.join(' ')}${dim(']')} ` : ''
     const summary = truncate(item.summary.replace(/\s+/g, ' '), trunc)
-    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(18))} ${task} ${summary}\n`
+    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(18))} ${task} ${annotStr}${summary}\n`
   }
   return out
 }

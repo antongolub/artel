@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // High-level dispatch CLI. Parses argv/stdin and delegates the actual dispatch
 // lifecycle to dispatch_lifecycle.mjs.
+//
+// Universal terms (DESIGN.md §5): --model / --effort / --sandbox / --tools /
+// --permission-mode propagate to run.mjs and through to drivers.
 
 import { readFileSync } from 'node:fs'
 import {
@@ -15,16 +18,23 @@ import {
 
 const usage = (code = 2) => {
   console.error(
-    'Usage: node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs <json>] -p "prompt"',
+    'Usage: node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [options] (-p "prompt" | -f file | < stdin)',
   )
+  console.error('')
+  console.error('Options:')
+  console.error('  --engine <name>            override engine driver')
+  console.error('  --model <name>             override model')
+  console.error('  --effort <level>           reasoning effort (codex)')
+  console.error('  --sandbox <mode>           read-only|workspace-write|full-access')
+  console.error('  --tools <list>             tool allowlist (comma-sep)')
+  console.error('  --permission-mode <mode>   permission mode (claude)')
+  console.error('  --timeout-ms <n>           dispatch wall-clock timeout')
+  console.error('  --retry-of <dispatch_id>   mark this as retry of <id>')
+  console.error('  --attrs <json>             merge JSON object into task attrs')
+  console.error('  --attrs-file <path>        merge JSON file into task attrs')
+  console.error('  --attr key=value           set single task attr')
   console.error(
-    '       node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs-file file.json] -f <prompt-file>',
-  )
-  console.error(
-    '       node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attr key=value] < prompt-stdin',
-  )
-  console.error(
-    `       default timeout: ${defaultDispatchTimeoutMs}ms (override with --timeout-ms or COLLAB_DISPATCH_TIMEOUT_MS)`,
+    `default timeout: ${defaultDispatchTimeoutMs}ms (override with --timeout-ms or COLLAB_DISPATCH_TIMEOUT_MS)`,
   )
   process.exit(code)
 }
@@ -36,15 +46,30 @@ const [role, task, ...rest] = argv
 let engine = null
 let prompt = null
 let taskAttrs = null
-let codexEffort = null
+let model = null
+let effort = null
+let sandbox = null
+let tools = null
+let permissionMode = null
 let timeoutMs = null
+let retryOf = null
 
 for (let i = 0; i < rest.length; i++) {
   if (rest[i] === '--engine' && rest[i + 1]) engine = rest[++i]
   else if (rest[i] === '-p' && rest[i + 1]) prompt = rest[++i]
   else if (rest[i] === '-f' && rest[i + 1]) prompt = readFileSync(rest[++i], 'utf8')
-  else if (rest[i] === '--codex-effort' && rest[i + 1]) codexEffort = rest[++i]
+  else if (rest[i] === '--model' && rest[i + 1]) model = rest[++i]
+  else if (rest[i] === '--effort' && rest[i + 1]) effort = rest[++i]
+  else if (rest[i] === '--codex-effort' && rest[i + 1]) {
+    // Deprecated alias for --effort. Kept for one cycle of back-compat.
+    console.error('warning: --codex-effort is deprecated; use --effort')
+    effort = rest[++i]
+  }
+  else if (rest[i] === '--sandbox' && rest[i + 1]) sandbox = rest[++i]
+  else if (rest[i] === '--tools' && rest[i + 1]) tools = rest[++i]
+  else if (rest[i] === '--permission-mode' && rest[i + 1]) permissionMode = rest[++i]
   else if (rest[i] === '--timeout-ms' && rest[i + 1]) timeoutMs = rest[++i]
+  else if (rest[i] === '--retry-of' && rest[i + 1]) retryOf = rest[++i]
   else if (rest[i] === '--attrs' && rest[i + 1]) taskAttrs = mergeTaskAttrs(taskAttrs, parseJsonObject(rest[++i], '--attrs'))
   else if (rest[i] === '--attrs-file' && rest[i + 1]) {
     taskAttrs = mergeTaskAttrs(taskAttrs, parseJsonObject(readFileSync(rest[++i], 'utf8'), '--attrs-file'))
@@ -66,7 +91,12 @@ try {
     engine,
     prompt,
     taskAttrs,
-    codexEffort,
+    model,
+    effort,
+    sandbox,
+    tools,
+    permissionMode,
+    retryOf,
     timeoutMs,
   })
   process.exit(result.exitCode)

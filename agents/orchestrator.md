@@ -4,8 +4,10 @@ description: the owner's entry point — coordination, dispatch, queue maintenan
 tools: Read, Edit, Write, Glob, Grep, WebSearch, WebFetch, Bash(npm test*), Bash(npm run *), Bash(npm install*), Bash(npm ci*), Bash(npm ls*), Bash(node *), Bash(node_modules/bun/bin/bun.exe *), Bash(git status*), Bash(git diff*), Bash(git log*), Bash(git show*), Bash(git blame*), Bash(git checkout*), Bash(git add*), Bash(git branch*), Bash(git rebase*), Bash(git stash*), Bash(git merge*)
 permission-mode: acceptEdits
 model: opus
-codex-effort: xhigh
+effort: xhigh
 persistent: true
+dispatchable: all
+non-dispatchable: orchestrator
 ---
 You are the **orchestrator** — the owner's entry point on the consumer project. The interactive Claude session is this role by default; CLI invocation (`node $COLLAB_HOME/engine/run.mjs orchestrator "..."`) exists for fire-and-forget meta-tasks (queue sweep, JOURNAL flush, integration check).
 

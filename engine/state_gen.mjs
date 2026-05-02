@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { readClusterIdentity } from './cluster.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the engine itself; project paths are per-consumer.
@@ -162,7 +163,9 @@ function activeTasks(queue, metas, events) {
       const fullText = [item.text, ...item.details].join(' ')
       const task = taskIdOf(item)
       const meta = recentMetaForTask(metas, task)
-      const claim = recentEventForTask(events, task, 'claim')
+      // Accept legacy 'claim' alongside canonical 'dispatch.start' for one cycle.
+      const claim = recentEventForTask(events, task, 'dispatch.start')
+        || recentEventForTask(events, task, 'claim')
       tasks.push({
         task,
         queueBucket: bucket,
@@ -194,6 +197,7 @@ const events = loadEvents()
 const dispatcherState = loadDispatcherState()
 const tasks = activeTasks(queue, metas, events)
 const now = new Date().toISOString()
+const cluster = readClusterIdentity(projectCollabDir)
 
 const frontmatter = [
   '---',
@@ -205,8 +209,11 @@ const frontmatter = [
   '  - .collab/.dispatches/*.meta',
   '  - .collab/events.jsonl',
   '  - .collab/dispatcher_state.json',
+  '  - .collab/cluster.json',
   'generator: <COLLAB_HOME>/engine/state_gen.mjs',
   `generated_at: ${yamlEscape(now)}`,
+  `cluster_id: ${yamlEscape(cluster?.cluster_id || 'unknown')}`,
+  `cluster_name: ${yamlEscape(cluster?.name || 'unknown')}`,
   `acting_role: ${yamlEscape(dispatcherState?.role || 'dispatcher')}`,
   `acting_provider: ${yamlEscape(dispatcherState?.provider || 'unknown')}`,
   `dispatcher_status: ${yamlEscape(dispatcherState?.control_status || 'unknown')}`,

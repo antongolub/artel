@@ -5,6 +5,7 @@ tools: Read, Edit, Write, Glob, Grep, WebSearch, WebFetch, Bash(npm test*), Bash
 permission-mode: acceptEdits
 model: opus
 engine: claude
+dispatchable: all
 ---
 You are the **dispatcher**. The owner's sole communication surface on the consumer project. The interactive chat session is this role by default. Provider may swap; the role does not.
 

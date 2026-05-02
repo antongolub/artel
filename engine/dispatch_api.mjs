@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { SCHEMA_VERSION, uuidv7, validateEventType } from './schema.mjs'
 
 const nowIso = () => new Date().toISOString()
 
@@ -74,6 +75,12 @@ export const createDispatchApi = ({
   task,
   role,
   engine,
+  clusterId,
+  instanceId,
+  dispatchId,
+  traceId,
+  parentDispatchId = null,
+  parentRole = null,
   taskAttrs = null,
   promptPath = null,
   outPath = null,
@@ -84,6 +91,10 @@ export const createDispatchApi = ({
   if (!task) throw new Error('createDispatchApi requires task')
   if (!role) throw new Error('createDispatchApi requires role')
   if (!engine) throw new Error('createDispatchApi requires engine')
+  if (!clusterId) throw new Error('createDispatchApi requires clusterId')
+  if (!instanceId) throw new Error('createDispatchApi requires instanceId')
+  if (!dispatchId) throw new Error('createDispatchApi requires dispatchId')
+  if (!traceId) throw new Error('createDispatchApi requires traceId')
 
   const attrs = normalizeAttrs(taskAttrs)
   let meta = readJsonFile(metaPath) || {}
@@ -99,9 +110,16 @@ export const createDispatchApi = ({
   const writeMeta = (patch = {}, movement = 'update') => {
     meta = {
       ...meta,
+      schema: SCHEMA_VERSION,
       task,
       role,
       engine,
+      clusterId,
+      instanceId,
+      dispatchId,
+      traceId,
+      ...(parentDispatchId ? { parentDispatchId } : {}),
+      ...(parentRole ? { parentRole } : {}),
       ...(attrs ? { taskAttrs: attrs } : {}),
       ...patch,
       updatedAt: nowIso(),
@@ -113,12 +131,31 @@ export const createDispatchApi = ({
     return clone(meta)
   }
 
-  const appendEvent = (type, fields = {}) => {
+  // appendEvent: writes one structured event line. Mandatory fields per
+  // DESIGN.md §4.2 (schema, kind, type, id, at, cluster_id, instance_id) are
+  // injected automatically. `kind` defaults to 'workload' (the common case);
+  // infra/signal/control callers pass it explicitly.
+  //
+  // `fence_token` defaults to 0 in v1 — schema is reserved for federation
+  // claim/lease enforcement (DESIGN.md §12.3). Backends record but no
+  // enforcement until the v2 claim layer ships.
+  const appendEvent = (type, fields = {}, { kind = 'workload', fenceToken = 0 } = {}) => {
     if (!eventsPath) return null
+    validateEventType(kind, type)
     const event = {
+      schema: SCHEMA_VERSION,
+      kind,
       type,
+      id: uuidv7(),
       at: nowIso(),
+      cluster_id: clusterId,
+      instance_id: instanceId,
       task,
+      dispatch_id: dispatchId,
+      trace_id: traceId,
+      ...(parentDispatchId ? { parent_dispatch_id: parentDispatchId } : {}),
+      ...(parentRole ? { parent_role: parentRole } : {}),
+      ...(kind === 'workload' ? { fence_token: fenceToken } : {}),
       ...fields,
       ...(attrs ? { task_attrs: attrs } : {}),
     }
@@ -155,6 +192,10 @@ export const createDispatchApi = ({
     queueBucket = 'unknown',
     promptRef = null,
     notes = null,
+    model = null,
+    retryOf = null,
+    retryCount = 0,
+    retryReason = null,
   } = {}) => {
     const current = writeMeta(
       {
@@ -163,17 +204,25 @@ export const createDispatchApi = ({
         branch,
         sessionId,
         dispatchedAt: meta.dispatchedAt || nowIso(),
+        ...(model ? { model } : {}),
+        ...(retryOf ? { retryOf } : {}),
+        ...(retryCount ? { retryCount } : {}),
+        ...(retryReason ? { retryReason } : {}),
       },
-      'claim',
+      'dispatch.start',
     )
-    appendEvent('claim', {
+    appendEvent('dispatch.start', {
       queue_bucket: queueBucket,
       owner_role: role,
       owner_provider: engine,
       branch,
       engine,
+      ...(model ? { model } : {}),
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(promptRef ? { prompt_ref: promptRef } : {}),
+      ...(retryOf ? { retry_of: retryOf } : {}),
+      ...(retryCount ? { retry_count: retryCount } : {}),
+      ...(retryReason ? { retry_reason: retryReason } : {}),
       ...(notes ? { notes } : {}),
     })
     return current
@@ -187,6 +236,7 @@ export const createDispatchApi = ({
     disposition = 'success',
     parked = null,
     timeout = null,
+    usage = null,
     error = null,
     nextSafeStep = null,
     notes = null,
@@ -214,8 +264,9 @@ export const createDispatchApi = ({
         ...(error ? { error } : {}),
         ...(parked ? { parked } : {}),
         ...(timeout ? { timeout } : {}),
+        ...(usage ? { usage } : {}),
       },
-      'release',
+      'dispatch.end',
     )
 
     if (parked) {
@@ -228,11 +279,12 @@ export const createDispatchApi = ({
       })
     }
 
-    appendEvent('release', {
+    appendEvent('dispatch.end', {
       owner_role: role,
       owner_provider: engine,
       disposition,
       ...(sessionId ? { session_id: sessionId } : {}),
+      ...(usage ? { usage } : {}),
       ...(nextSafeStep ? { next_safe_step: nextSafeStep } : {}),
       ...(notes ? { notes } : {}),
       ...(replacementTask ? { replacement_task: replacementTask } : {}),

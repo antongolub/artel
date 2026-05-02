@@ -26,17 +26,17 @@ updates this file's status + revision log.
 
 | # | Title | Status | Notes |
 |---|---|---|---|
-| C0 | **Lock design + plan docs** | `[mvp]` | Commit `DESIGN.md` + `PLAN.md` so any agent surviving session break has the canon. Prerequisite for everything else. |
-| C1 | **Universal driver terms** | `[mvp]` | Add CLI `--model` / `--effort` / `--sandbox` / `--tools` / `--permission-mode` on `run.mjs` / `spawn.mjs`. Drivers translate to engine-native flags. Deprecate `--codex-effort` (alias for `--effort` with warning). Frontmatter: `model` / `effort` etc. as canon; `codex-model` / `codex-effort` / `copilot-model` / `copilot-tools` read with deprecation warning. Drivers without an analog → silent ignore, document in driver header. |
-| C2 | **Cluster identity + schema baseline** | `[mvp]` | `engine/init.mjs` (idempotent) generates `.collab/cluster.json` with `cluster_id` (UUID v7), `name`, `created_at`. `instance_id` regenerated per process start. Every event carries `schema` / `kind` / `type` / `id` / `at` / `cluster_id` / `instance_id`. Validator rejects unknown `kind` (allowed: `workload`/`infra`/`signal`/`control`). Reserve `control.*` and `signal.*` type prefixes — validator knows reserved set, future control-events land without schema bump. Add `fence_token` (number, default 0) to node-mutating workload events; no enforcement yet. |
-| C3 | **Tracing** | `[mvp]` | `dispatch_id` (UUID v7) + `trace_id` (root chain) + `parent_dispatch_id` + `parent_role` on events. Env vars `COLLAB_DISPATCH_ID` / `COLLAB_TRACE_ID` / `COLLAB_PARENT_DISPATCH_ID` / `COLLAB_PARENT_ROLE` propagated by `run.mjs` to child. Top-level dispatch (chat) → env unset → no parent. |
-| C4 | **Event rename + back-compat read** | `[mvp]` | Write side emits `dispatch.start` / `dispatch.end` (was `claim` / `release`). Read side accepts both names for one cycle. Existing `events.jsonl` from old runs remains valid. |
-| C5 | **Driver usage capture** | `[mvp]` | Each driver exports `parseUsage(outPath, sessionId) → {tokens_in, tokens_out, cache_read, cache_creation, cost_usd, model} | null`. Lifecycle merges into `dispatch.end` + `.meta`. Cost = whatever provider reports (no internal pricing). |
-| C6 | **Retry tracking + `signal.backoff_required`** | `[mvp]` | `dispatch.start` carries `retry_of` / `retry_count` / `retry_reason`. Counter inc only when prev `engine`+`model` == new (different = reset). Computed engine-side in `markRunning`. CLI: `spawn.mjs --retry-of <prev_dispatch_id>`. Threshold `retry_count >= 3` (default) → emit `signal.backoff_required`. |
-| C7 | **Sub-role checkpoint API** | `[mvp]` | `engine/checkpoint.mjs` CLI. Reads `COLLAB_TASK` / `COLLAB_ROLE` / `COLLAB_DISPATCH_ID` / `COLLAB_TRACE_ID` from env. Args: `--completed` / `--next` / `--artefact?` / `--notes?`. Emits `checkpoint` event. Role briefs add explanatory paragraph. Tool surface for relevant roles adds `Bash(node $COLLAB_HOME/engine/checkpoint.mjs *)`. |
-| C8 | **Role dispatch policies** | `[mvp]` | Frontmatter `dispatchable: all | <list>` (allowlist) + `non-dispatchable: <list>` (denylist). Defaults: `dispatcher`=all; `orchestrator`=all\\orchestrator; leaf roles (`implementer`/`architect`/`cold-reader`/`adversary`/`maintainer`)=none. Guard in `spawn.mjs` / `run.mjs` reads `COLLAB_PARENT_ROLE` env and validates. Throw before side-effects on violation. |
-| C9 | **`status.mjs` / `state_gen.mjs` minimal update** | `[mvp]` | Render usage (tokens / cost / duration), retry chain, cluster_id, trace grouping. No queue-graph projection in MVP — flat queue stays. |
-| C10 | **`MIGRATION.md` for parent project** | `[mvp]` | Enumerate breaking changes for consumer upgrade: universal-term frontmatter rename (with deprecation window), event-type rename (with back-compat window), new env vars (auto-set, no consumer action), new tool surface for sub-roles (consumer must add to role files), new reserved frontmatter keys (`dispatchable`/`non-dispatchable`), new `.collab/cluster.json` requirement (`engine/init.mjs` handles bootstrap). |
+| C0 | **Lock design + plan docs** | `[done]` | Committed `5da7ee4` (rescope) + `8a48c0d` (initial). |
+| C1 | **Universal driver terms** | `[done]` | Drivers translate `model` / `effort` / `sandbox` / `tools` / `permission-mode`; legacy keys (`codex-model` / `codex-effort` / `copilot-model` / `copilot-tools`) back-compat-read with deprecation warning in `run.mjs`. CLI flags `--model` / `--effort` / `--sandbox` / `--tools` / `--permission-mode` on `run.mjs` + `spawn.mjs` + `dispatch_lifecycle.mjs`. `--codex-effort` deprecated alias. Drivers export `api_version=1`. 21 tests green (17 new). |
+| C2 | **Cluster identity + schema baseline** | `[done]` | `engine/init.mjs` + `engine/cluster.mjs` + `engine/schema.mjs`. Idempotent bootstrap of `.collab/cluster.json` (cluster_id UUID v7, name, created_at). `instance_id` per-process. Every event carries `schema`/`kind`/`type`/`id`/`at`/`cluster_id`/`instance_id`; workload events also carry `fence_token: 0` (reserved for federation, no enforcement v1). `validateEventType` rejects unknown kind / unreserved type prefix. Namespaces reserved: `workload`/`infra`/`signal`/`control` with full prefix table. Legacy `claim`/`release` accepted one cycle. 37 tests green (16 new for schema + cluster + init.mjs CLI + event-enrichment). |
+| C3 | **Tracing** | `[done]` | `dispatch_id` (UUID v7) + `trace_id` + `parent_dispatch_id` + `parent_role` on every event + .meta. Env propagation: dispatch_lifecycle reads `COLLAB_DISPATCH_ID` / `COLLAB_ROLE` / `COLLAB_TRACE_ID` from env (= parent context); generates new dispatch_id; sets `COLLAB_DISPATCH_ID`/`TRACE_ID` for child run.mjs; run.mjs passes them down via process.env to engine CLI. Nested dispatch chain reconstructs from (dispatch_id, parent_dispatch_id, trace_id) tuples. 41 tests green (4 new). |
+| C4 | **Event rename + back-compat read** | `[done]` | `dispatch_api.markRunning/markReleased` emit `dispatch.start`/`dispatch.end`. Read side: `state_gen.mjs` activeTasks filter accepts both legacy `claim` and canonical `dispatch.start`; `status.mjs` `summarizeEvent` accepts both pairs. Existing `events.jsonl` with legacy names still summarises in dashboard. 43 tests green (2 new). |
+| C5 | **Driver usage capture** | `[done]` | All drivers export `parseUsage(outPath, sessionId)`. codex implementation walks `~/.codex/sessions/` (override via `COLLAB_CODEX_SESSIONS_DIR`), finds rollout file by id, reads last `token_count` event for cumulative usage; cost = null (provider zone). claude/copilot return null with TODO for v2 (claude needs `--output-format json`; copilot has no per-dispatch surface). Lifecycle dynamically imports driver, calls parseUsage post-exit, merges into `dispatch.end` event + `.meta` when non-null. 48 tests green (5 new). |
+| C6 | **Retry tracking + `signal.backoff_required`** | `[done]` | `dispatch.start` carries `retry_of` / `retry_count` / `retry_reason` / `model`. dispatchLifecycle looks up prev dispatch by id in events.jsonl, compares engine+effective-model, increments counter (reset on mismatch). retry_reason from prev dispatch.end disposition. CLI: `spawn.mjs --retry-of <prev_dispatch_id>`. Threshold via `backoffThreshold` param (default 3) → emit `signal.backoff_required` with engine/model/retry_count/threshold context. 53 tests green (5 new). |
+| C7 | **Sub-role checkpoint API** | `[done]` | `engine/checkpoint.mjs` CLI shim — reads task/role/dispatch_id/trace_id from `COLLAB_*` env (auto-set by run.mjs); args `--completed` / `--next` / `--artefact?` / `--notes?`; appends `checkpoint` event with all mandatory fields. Implementer.md + architect.md role briefs gain explanatory paragraph. Architect tool surface adds narrow `Bash(node *engine/checkpoint.mjs*)` (implementer already covered by `Bash(node *)`). 57 tests green (4 new). |
+| C8 | **Role dispatch policies** | `[done]` | `parseDispatchPolicy` + `checkDispatchPolicy` in dispatch_lifecycle. Reads parent role from `COLLAB_ROLE` env, parses `dispatchable: all | none | <list>` + `non-dispatchable: <list>` from parent's frontmatter, throws before any side-effects on violation. Default `dispatchable: all` (back-compat). Top-level dispatch (no env) skips check. Unknown parent fails open. Platform agents/ files updated: `dispatcher: all`, `orchestrator: all + non-dispatchable: orchestrator`, leaf roles (`adversary`/`architect`/`cold-reader`/`implementer`/`maintainer`): `dispatchable: none`. Also migrated orchestrator's `codex-effort` → canonical `effort`. 64 tests green (7 new). |
+| C9 | **`status.mjs` / `state_gen.mjs` minimal update** | `[done]` | `getRecentDispatches` reads usage / retryCount / dispatchId / traceId from .meta; `renderRecent` annotates each line with `[<in>/<out>t]` tokens (when present) and `r<N>` retry indicator (when >0). `state_gen.mjs` frontmatter gains `cluster_id` + `cluster_name` from `.collab/cluster.json`. Trace grouping and full per-day usage charts deferred to v2. 67 tests green (3 new). |
+| C10 | **`MIGRATION.md` for parent project** | `[done]` | Sectioned doc: TL;DR table, then 11 sections (one per MVP commit + test infra). Covers frontmatter renames with deprecation, event renames with back-compat, schema baseline + reserved namespaces, tracing (auto-set env), usage capture, retry tracking, checkpoint API tool-surface additions, dispatch policies (default all = back-compat), status / state_gen surfacing, and v2 follow-ups. |
 
 ## Out of MVP — v2 (namespace reserved)
 
@@ -77,6 +77,36 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-02** — C10 done. `MIGRATION.md` shipped — full consumer
+  upgrade guide for all 9 MVP feature commits + test infra notes + v2
+  follow-up index.
+- **2026-05-02** — C9 done. status.mjs renders usage + retry annotations;
+  state_gen.mjs surfaces cluster_id / cluster_name in frontmatter.
+  67 tests green (3 new).
+- **2026-05-02** — C8 done. Role dispatch policies (dispatchable /
+  non-dispatchable frontmatter) + guard in lifecycle. Platform roles
+  declared. 64 tests green (7 new).
+- **2026-05-02** — C7 done. Sub-role checkpoint API shipped
+  (`engine/checkpoint.mjs`) + role briefs updated. 57 tests green
+  (4 new for checkpoint).
+- **2026-05-02** — C6 done. Retry tracking via retry_of/retry_count/
+  retry_reason fields. signal.backoff_required at threshold (default 3).
+  53 tests green (5 new).
+- **2026-05-02** — C5 done. Driver `parseUsage` hook + codex
+  implementation (walks ~/.codex/sessions, last token_count event).
+  Lifecycle merges into dispatch.end + .meta. 48 tests green (5 new).
+- **2026-05-02** — C4 done. Event rename `claim`→`dispatch.start`,
+  `release`→`dispatch.end`. Back-compat read in state_gen + status for
+  one cycle. 43 tests green (2 new).
+- **2026-05-02** — C3 done. Tracing fields wired through events / .meta /
+  env propagation. dispatchLifecycle reads parent from env, emits
+  dispatch_id/trace_id/parent_*. 41 tests green (4 new for tracing).
+- **2026-05-02** — C2 done. Cluster identity bootstrap + schema baseline
+  (`engine/{schema,cluster,init}.mjs`). All events now carry mandatory
+  fields + reserved namespaces + fence_token=0. 37 tests green (16 new).
+- **2026-05-02** — C0 + C1 done. Universal driver terms live; deprecation
+  warnings in place; back-compat preserved for one cycle. 21 tests green
+  (17 new driver-translation tests + 1 canonical-flag smoke).
 - **2026-05-02** — MVP carve. Phase reshape under parent-project urgency.
   Phases 0–5 from prior plan compressed to C0–C10. Phase 6 + heavier
   refactors moved to `[v2]` with namespaces reserved. Defaults locked
