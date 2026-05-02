@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// Role dispatcher for the cooperative agent model — see collab/AGENTS.md.
-// Reads collab/agents/<role>.md, picks the engine driver from frontmatter
+// Role dispatcher for the cooperative agent model — see ../AGENTS.md.
+// Reads ../agents/<role>.md, picks the engine driver from frontmatter
 // `engine: <name>` (default `claude`), spawns the underlying CLI with
-// role-scoped surface. Engine drivers live in collab/engine/drivers/.
+// role-scoped surface. Engine drivers live in ./drivers/.
 //
-//   node collab/engine/run.mjs architect "review spec/01-manifest.md"
-//   node collab/engine/run.mjs --engine codex implementer "ship bundled-deps fixture"
-//   node collab/engine/run.mjs --task adr-0011-model-migration --task-attrs '{"phase":"A"}' implementer "ship it"
-//   node collab/engine/run.mjs --list
+//   node $COLLAB_HOME/engine/run.mjs architect "review the design"
+//   node $COLLAB_HOME/engine/run.mjs --engine codex implementer "ship the fixture"
+//   node $COLLAB_HOME/engine/run.mjs --task adr-…  --task-attrs '{"phase":"A"}' implementer "ship it"
+//   node $COLLAB_HOME/engine/run.mjs --list
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -50,8 +50,8 @@ const listEngines = () =>
 const usage = (code = 2) => {
   const roles = listRoles()
   const engines = listEngines()
-  console.error('Usage: node collab/engine/run.mjs [--engine <name>] [--codex-effort <value>] [--task <slug>] [--task-attrs <json>] <role> [...prompt]')
-  console.error('       node collab/engine/run.mjs --list      # list roles')
+  console.error('Usage: node $COLLAB_HOME/engine/run.mjs [--engine <name>] [--codex-effort <value>] [--task <slug>] [--task-attrs <json>] <role> [...prompt]')
+  console.error('       node $COLLAB_HOME/engine/run.mjs --list      # list roles')
   if (roles.length) console.error(`Roles: ${roles.join(', ')}`)
   if (engines.length) console.error(`Engines: ${engines.join(', ')}`)
   process.exit(code)

@@ -183,7 +183,12 @@ function yamlEscape(value) {
   return JSON.stringify(value)
 }
 
-const queue = parseQueue(readFileSync(queuePath, 'utf8'))
+// Lazy: a fresh consumer project may not have .collab/QUEUE.md yet.
+// Treat absence as "no tasks" rather than failing — bootstrapping should
+// not require a populated queue before the first state_gen run.
+const queue = existsSync(queuePath)
+  ? parseQueue(readFileSync(queuePath, 'utf8'))
+  : Object.fromEntries(SECTIONS.map((name) => [name, []]))
 const metas = loadMetas()
 const events = loadEvents()
 const dispatcherState = loadDispatcherState()

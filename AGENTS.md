@@ -46,11 +46,11 @@ territorial.
   questions, accepting or rejecting proposals.
 - Does NOT commit to: minutiae (we research those), implementing code,
   full code review of every change.
-- Style: terse, decisive, expects compactness. When he gives a one-liner
+- Style: terse, decisive, expects compactness. When they give a one-liner
   redirection, treat it as load-bearing.
 
 Project-specific domain context (industries the owner has worked in, prior
-art he authored, etc.) belongs in the consumer project's own
+art the owner has authored, etc.) belongs in the consumer project's own
 `.collab/AGENTS.md` augmentation or `.collab/PROJECT.md`, not here.
 
 ### Claude
@@ -150,7 +150,7 @@ write to master's history is reviewed and accepted by a human.
      - runs `npm test` + `npm run typecheck`.
   3. Claude pings the owner: "ready to commit" — the owner runs `git commit`.
      the owner owns message and granularity (one combined commit, or
-     separate per branch — his call).
+     separate per branch — their call).
   4. After the owner commits, Claude deletes the agent branch (or archives
      if useful for history).
 - **Force-push** is allowed on agent branches (rebases require it).
@@ -181,7 +181,7 @@ persona before pinging the owner. The subagent's findings either fold
 into the change or get explicit rejection notes. Pinging the owner with
 unverified work in these classes is a protocol violation —
 verification cannot be the owner's job in steady state, that's the bus-
-factor invariant collapsing onto him.
+factor invariant collapsing onto the owner.
 
 ## Invariants
 

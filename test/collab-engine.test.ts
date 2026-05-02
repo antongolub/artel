@@ -6,10 +6,10 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 // @ts-expect-error collab engine scripts are JS-only CLI modules under test.
-import { dispatchLifecycle } from '../../../collab/engine/dispatch_lifecycle.mjs'
+import { dispatchLifecycle } from '../engine/dispatch_lifecycle.mjs'
 
 const testDir = dirname(fileURLToPath(import.meta.url))
-const repoRoot = resolve(testDir, '../../..')
+const repoRoot = resolve(testDir, '..')
 const tempRoots: string[] = []
 const gitEnv = {
   ...process.env,
@@ -85,29 +85,29 @@ const stateFixture = () =>
 const createTempRepo = () => {
   const root = mkdtempSync(join(tmpdir(), 'collab-engine-test-'))
   tempRoots.push(root)
-  mkdirSync(join(root, 'collab', 'agents'), { recursive: true })
-  mkdirSync(join(root, 'collab', 'engine', 'drivers'), { recursive: true })
+  mkdirSync(join(root, 'agents'), { recursive: true })
+  mkdirSync(join(root, 'engine', 'drivers'), { recursive: true })
   writeFileSync(
     join(root, 'package.json'),
     JSON.stringify({ name: 'collab-engine-test-test', private: true, type: 'module' }, null, 2) + '\n',
   )
   writeFileSync(
     join(root, '.gitignore'),
-    ['bin/', 'collab/.dispatches/', 'collab/.sessions/', 'collab/events.jsonl'].join('\n') + '\n',
+    ['bin/', '.collab/.dispatches/', '.collab/.sessions/', '.collab/events.jsonl'].join('\n') + '\n',
   )
   writeFileSync(
-    join(root, 'collab', 'agents', 'implementer.md'),
+    join(root, 'agents', 'implementer.md'),
     ['---', 'engine: claude', '---', 'implementer test role'].join('\n'),
   )
   writeFileSync(
-    join(root, 'collab', 'agents', 'adversary.md'),
+    join(root, 'agents', 'adversary.md'),
     ['---', 'engine: claude', '---', 'adversary test role'].join('\n'),
   )
-  writeFileSync(join(root, 'collab', 'engine', 'drivers', 'claude.mjs'), 'export const id = "claude"\n')
-  writeFileSync(join(root, 'collab', 'QUEUE.md'), queueFixture())
-  writeFileSync(join(root, 'collab', 'state.md'), stateFixture())
+  writeFileSync(join(root, 'engine', 'drivers', 'claude.mjs'), 'export const id = "claude"\n')
+  writeFileSync(join(root, '.collab', 'QUEUE.md'), queueFixture())
+  writeFileSync(join(root, '.collab', 'state.md'), stateFixture())
   writeFileSync(
-    join(root, 'collab', 'dispatcher_state.json'),
+    join(root, '.collab', 'dispatcher_state.json'),
     JSON.stringify({ role: 'dispatcher', provider: 'claude', control_status: 'idle', session: 'test' }, null, 2) + '\n',
   )
   initRepo(root)
@@ -163,7 +163,9 @@ describe('dispatchLifecycle', () => {
         role: 'adversary',
         task: 'existing-task',
         prompt: 'noop',
-        collabDir: join(root, 'collab'),
+        platformDir: root,
+        projectDir: root,
+        projectCollabDir: join(root, '.collab'),
       }),
     ).rejects.toThrow(`branch ${branch} exists at ${branchCommit}`)
   })
@@ -190,7 +192,9 @@ describe('dispatchLifecycle', () => {
         prompt: 'sleep 30s',
         timeoutMs: 20,
         terminationGraceMs: 30,
-        collabDir: join(root, 'collab'),
+        platformDir: root,
+        projectDir: root,
+        projectCollabDir: join(root, '.collab'),
       },
       {
         spawnProcess: () => child as never,
@@ -204,7 +208,7 @@ describe('dispatchLifecycle', () => {
     expect(kills[0]!.at - startedAt).toBeGreaterThanOrEqual(15)
     expect(kills[1]!.at - kills[0]!.at).toBeGreaterThanOrEqual(25)
 
-    const meta = JSON.parse(readFileSync(join(root, 'collab', '.dispatches', 'timeout-smoke.meta'), 'utf8'))
+    const meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'timeout-smoke.meta'), 'utf8'))
     expect(meta.status).toBe('timed-out')
     expect(meta.disposition).toBe('timeout')
     expect(meta.exitCode).toBe(137)
@@ -212,7 +216,7 @@ describe('dispatchLifecycle', () => {
     expect(meta.timeout.graceMs).toBe(30)
     expect(meta.timeout.signal).toBe('SIGKILL')
 
-    const events = readFileSync(join(root, 'collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -230,14 +234,14 @@ describe('spawn CLI regressions', () => {
   it('keeps smoke-v3 and smoke-effort-flag alive through the lifecycle refactor', () => {
     const root = createTempRepo()
     installEngineRuntime(root, [
-      'collab/engine/spawn.mjs',
-      'collab/engine/run.mjs',
-      'collab/engine/dispatch_api.mjs',
-      'collab/engine/dispatch_lifecycle.mjs',
-      'collab/engine/parked.mjs',
-      'collab/engine/drivers/claude.mjs',
-      'collab/engine/drivers/codex.mjs',
-      'collab/agents/implementer.md',
+      'engine/spawn.mjs',
+      'engine/run.mjs',
+      'engine/dispatch_api.mjs',
+      'engine/dispatch_lifecycle.mjs',
+      'engine/parked.mjs',
+      'engine/drivers/claude.mjs',
+      'engine/drivers/codex.mjs',
+      'agents/implementer.md',
     ])
     snapshotRepo(root, 'runtime')
 
@@ -253,13 +257,13 @@ describe('spawn CLI regressions', () => {
     )
 
     const env = { PATH: `${binDir}:${process.env.PATH || ''}` }
-    const smokeV3 = runNode(root, ['collab/engine/spawn.mjs', 'implementer', 'smoke-v3', '--engine', 'claude', '-p', 'hello'], env)
+    const smokeV3 = runNode(root, ['engine/spawn.mjs', 'implementer', 'smoke-v3', '--engine', 'claude', '-p', 'hello'], env)
     expect(smokeV3.status).toBe(0)
 
     const smokeEffort = runNode(
       root,
       [
-        'collab/engine/spawn.mjs',
+        'engine/spawn.mjs',
         'implementer',
         'smoke-effort-flag',
         '--engine',
@@ -273,7 +277,7 @@ describe('spawn CLI regressions', () => {
     )
     expect(smokeEffort.status).toBe(0)
 
-    const v3Meta = JSON.parse(readFileSync(join(root, 'collab', '.dispatches', 'smoke-v3.meta'), 'utf8'))
+    const v3Meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'smoke-v3.meta'), 'utf8'))
     expect(v3Meta).toMatchObject({
       task: 'smoke-v3',
       role: 'implementer',
@@ -282,7 +286,7 @@ describe('spawn CLI regressions', () => {
       disposition: 'success',
     })
 
-    const effortOut = readFileSync(join(root, 'collab', '.dispatches', 'smoke-effort-flag.out'), 'utf8')
+    const effortOut = readFileSync(join(root, '.collab', '.dispatches', 'smoke-effort-flag.out'), 'utf8')
     expect(effortOut).toContain('model_reasoning_effort=xhigh')
   })
 })
@@ -290,10 +294,10 @@ describe('spawn CLI regressions', () => {
 describe('status CLI', () => {
   it('renders timed-out dispatches above parked dispatches', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['collab/engine/status.mjs'])
-    mkdirSync(join(root, 'collab', '.dispatches'), { recursive: true })
+    installEngineRuntime(root, ['engine/status.mjs'])
+    mkdirSync(join(root, '.collab', '.dispatches'), { recursive: true })
     writeFileSync(
-      join(root, 'collab', '.dispatches', 'timed.meta'),
+      join(root, '.collab', '.dispatches', 'timed.meta'),
       JSON.stringify(
         {
           task: 'timed-task',
@@ -309,7 +313,7 @@ describe('status CLI', () => {
       ) + '\n',
     )
     writeFileSync(
-      join(root, 'collab', '.dispatches', 'parked.meta'),
+      join(root, '.collab', '.dispatches', 'parked.meta'),
       JSON.stringify(
         {
           task: 'parked-task',
@@ -324,7 +328,7 @@ describe('status CLI', () => {
       ) + '\n',
     )
 
-    const status = runNode(root, ['collab/engine/status.mjs'])
+    const status = runNode(root, ['engine/status.mjs'])
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('TIMED-OUT')
     expect(status.stdout).toContain('timed-task')

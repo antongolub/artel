@@ -15,13 +15,13 @@ import {
 
 const usage = (code = 2) => {
   console.error(
-    'Usage: node collab/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs <json>] -p "prompt"',
+    'Usage: node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs <json>] -p "prompt"',
   )
   console.error(
-    '       node collab/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs-file file.json] -f <prompt-file>',
+    '       node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attrs-file file.json] -f <prompt-file>',
   )
   console.error(
-    '       node collab/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attr key=value] < prompt-stdin',
+    '       node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [--engine <name>] [--codex-effort <value>] [--timeout-ms <n>] [--attr key=value] < prompt-stdin',
   )
   console.error(
     `       default timeout: ${defaultDispatchTimeoutMs}ms (override with --timeout-ms or COLLAB_DISPATCH_TIMEOUT_MS)`,
