@@ -452,5 +452,10 @@ without migrations.
 
 ## Revision log
 
+- **2026-05-02** — MVP carve confirmed. Architecture stays as written;
+  execution scope narrowed in `PLAN.md` under parent-project urgency.
+  Repository abstraction, queue-graph, pipelines, federation transports
+  moved to v2. Schema fields and reserved namespaces stay in MVP so v2
+  lands without migrations. Defaults locked for `PLAN.md` Q1–Q4.
 - **2026-05-02** — Initial draft. Foundations + federation primitives
   reserved for v1. Pipelines, queue-graph, control-kind taxonomy locked.
