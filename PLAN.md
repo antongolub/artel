@@ -79,6 +79,17 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — Dashboard refresh (`status.mjs`): four density wins.
+  (a) Header context line under the title — `cluster <short8> · <name>
+  · branch <X> · N modified | clean` (cluster from `.artel/cluster.json`,
+  branch+dirty count from git). (b) `RECENT` rows append per-dispatch
+  duration `(42s)` / `(3m)` derived from `meta.dispatchedAt` ↔
+  `meta.completedAt`. (c) `QUEUE` expands `PENDING` and `BLOCKED`
+  sections with task names (was: counts only) — `BLOCKED` gets a yellow
+  `!` marker. (d) `TOKENS` rows prefix per-engine auth-health marker
+  (`✓` recent success / `⚠` recent auth-expired park / `?` unknown),
+  derived from `.dispatches/*.meta` over the last 24h. 106 tests green
+  (4 new e2e for the panel).
 - **2026-05-03** — Bug fix: cross-namespace `model:` values crashed codex
   dispatches with API 400 on ChatGPT-account auth (`opus` forwarded
   verbatim to `-m`). Both codex and claude drivers now filter foreign
