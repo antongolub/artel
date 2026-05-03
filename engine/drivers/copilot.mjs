@@ -20,6 +20,7 @@
 // canonical `model` / `tools` win when both present.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
@@ -61,6 +62,62 @@ export function args (meta, promptParts) {
 // Aggregate is in sessionTokens below.
 export function parseUsage () {
   return null
+}
+
+// Readiness probe used by `artel probe`. Three-stage check, since copilot
+// is delivered as a `gh` CLI extension:
+//   1. `gh --version`     — base CLI on PATH
+//   2. `gh copilot -- --version` — extension installed
+//   3. `gh auth status`   — GitHub login active
+// authState: 'ok' (all three pass)
+//          | 'missing' (any stage failed)
+// `installed` reflects stages 1+2: the binary surface artel actually uses.
+const tryRun = (cmd) => {
+  try {
+    return execSync(cmd, {
+      encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch { return null }
+}
+
+export function probe () {
+  // tryRun returns null on non-zero exit; check explicitly so commands that
+  // succeed with empty stdout (e.g. `gh auth status` writing only to stderr)
+  // are not mistaken for failures.
+  if (tryRun(`${command} --version`) === null) {
+    return {
+      engine: id,
+      binary: command,
+      installed: false,
+      version: null,
+      authState: 'missing',
+      hint: `${command} CLI not on PATH — install: https://cli.github.com (e.g. \`brew install gh\`)`,
+    }
+  }
+  const copilotVer = tryRun(`${command} copilot -- --version`)
+  if (copilotVer === null) {
+    return {
+      engine: id,
+      binary: command,
+      installed: false,
+      version: null,
+      authState: 'missing',
+      hint: 'gh copilot extension not installed — run `gh extension install github/gh-copilot`',
+    }
+  }
+  const m = copilotVer.match(/\d+\.\d+\.\d+/)
+  const version = m ? m[0] : (copilotVer.split('\n')[0] || '').trim().slice(0, 16) || null
+  if (tryRun(`${command} auth status`) === null) {
+    return {
+      engine: id,
+      binary: command,
+      installed: true,
+      version,
+      authState: 'missing',
+      hint: 'gh not authenticated — run `gh auth login`',
+    }
+  }
+  return { engine: id, binary: command, installed: true, version, authState: 'ok', hint: null }
 }
 
 // Iterate copilot session directories, pick the ones whose
