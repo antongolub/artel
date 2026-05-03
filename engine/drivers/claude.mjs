@@ -22,7 +22,8 @@
 // parseUsage returns null in MVP — `claude -p` emits plain text by default
 // and `--output-format json` would change .out semantics. v2 work.
 
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readJsonl } from '../util/fs.mjs'
@@ -68,6 +69,66 @@ export function args (meta, promptParts, session = {}) {
 export function parseUsage () {
   // TODO v2: parse `--output-format json` envelope when wired through.
   return null
+}
+
+// Readiness probe used by `artel probe`. Returns:
+//   { engine, binary, installed, version, authState, hint? }
+// authState: 'ok' (binary + recent session activity)
+//          | 'unknown' (binary present, no recent activity — auth state can't
+//             be determined without an actual dispatch)
+//          | 'missing' (binary not on PATH)
+// Heuristic: claude has no stable on-disk credential file across versions;
+// the strongest signal we can get without an LLM call is whether
+// `~/.claude/projects/` shows recent jsonl activity.
+export function probe () {
+  let version = null
+  try {
+    const out = execSync(`${command} --version`, {
+      encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const m = out.match(/\d+\.\d+\.\d+/)
+    version = m ? m[0] : (out.split('\n')[0] || '').trim().slice(0, 16) || null
+  } catch {
+    return {
+      engine: id,
+      binary: command,
+      installed: false,
+      version: null,
+      authState: 'missing',
+      hint: `${command} CLI not on PATH — see https://docs.anthropic.com/en/docs/claude-code`,
+    }
+  }
+  const dir = projectsDir()
+  let lastSessionMs = 0
+  let sessions = 0
+  if (existsSync(dir)) {
+    try {
+      for (const sub of readdirSync(dir)) {
+        const subPath = join(dir, sub)
+        try {
+          if (!statSync(subPath).isDirectory()) continue
+          for (const f of readdirSync(subPath)) {
+            if (!f.endsWith('.jsonl')) continue
+            sessions++
+            const m = statSync(join(subPath, f)).mtimeMs
+            if (m > lastSessionMs) lastSessionMs = m
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  const recent = lastSessionMs > Date.now() - 30 * 86400000
+  return {
+    engine: id,
+    binary: command,
+    installed: true,
+    version,
+    authState: recent ? 'ok' : 'unknown',
+    hint: recent
+      ? null
+      : `no session activity in ${dir} (last 30d) — run \`${command}\` interactively to authenticate`,
+    sessions,
+  }
 }
 
 // sessionTokens: walk this project's claude session jsonl files (one

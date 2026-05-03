@@ -11,6 +11,7 @@ const SUBCOMMANDS = {
   run: 'run.mjs',
   spawn: 'spawn.mjs',
   status: 'status.mjs',
+  probe: 'probe.mjs',
   checkpoint: 'checkpoint.mjs',
 }
 
@@ -23,6 +24,7 @@ Usage: artel <${cmds}> [...args]
   run         dispatch a role one-shot (low-level)
   spawn       dispatch with task sidecar + branch + timeout
   status      cluster snapshot or live dashboard
+  probe       engine readiness (binary + version + auth state)
   checkpoint  emit a sub-role checkpoint event
 
 Run 'artel <command> --help' for command-specific options.`)

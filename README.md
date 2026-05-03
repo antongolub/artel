@@ -63,6 +63,7 @@ Full architecture in [`DESIGN.md`](./DESIGN.md). Status per phase in
 npm install -g @antongolub/artel
 
 artel init --name my-cluster
+artel probe                                                         # engine readiness
 artel run --list
 artel spawn implementer my-task --engine codex --effort high -p "ship the fixture"
 artel status --watch

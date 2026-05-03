@@ -34,6 +34,8 @@
 // Back-compat: legacy keys `codex-model` / `codex-effort` are still read,
 // canonical `model` / `effort` win when both present and codex-namespace.
 
+import { existsSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
@@ -58,6 +60,8 @@ const isClaudeNamespaceModel = (m) => /^(opus|sonnet|haiku|claude-)/i.test(m || 
 
 const sessionsDir = () =>
   process.env.ARTEL_CODEX_SESSIONS_DIR || join(homedir(), '.codex/sessions')
+
+const codexHome = () => process.env.CODEX_HOME || join(homedir(), '.codex')
 
 export function args (meta, promptParts, session = {}) {
   const sys = (meta.body || '').trim()
@@ -89,6 +93,45 @@ const findSessionFile = (sessionId) => {
     if (basename(path).includes(sessionId)) return path
   }
   return null
+}
+
+// Readiness probe used by `artel probe`. Returns standard shape:
+//   { engine, binary, installed, version, authState, hint? }
+// authState: 'ok' (binary + auth.json present)
+//          | 'missing' (binary not on PATH, or no auth.json)
+// codex stores OAuth credentials in `<codex_home>/auth.json` after the
+// `codex login` flow. Path resolves to `$CODEX_HOME/auth.json` if set,
+// else `~/.codex/auth.json`.
+export function probe () {
+  let version = null
+  try {
+    const out = execSync(`${command} --version`, {
+      encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const m = out.match(/\d+\.\d+\.\d+/)
+    version = m ? m[0] : (out.split('\n')[0] || '').trim().slice(0, 16) || null
+  } catch {
+    return {
+      engine: id,
+      binary: command,
+      installed: false,
+      version: null,
+      authState: 'missing',
+      hint: `${command} CLI not on PATH — see https://github.com/openai/codex`,
+    }
+  }
+  const auth = join(codexHome(), 'auth.json')
+  if (existsSync(auth)) {
+    return { engine: id, binary: command, installed: true, version, authState: 'ok', hint: null }
+  }
+  return {
+    engine: id,
+    binary: command,
+    installed: true,
+    version,
+    authState: 'missing',
+    hint: `${auth} not found — run \`${command} login\` to authenticate`,
+  }
 }
 
 // parseUsage: find the rollout file matching `sessionId`, read its last

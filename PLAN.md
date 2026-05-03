@@ -79,6 +79,14 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — `artel probe` subcommand — engine readiness check.
+  Each driver gains a `probe()` export returning
+  `{ engine, binary, installed, version, authState, hint? }`. CLI iterates
+  drivers and renders one line per engine plus actionable hint, exits 0
+  when all ready or 1 otherwise. Auth heuristics: claude — recent jsonl
+  in `~/.claude/projects/` (30d); codex — `$CODEX_HOME/auth.json` exists;
+  copilot — `gh auth status` exits 0 + `gh-copilot` extension installed.
+  `--json` mode for scripting. 111 tests green (5 new e2e).
 - **2026-05-03** — Dashboard refresh (`status.mjs`): four density wins.
   (a) Header context line under the title — `cluster <short8> · <name>
   · branch <X> · N modified | clean` (cluster from `.artel/cluster.json`,
