@@ -3,7 +3,7 @@ import { cleanupTempRoots, createTempRepo, ENGINE_FILES_CORE, ENGINE_FILES_UTIL,
 
 afterEach(cleanupTempRoots)
 
-describe('artel-init', () => {
+describe('artel init', () => {
   it('bootstraps .artel/cluster.json idempotently', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/cli/init.mjs', ...ENGINE_FILES_CORE, ...ENGINE_FILES_UTIL])

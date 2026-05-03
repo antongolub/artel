@@ -5,9 +5,9 @@
 // provider session jsonl files for token accounting; prints a single-screen
 // text summary with token usage charts.
 //
-//   node $ARTEL_HOME/engine/cli/status.mjs              # one-shot snapshot
-//   node $ARTEL_HOME/engine/cli/status.mjs --watch      # dashboard mode, refresh every 30s
-//   node $ARTEL_HOME/engine/cli/status.mjs --watch 10   # refresh every 10s
+//   artel status              # one-shot snapshot
+//   artel status --watch      # dashboard mode, refresh every 30s
+//   artel status --watch 10   # refresh every 10s
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'

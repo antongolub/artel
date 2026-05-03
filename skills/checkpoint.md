@@ -2,8 +2,8 @@
 schema: skill-v1
 version: 1
 updated_at: 2026-05-03T00:00:00.000Z
-description: Narrow surface to invoke `engine/cli/checkpoint.mjs` for sub-role self-reporting (DESIGN.md §9).
-tools: Bash(node *engine/cli/checkpoint.mjs*)
+description: Narrow surface to invoke `artel checkpoint` for sub-role self-reporting (DESIGN.md §9).
+tools: Bash(artel checkpoint *), Bash(node *engine/cli/checkpoint.mjs*)
 ---
 
 > v1 · updated 2026-05-03

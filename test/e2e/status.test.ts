@@ -9,7 +9,7 @@ const installStatus = (root: string) => {
   installEngineRuntime(root, ['engine/cli/status.mjs', ...ENGINE_FILES_DRIVERS, ...ENGINE_FILES_UTIL])
 }
 
-describe('artel-status: render new fields', () => {
+describe('artel status: render new fields', () => {
   it('renders usage tokens annotation in RECENT when meta has usage', () => {
     const root = createTempRepo()
     installStatus(root)
@@ -52,7 +52,7 @@ describe('artel-status: render new fields', () => {
   })
 })
 
-describe('artel-status: timed-out vs parked rendering', () => {
+describe('artel status: timed-out vs parked rendering', () => {
   it('renders timed-out dispatches above parked dispatches', () => {
     const root = createTempRepo()
     installStatus(root)
@@ -85,7 +85,7 @@ describe('artel-status: timed-out vs parked rendering', () => {
   })
 })
 
-describe('artel-status: legacy event back-compat', () => {
+describe('artel status: legacy event back-compat', () => {
   it('summarises legacy claim/release events alongside canonical dispatch.start/end', () => {
     const root = createTempRepo()
     installStatus(root)

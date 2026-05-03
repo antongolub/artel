@@ -5,7 +5,7 @@ import { cleanupTempRoots, createTempRepo, ENGINE_FILES_CORE, ENGINE_FILES_UTIL,
 
 afterEach(cleanupTempRoots)
 
-describe('artel-spawn smoke', () => {
+describe('artel spawn smoke', () => {
   it('keeps smoke-v3 + smoke-effort-flag + smoke-effort-canonical alive', () => {
     const root = createTempRepo()
     installEngineRuntime(root, [

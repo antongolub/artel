@@ -16,7 +16,7 @@ const { values } = parseArgs({
 
 if (values.help) {
   console.error(`\
-Usage: node $ARTEL_HOME/engine/cli/init.mjs [--name <cluster-name>]
+Usage: artel init [--name <cluster-name>]
 Idempotent — re-running prints the existing identity without changes.`)
   process.exit(0)
 }

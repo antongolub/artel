@@ -62,10 +62,10 @@ Full architecture in [`DESIGN.md`](./DESIGN.md). Status per phase in
 ```bash
 npm install -g @antongolub/artel
 
-artel-init --name my-cluster
-artel-run --list
-artel-spawn implementer my-task --engine codex --effort high -p "ship the fixture"
-artel-status --watch
+artel init --name my-cluster
+artel run --list
+artel spawn implementer my-task --engine codex --effort high -p "ship the fixture"
+artel status --watch
 ```
 
 Or clone the repo to read / hack the platform itself:
@@ -73,7 +73,7 @@ Or clone the repo to read / hack the platform itself:
 ```bash
 git clone https://github.com/antongolub/artel.git
 ARTEL_HOME=$PWD/artel
-node $ARTEL_HOME/engine/cli/init.mjs --name my-cluster
+node $ARTEL_HOME/engine/cli/artel.mjs init --name my-cluster
 ```
 
 ## Status

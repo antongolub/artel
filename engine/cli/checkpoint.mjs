@@ -3,7 +3,7 @@
 // phases to record progress. Appends a `checkpoint` event with
 // last_completed_step / next_safe_step / artefact / notes (DESIGN.md §9).
 //
-// Required env (auto-set by run.mjs when launching a sub-role):
+// Required env (auto-set by 'artel run' when launching a sub-role):
 //   ARTEL_TASK, ARTEL_ROLE, ARTEL_DISPATCH_ID, ARTEL_TRACE_ID
 
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -15,8 +15,8 @@ import { uuidv7 } from '../util/ids.mjs'
 
 const usage = (code = 2) => {
   console.error(`\
-Usage: node $ARTEL_HOME/engine/cli/checkpoint.mjs --completed <text> --next <text> [--artefact <path>] [--notes <text>]
-Reads task / role / dispatch_id / trace_id from ARTEL_* env (auto-set by run.mjs).`)
+Usage: artel checkpoint --completed <text> --next <text> [--artefact <path>] [--notes <text>]
+Reads task / role / dispatch_id / trace_id from ARTEL_* env (auto-set by 'artel run').`)
   process.exit(code)
 }
 
@@ -52,8 +52,8 @@ const env = {
 if (!env.task || !env.role || !env.dispatchId) {
   console.error(`\
 checkpoint: required env vars missing (ARTEL_TASK / ARTEL_ROLE / ARTEL_DISPATCH_ID).
-Are you running inside a dispatched sub-role? checkpoint.mjs is meant to be
-invoked from within a dispatch.`)
+Are you running inside a dispatched sub-role? 'artel checkpoint' is meant to
+be invoked from within a dispatch.`)
   process.exit(2)
 }
 

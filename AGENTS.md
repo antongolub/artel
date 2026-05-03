@@ -65,16 +65,15 @@ Four ways to invoke a sub-role:
 - **In-thread switch** — recast for one beat, return. Cheapest.
 - **Task tool** — spawn from inside the session. No project context
   unless the brief carries it.
-- **CLI dispatcher** — `node $ARTEL_HOME/engine/cli/run.mjs <role>`
-  shells a separate driver process with the role's pre-approved tool
-  surface.
-- **Spawn wrapper** — `spawn.mjs` adds task sidecars / branch precreate
-  and a per-dispatch wall-clock timeout (default 30m, override via
-  `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`).
+- **CLI dispatcher** — `artel run <role>` shells a separate driver
+  process with the role's pre-approved tool surface.
+- **Spawn wrapper** — `artel spawn <role> <task>` adds task sidecars /
+  branch precreate and a per-dispatch wall-clock timeout (default 30m,
+  override via `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`).
 
 Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares
 engine / model / tools / permission-mode; body is the system prompt.
-List with `run.mjs --list`.
+List with `artel run --list`.
 
 ## Protocol
 

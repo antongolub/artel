@@ -36,8 +36,8 @@ const usage = (code = 2) => {
   const roles = listRoles()
   const engines = listEngines()
   console.error(`\
-Usage: node $ARTEL_HOME/engine/cli/run.mjs [options] <role> [...prompt]
-       node $ARTEL_HOME/engine/cli/run.mjs --list
+Usage: artel run [options] <role> [...prompt]
+       artel run --list
 
 Options:
   --engine <name>            override engine driver

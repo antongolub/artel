@@ -9,7 +9,7 @@ const installCheckpoint = (root: string) => {
   installEngineRuntime(root, ['engine/cli/checkpoint.mjs', ...ENGINE_FILES_CORE, ...ENGINE_FILES_UTIL])
 }
 
-describe('artel-checkpoint', () => {
+describe('artel checkpoint', () => {
   it('appends a valid checkpoint event with all mandatory fields', () => {
     const root = createTempRepo()
     installCheckpoint(root)

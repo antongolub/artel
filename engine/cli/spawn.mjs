@@ -11,7 +11,7 @@ import { mergeTaskAttrs, parseJsonObject, parseTaskAttrAssignment } from '../cor
 
 const usage = (code = 2) => {
   console.error(`\
-Usage: node $ARTEL_HOME/engine/cli/spawn.mjs <role> <task-slug> [options] (-p "prompt" | -f file | < stdin)
+Usage: artel spawn <role> <task-slug> [options] (-p "prompt" | -f file | < stdin)
 
 Options:
   --engine <name>            override engine driver

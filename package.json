@@ -26,11 +26,7 @@
   ],
   "type": "module",
   "bin": {
-    "artel-init": "engine/cli/init.mjs",
-    "artel-run": "engine/cli/run.mjs",
-    "artel-spawn": "engine/cli/spawn.mjs",
-    "artel-status": "engine/cli/status.mjs",
-    "artel-checkpoint": "engine/cli/checkpoint.mjs"
+    "artel": "engine/cli/artel.mjs"
   },
   "files": [
     "engine",
