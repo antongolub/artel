@@ -18,6 +18,7 @@ import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mj
 import { detectParked } from './parked.mjs'
 import { uuidv7 } from '../util/ids.mjs'
 import { gitContext, gitDelta } from '../util/git.mjs'
+import { listDrivers } from '../util/drivers.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -94,12 +95,10 @@ const dispatchPathsOf = ({
   }
 }
 
-const listEngines = (driversDir, readdirImpl) =>
-  existsSync(driversDir)
-    ? readdirImpl(driversDir)
-        .filter((name) => name.endsWith('.mjs'))
-        .map((name) => name.replace(/\.mjs$/, ''))
-    : []
+// Visible engines = platform defaults plus overlays (project / user). Project
+// .artel/drivers/<id>.mjs > user ~/.artel/drivers/<id>.mjs > platform default.
+// Replaces the prior platform-only `readdir(drivers/)` listing (V6).
+const listEngines = () => listDrivers()
 
 const readRoleMeta = (role, agentsDir) => {
   const rolePath = join(agentsDir, `${role}.md`)
@@ -308,7 +307,7 @@ export async function dispatchLifecycle(
 
   const roleMeta = readRoleMeta(role, paths.agentsDir)
   const engineId = engine || roleMeta.engine || 'claude'
-  const engines = listEngines(paths.driversDir, readdirSync)
+  const engines = listEngines()
   if (!engines.includes(engineId)) {
     throw new Error(`Unknown engine: ${engineId}\nAvailable engines: ${engines.join(', ')}`)
   }

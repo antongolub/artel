@@ -8,18 +8,18 @@
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { buildTaskContextBlock, parseJsonObject } from '../core/dispatch_api.mjs'
 import { parseFrontmatter, normaliseFrontmatter } from '../util/frontmatter.mjs'
 import { expandSkills } from '../util/skills.mjs'
 import { validateRoleFrontmatter } from '../util/contract.mjs'
+import { listDrivers, loadDriver } from '../util/drivers.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PLATFORM_DIR = join(here, '..', '..')
 const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
-const DRIVERS_DIR = join(here, '..', 'drivers')
 const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_SKILLS_DIR = join(PROJECT_DIR, '.artel', 'skills')
@@ -30,11 +30,10 @@ const listDir = (dir, ext) =>
     : []
 
 const listRoles = () => listDir(AGENTS_DIR, '.md').filter((n) => n !== 'README')
-const listEngines = () => listDir(DRIVERS_DIR, '.mjs')
 
 const usage = (code = 2) => {
   const roles = listRoles()
-  const engines = listEngines()
+  const engines = listDrivers()
   console.error(`\
 Usage: artel run [options] <role> [...prompt]
        artel run --list
@@ -112,15 +111,16 @@ validateRoleFrontmatter(meta, rolePath)
 
 const engineId = values.engine || meta.engine || 'claude'
 
-// Whitelist against listEngines() — engine name comes from caller and goes
-// into `await import(pathToFileURL(...))`. Without the whitelist,
-// `--engine ../../foo` could import attacker-controlled `.mjs`.
-const engines = listEngines()
-if (!engines.includes(engineId)) {
-  die(`Unknown engine: ${engineId}\nAvailable engines: ${engines.join(', ')}`)
+// loadDriver resolves <engineId>.mjs across the overlay layers:
+//   project (.artel/drivers/) > user (~/.artel/drivers/) > platform.
+// Throws on unknown id (whitelist effect — only ids surfaced by
+// listDrivers() are loadable, defeating `--engine ../../foo`).
+let driver
+try {
+  ;({ module: driver } = await loadDriver(engineId))
+} catch (err) {
+  die(err.message)
 }
-
-const driver = await import(pathToFileURL(join(DRIVERS_DIR, `${engineId}.mjs`)).href)
 
 // Compose the role's tool surface from declared skills + raw `tools:`.
 // Skills (e.g. `git-write, file-edit`) expand from skills/<name>.md;

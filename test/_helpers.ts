@@ -184,6 +184,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/skills.mjs',
   'engine/util/contract.mjs',
   'engine/util/git.mjs',
+  'engine/util/drivers.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',
