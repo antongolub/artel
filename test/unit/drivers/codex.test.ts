@@ -32,6 +32,37 @@ describe('codex.args', () => {
     expect(out).not.toContain('o3')
   })
 
+  it("drops claude-namespace model 'opus' — codex CLI rejects unrecognised -m with API 400", () => {
+    const out = args({ model: 'opus' }, [])
+    expect(out).not.toContain('-m')
+    expect(out).not.toContain('opus')
+  })
+
+  it.each(['sonnet', 'haiku', 'claude-3-5-sonnet', 'claude-haiku-4'])(
+    "drops claude-namespace model '%s'",
+    (model) => {
+      const out = args({ model }, [])
+      expect(out).not.toContain('-m')
+      expect(out).not.toContain(model)
+    },
+  )
+
+  it("falls back to legacy codex-model when universal model is foreign-namespace", () => {
+    const out = args({ model: 'opus', 'codex-model': 'o3' }, [])
+    expect(out).toContain('-m')
+    expect(out).toContain('o3')
+    expect(out).not.toContain('opus')
+  })
+
+  it.each(['gpt-5', 'gpt-5.4', 'o3', 'o4-mini', 'chatgpt-4o'])(
+    "passes codex-namespace model '%s' through verbatim",
+    (model) => {
+      const out = args({ model }, [])
+      expect(out).toContain('-m')
+      expect(out).toContain(model)
+    },
+  )
+
   it('silently ignores tools (no allowlist in CLI)', () => {
     expect(args({ tools: 'Read,Edit' }, []).join(' ')).not.toContain('Read,Edit')
   })

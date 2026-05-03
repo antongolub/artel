@@ -1,7 +1,9 @@
 // Engine driver: Claude Code CLI (`claude -p`).
 //
 // Universal-term mapping (DESIGN.md §5):
-//   model           → --model
+//   model           → --model  (only when claude-namespace; foreign values
+//                     dropped per MIGRATION.md §1 "silently ignore" — see
+//                     below)
 //   tools           → --allowedTools
 //   permission-mode → --permission-mode (claude-native)
 //   sandbox         → derived --permission-mode (read-only=plan,
@@ -10,6 +12,12 @@
 //                     sandbox primitive. Explicit `permission-mode` wins
 //                     over derived.
 //   effort          → silent ignore (claude has no analog).
+//
+// Cross-namespace model values:
+//   Symmetric to the codex driver: a role declaring `model: gpt-5` (or any
+//   OpenAI / codex-namespace value) is meaningless to claude. Drop it and
+//   let claude pick the account default. Mapping foreign → claude is
+//   intentionally NOT implemented — gpt-5 and opus are not equivalents.
 //
 // parseUsage returns null in MVP — `claude -p` emits plain text by default
 // and `--output-format json` would change .out semantics. v2 work.
@@ -29,6 +37,10 @@ const SANDBOX_TO_PERMISSION_MODE = {
   'full-access': 'bypassPermissions',
 }
 
+// Detect codex-namespace model values that don't belong on a claude CLI.
+// Conservative: matches only well-known OpenAI families.
+const isCodexNamespaceModel = (m) => /^(gpt-|o\d|chatgpt-|codex-)/i.test(m || '')
+
 const projectsDir = () =>
   process.env.ARTEL_CLAUDE_PROJECTS_DIR || join(homedir(), '.claude/projects')
 
@@ -46,7 +58,9 @@ export function args (meta, promptParts, session = {}) {
     ?? (meta.sandbox ? SANDBOX_TO_PERMISSION_MODE[meta.sandbox] : null)
   if (permissionMode) out.push('--permission-mode', permissionMode)
 
-  if (meta.model) out.push('--model', meta.model)
+  if (meta.model && !isCodexNamespaceModel(meta.model)) {
+    out.push('--model', meta.model)
+  }
   if (promptParts.length) out.push(promptParts.join(' '))
   return out
 }

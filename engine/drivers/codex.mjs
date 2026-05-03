@@ -1,7 +1,8 @@
 // Engine driver: OpenAI Codex CLI (`codex exec`).
 //
 // Universal-term mapping (DESIGN.md §5):
-//   model           → -m
+//   model           → -m  (only when codex-namespace; foreign values dropped
+//                     per MIGRATION.md §1 "silently ignore" — see below)
 //   effort          → -c model_reasoning_effort=...
 //                     valid: none|minimal|low|medium|high|xhigh
 //   sandbox         → -c sandbox_permissions=...
@@ -10,6 +11,16 @@
 //                     full-access     → +full write + network
 //   tools           → silent ignore (codex CLI has no allowlist flag)
 //   permission-mode → silent ignore (codex CLI has no analog)
+//
+// Cross-namespace model values:
+//   ChatGPT-account-backed `codex` rejects ANY `-m <name>` it doesn't
+//   recognise with API 400. Generic role frontmatter `model: opus` is a
+//   claude-namespace value and meaningless to codex, so we drop it and let
+//   codex pick the account default. Same for sonnet / haiku / claude-*.
+//   Engine-specific override `codex-model:` (or CLI `--model`) is honoured
+//   verbatim — the user takes responsibility for a value the account may or
+//   may not support. Mapping foreign → codex (e.g. opus → gpt-5) is
+//   intentionally NOT implemented — opus and gpt-5 are not equivalents.
 //
 // Caveats:
 // - Body landing tier: role body is prepended to the user prompt with a
@@ -21,7 +32,7 @@
 // - No raw `-c` escape hatch is exposed — name knobs explicitly.
 //
 // Back-compat: legacy keys `codex-model` / `codex-effort` are still read,
-// canonical `model` / `effort` win when both present.
+// canonical `model` / `effort` win when both present and codex-namespace.
 
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -38,6 +49,13 @@ const SANDBOX_FLAGS = {
   'full-access': 'sandbox_permissions=["disk-full-read-access","disk-full-write-access","network-full-access"]',
 }
 
+// Detect claude-namespace model values that would crash codex with 400.
+// Conservative: matches only well-known claude families. Anything else
+// (including unknown new models) is treated as codex-targeted and passed
+// through — codex itself rejects unknown values, surfacing the typo to
+// the user rather than masking it.
+const isClaudeNamespaceModel = (m) => /^(opus|sonnet|haiku|claude-)/i.test(m || '')
+
 const sessionsDir = () =>
   process.env.ARTEL_CODEX_SESSIONS_DIR || join(homedir(), '.codex/sessions')
 
@@ -50,7 +68,13 @@ export function args (meta, promptParts, session = {}) {
     : sys || usr
 
   const out = session.resumeId ? ['exec', 'resume', session.resumeId] : ['exec']
-  const model = meta.model || meta['codex-model']
+  // Universal `model:` only forwarded when not a foreign (claude) namespace.
+  // Legacy `codex-model:` is by definition codex-targeted — used as fallback
+  // when universal value was dropped or absent.
+  const universalModel = meta.model && !isClaudeNamespaceModel(meta.model)
+    ? meta.model
+    : null
+  const model = universalModel || meta['codex-model'] || null
   if (model) out.push('-m', model)
   if (meta.sandbox && SANDBOX_FLAGS[meta.sandbox]) out.push('-c', SANDBOX_FLAGS[meta.sandbox])
   const effort = meta.effort || meta['codex-effort']

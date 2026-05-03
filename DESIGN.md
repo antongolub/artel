@@ -216,11 +216,25 @@ deprecated for one cycle, then dropped.
 | `tools` | `--allowedTools` | (n/a) | `--available-tools` |
 | `permission-mode` | `--permission-mode` | (n/a) | (n/a) |
 
-CLI flags on `run.mjs` / `spawn.mjs`: `--model`, `--effort`, `--sandbox`,
-`--tools`, `--permission-mode`. `--codex-effort` deprecated → `--effort`.
+CLI flags on `artel run` / `artel spawn`: `--model`, `--effort`,
+`--sandbox`, `--tools`, `--permission-mode`. `--codex-effort` deprecated
+→ `--effort`.
 
 Drivers without an analog for a key: silent ignore, document in driver
 header comment.
+
+**Cross-namespace `model` values.** Drivers also drop `model:` values
+that belong to a *foreign* engine namespace — same "silent ignore"
+rule, applied within the universal key. A role declaring `model: opus`
+is a hint about cognitive tier; the codex driver has no analog for the
+literal string `opus`, so it omits `-m` and lets codex pick its account
+default. Symmetric for the claude driver against codex-namespace values
+(`gpt-*`, `o\d`, `chatgpt-*`, `codex-*`). No alias mapping
+(`opus → gpt-5`) is performed — the model families aren't equivalents
+and forcing a translation is a worse default than the engine's own.
+Engine-specific `codex-model:` / `copilot-model:` overrides bypass the
+filter (legacy keys are by definition engine-targeted). Copilot proxies
+both Anthropic and OpenAI namespaces, so its driver applies no filter.
 
 ## 6. Tracing
 

@@ -54,6 +54,8 @@ implementations later requires no migration.
 | V7 | Infra reconcile pass + availability events | `[v2]` | `cluster.heartbeat` ships in C2; `role.*` / `engine.*` lifecycle events when needed. |
 | V8 | Replay tooling | `[v2]` | Debugging convenience; not blocker. |
 | V9 | Mid-run heartbeats from lifecycle | `[v2]` | Checkpoint API covers observability gap. |
+| V10 | **Dispatch deltas + git context in telemetry** | `[v2]` | `dispatch.end` (+ `.meta`) gains `delta: { files_changed, lines_added, lines_removed }` (from `git diff` over the dispatch window). When the project is a git repo: also `git: { commit_sha, branch, repo_name }` (commit_sha = HEAD at dispatch start; repo_name = derived from `origin` remote, falling back to project dir basename). Surfaced in `status.mjs` recent rows. No schema migration — additive on read. |
+| V11 | **Agent identity & truststore** | `[v2]` | Agents commit under their own identity, not the owner's. (a) Dedicated `name <email>` + signing key per agent / cluster; (b) SSH key separate from owner's for push; (c) truststore abstraction for agent credentials (tokens / OAuth / SSH / API keys) — mounted into the dispatch env on demand, not embedded in events. Lives outside `events.jsonl` (operational state, not history). Open: in-tree under `.artel/trust/` with strict file perms vs external secret manager (1Password / pass / OS keychain) integration. Drives §C10 follow-up: "only owner commits to master" is a current invariant; agent-identity commits don't relax that — the agent-branch protocol still funnels through owner review at the master boundary. |
 
 ## Open questions — defaults locked
 
@@ -77,6 +79,24 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — Bug fix: cross-namespace `model:` values crashed codex
+  dispatches with API 400 on ChatGPT-account auth (`opus` forwarded
+  verbatim to `-m`). Both codex and claude drivers now filter foreign
+  namespaces in `meta.model` per MIGRATION.md §1's "silent ignore"
+  contract — codex drops `opus|sonnet|haiku|claude-*`, claude drops
+  `gpt-*|o\d|chatgpt-*|codex-*`. Legacy `codex-model:` / `copilot-model:`
+  bypass the filter (engine-specific by definition). Copilot left
+  unchanged (proxies both namespaces). 102 tests green (20 new — 11
+  codex-namespace + 9 claude-namespace cases).
+- **2026-05-03** — Owner TODO captured: V10 (dispatch deltas + git context in
+  telemetry — `delta: { files_changed, lines_added, lines_removed }` +
+  `git: { commit_sha, branch, repo_name }` on `dispatch.end` / `.meta`)
+  and V11 (agent identity & truststore — dedicated git ident + SSH per
+  agent/cluster, plus a credential-vault abstraction for tokens / OAuth /
+  API keys).
+- **2026-05-03** — Published `@antongolub/artel@0.0.1` to npm. CLI shape
+  collapsed from five hyphenated bins to a single `artel <cmd>` dispatcher
+  (`engine/cli/artel.mjs`). 82 tests green (5 new for dispatcher routing).
 - **2026-05-03** — Architectural refactor sweep, post-MVP cleanup before
   public publish. Twelve themed blocks landed in one commit:
   1. README rewrite (research-frame) + LICENSE (MIT) + package.json

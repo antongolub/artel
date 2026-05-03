@@ -34,6 +34,24 @@ describe('claude.args', () => {
   it('silently ignores effort (no analog)', () => {
     expect(args({ effort: 'xhigh' }, []).join(' ')).not.toContain('xhigh')
   })
+
+  it.each(['gpt-5', 'gpt-5.4', 'o3', 'chatgpt-4o', 'codex-mini'])(
+    "drops codex-namespace model '%s'",
+    (model) => {
+      const out = args({ model }, [])
+      expect(out).not.toContain('--model')
+      expect(out).not.toContain(model)
+    },
+  )
+
+  it.each(['opus', 'sonnet', 'haiku', 'claude-3-5-sonnet'])(
+    "passes claude-namespace model '%s' through verbatim",
+    (model) => {
+      const out = args({ model }, [])
+      expect(out).toContain('--model')
+      expect(out).toContain(model)
+    },
+  )
 })
 
 describe('claude api_version', () => {
