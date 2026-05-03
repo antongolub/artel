@@ -38,8 +38,8 @@ to stderr. Migrate when convenient.
 **CLI flag rename:**
 
 ```diff
-- node $ARTEL_HOME/engine/spawn.mjs <role> <task> --codex-effort xhigh ...
-+ node $ARTEL_HOME/engine/spawn.mjs <role> <task> --effort xhigh ...
+- node $ARTEL_HOME/engine/cli/spawn.mjs <role> <task> --codex-effort xhigh ...
++ node $ARTEL_HOME/engine/cli/spawn.mjs <role> <task> --effort xhigh ...
 ```
 
 `--codex-effort` still works for one cycle (warns).
@@ -73,7 +73,7 @@ export function parseUsage (outPath, sessionId) { ... }  // optional
 ## 2. Cluster identity (C2)
 
 New file: **`.artel/cluster.json`**, auto-created on first dispatch by
-`engine/cluster.mjs#ensureClusterIdentity` or via `engine/init.mjs`:
+`engine/core/cluster.mjs#ensureClusterIdentity` or via `engine/cli/init.mjs`:
 
 ```json
 {
@@ -91,7 +91,7 @@ relies on independent ids per cluster.
 You can run the bootstrap explicitly:
 
 ```bash
-node $ARTEL_HOME/engine/init.mjs --name my-cluster
+node $ARTEL_HOME/engine/cli/init.mjs --name my-cluster
 ```
 
 Idempotent — re-running prints the existing identity without changes.
@@ -126,7 +126,7 @@ readable — `state_gen.mjs` and `status.mjs` tolerate their absence.
 - `control`: `control.*`
 
 If you emit custom events directly, ensure they fall under a reserved
-prefix or extend `engine/schema.mjs#RESERVED_TYPE_PREFIXES`.
+prefix or extend `engine/core/schema.mjs#RESERVED_TYPE_PREFIXES`.
 
 ## 4. Tracing (C3)
 
@@ -215,11 +215,11 @@ flag yet).
 
 ## 8. Sub-role checkpoint API (C7)
 
-New CLI: `engine/checkpoint.mjs`. Sub-roles call it between phases of
+New CLI: `engine/cli/checkpoint.mjs`. Sub-roles call it between phases of
 their work:
 
 ```bash
-node $ARTEL_HOME/engine/checkpoint.mjs \
+node $ARTEL_HOME/engine/cli/checkpoint.mjs \
   --completed "<what just finished>" \
   --next "<what comes next>" \
   [--artefact <path>] [--notes "..."]
@@ -232,7 +232,7 @@ automatically by `run.mjs`). Appends a `checkpoint` event.
 
 1. Tool surface (if not already covered by `Bash(node *)`):
    ```
-   tools: …, Bash(node *engine/checkpoint.mjs*)
+   tools: …, Bash(node *engine/cli/checkpoint.mjs*)
    ```
    `implementer` / `dispatcher` / `orchestrator` are already covered by
    `Bash(node *)`. `architect` adds the narrow entry. `cold-reader` /
@@ -268,11 +268,11 @@ If your project has custom roles that should not spawn anything, add
 
 ## 10. Status / state_gen surface (C9)
 
-`engine/status.mjs` `RECENT` panel now annotates each row with token
+`engine/cli/status.mjs` `RECENT` panel now annotates each row with token
 usage `[<in>/<out>t]` (when meta has usage) and retry indicator `r<N>`
 (when retry_count > 0).
 
-`engine/state_gen.mjs` frontmatter adds `cluster_id` + `cluster_name`
+`engine/cli/state_gen.mjs` frontmatter adds `cluster_id` + `cluster_name`
 read from `.artel/cluster.json`.
 
 **No consumer action.** Pass-through of new fields into existing

@@ -4,11 +4,11 @@ import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { readClusterIdentity } from './cluster.mjs'
+import { readClusterIdentity } from '../core/cluster.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-// Platform dir holds the engine itself; project paths are per-consumer.
-const platformDir = dirname(here)
+// `here` is engine/cli/, so platform root is two levels up.
+const platformDir = dirname(dirname(here))
 const projectDir = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const projectArtelDir = join(projectDir, '.artel')
 const repo = projectDir

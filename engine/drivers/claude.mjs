@@ -7,16 +7,17 @@
 //   sandbox         → derived --permission-mode (read-only=plan,
 //                     workspace-write=acceptEdits, full-access=
 //                     bypassPermissions). Best-effort: claude has no true
-//                     sandbox primitive, only permission gating. Explicit
-//                     `permission-mode` in role meta wins over derived.
+//                     sandbox primitive. Explicit `permission-mode` wins
+//                     over derived.
 //   effort          → silent ignore (claude has no analog).
 //
-// Native support for system-prompt injection (--append-system-prompt).
-//
-// parseUsage: returns null in MVP. Default `claude -p` mode emits plain
-// text; usage data only appears with `--output-format json` which would
-// change the .out semantics. Wiring that flag through is deferred to v2;
-// when wired, this function will read the JSON envelope at end of .out.
+// parseUsage returns null in MVP — `claude -p` emits plain text by default
+// and `--output-format json` would change .out semantics. v2 work.
+
+import { existsSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { readJsonl } from '../util/fs.mjs'
 
 export const id = 'claude'
 export const command = 'claude'
@@ -28,6 +29,12 @@ const SANDBOX_TO_PERMISSION_MODE = {
   'full-access': 'bypassPermissions',
 }
 
+const projectsDir = () =>
+  process.env.ARTEL_CLAUDE_PROJECTS_DIR || join(homedir(), '.claude/projects')
+
+// claude encodes `/Users/me/proj` → `-Users-me-proj`.
+const encodeProjectDir = (dir) => '-' + dir.replace(/^\//, '').replace(/\//g, '-')
+
 export function args (meta, promptParts, session = {}) {
   const out = ['-p']
   if (session.resumeId) out.push('--resume', session.resumeId)
@@ -35,7 +42,8 @@ export function args (meta, promptParts, session = {}) {
   if (meta.body && meta.body.trim()) out.push('--append-system-prompt', meta.body.trim())
   if (meta.tools) out.push('--allowedTools', meta.tools)
 
-  const permissionMode = meta['permission-mode'] || (meta.sandbox ? SANDBOX_TO_PERMISSION_MODE[meta.sandbox] : null)
+  const permissionMode = meta['permission-mode']
+    ?? (meta.sandbox ? SANDBOX_TO_PERMISSION_MODE[meta.sandbox] : null)
   if (permissionMode) out.push('--permission-mode', permissionMode)
 
   if (meta.model) out.push('--model', meta.model)
@@ -43,8 +51,37 @@ export function args (meta, promptParts, session = {}) {
   return out
 }
 
-// eslint-disable-next-line no-unused-vars
-export function parseUsage (_outPath, _sessionId) {
+export function parseUsage () {
   // TODO v2: parse `--output-format json` envelope when wired through.
   return null
+}
+
+// sessionTokens: walk this project's claude session jsonl files (one
+// per conversation), aggregate `assistant.message.usage` for events
+// newer than `sinceMs`.
+export function sessionTokens ({ projectDir, sinceMs = 0 } = {}) {
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
+  const perDay = {}
+  if (!projectDir) return { totals, perDay }
+
+  const dir = join(projectsDir(), encodeProjectDir(projectDir))
+  if (!existsSync(dir)) return { totals, perDay }
+
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.jsonl')) continue
+    for (const e of readJsonl(join(dir, f))) {
+      if (e.type !== 'assistant') continue
+      const ts = Date.parse(e.timestamp)
+      if (!ts || ts < sinceMs) continue
+      const u = e.message?.usage
+      if (!u) continue
+      totals.input += u.input_tokens || 0
+      totals.output += u.output_tokens || 0
+      totals.cacheRead += u.cache_read_input_tokens || 0
+      totals.cacheCreation += u.cache_creation_input_tokens || 0
+      const day = new Date(ts).toISOString().slice(0, 10)
+      perDay[day] = (perDay[day] || 0) + (u.output_tokens || 0)
+    }
+  }
+  return { totals, perDay }
 }

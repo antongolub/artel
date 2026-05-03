@@ -1,78 +1,87 @@
-# artel — agent platform
+# artel
 
-A reusable multi-agent coordination layer: role definitions + dispatch
-engine that consumer projects share across repos.
+> Multi-agent orchestration research. A thin coordination layer for
+> CLI-based agents. Exploratory; not for production.
 
-## Two-level model
+## The question
 
-The platform is split into a **shared platform** and a **per-project
-runtime**. They live in different places.
+Can multi-agent coordination be built from mostly Unix-like primitives
+— processes, files, append-only logs — and still get good ergonomics,
+low latency, and a programming model that maps cleanly onto how
+engineers already work with code?
 
-### Platform side (this repo)
+Concretely: every action is a real OS process. Every state change is
+one append to a file. Every history is replayable from a git log.
+Every agent is a CLI tool, regardless of language or vendor. Every
+cluster is federation-ready by default.
 
-- `AGENTS.md` — cast, role lanes, communication protocol (canon).
-- `CHALLENGE.md` — self-critique personas (Cold Reader, Adversary,
-  Maintainer).
-- `agents/<role>.md` — role definitions. Frontmatter declares
-  `tools` / `permission-mode` / `model` / `engine` / `persistent` /
-  `codex-effort`; body is the system prompt prepended on engines
-  without a native system slot (codex/copilot).
-- `engine/` — dispatcher CLI. `run.mjs` (role dispatcher), `spawn.mjs`
-  (high-level wrapper with branch precreate, meta lifecycle, timeout
-  watchdog), `dispatch_lifecycle.mjs` (encapsulated lifecycle),
-  `dispatch_api.mjs` (meta sidecar API), `parked.mjs` (failure-mode
-  detector), `state_gen.mjs` (state.md generator), `status.mjs`
-  (terminal dashboard), `drivers/{claude,codex,copilot}.mjs`.
-- `test/` — engine integration tests (vitest).
+artel is the experiment that probes that question.
 
-### Per-project runtime (consumer's `.artel/`)
+## What this is NOT
 
-Each consumer project keeps its own runtime under `.artel/`
-(typically gitignored — runtime mutates faster than the codebase):
+- **Workflow automation platform** (like [n8n](https://n8n.io)).
+  Visual node editors, service integrations, browser UIs, persistent
+  servers — different category. artel has none of those.
+- **In-process agent framework** (LangGraph, CrewAI, AutoGen). Single
+  runtime, in-memory actors — different design point. artel runs
+  each dispatch as a separate OS process and coordinates through
+  files and events.
+- **Production tooling.** Schema and APIs change. Federation,
+  repository abstraction, queue graph, pipelines — reserved in
+  schema, not implemented.
 
-- `.artel/QUEUE.md` — current backlog grouped by status.
-- `.artel/JOURNAL.md` — append-only log of significant events.
-- `.artel/state.md` — generated coordination snapshot.
-- `.artel/dispatcher_state.json` — dispatcher live state.
-- `.artel/events.jsonl` — append-only transactional log
-  (claim/release/checkpoint/parked/...).
-- `.artel/.dispatches/<task>.{prompt,out,meta}` — per-task artefacts
-  from `spawn.mjs`.
-- `.artel/.sessions/<role>.<engine>.id` — persistent-role session ids.
-- `.artel/research/`, `.artel/handoffs/` — long-form notes when
-  QUEUE entries aren't enough.
-- `.artel/AGENTS.md` *(optional augmentation)* — project-specific
-  cast detail (industries, prior art, domain context). The platform's
-  `AGENTS.md` is canon; the project's augmentation layers on top.
+## Design principles
 
-## How they bind
+- **Minimalism.** No framework, no DSL, no server, no build step.
+- **Speed.** File appends are fast. Time-prefixed UUID v7 events sort
+  without an index. Dispatch latency ≈ agent CLI startup.
+- **Audit-friendly.** Every action is an event in `events.jsonl`.
+  Git replays the full history.
+- **Polyglot.** Any CLI is a candidate driver. Three ship in-tree
+  (claude / codex / copilot); a new driver is ~50 lines.
 
-The engine self-locates platform paths via its own file location
-(`PLATFORM_DIR = dirname(import.meta.url)/..`). Project paths come
-from `process.env.ARTEL_PROJECT_DIR` (or `process.cwd()` if unset);
-the engine reads/writes `${PROJECT_DIR}/.artel/...` for runtime
-artefacts.
+## Architecture (sketch)
 
-Dispatch invocation pattern from a consumer project:
+Two layers — a **shared platform** (this repo) and a **per-project
+runtime** under `.artel/` (gitignored).
+
+- `agents/<role>.md` — markdown role definitions. Frontmatter
+  declares engine, model, sandbox, tool surface, dispatch policy.
+  Body is the system prompt.
+- `engine/` — dispatcher CLI. Reads a role, spawns the appropriate
+  CLI agent as an OS subprocess, watchdogs the timeout, captures
+  every boundary as a structured event.
+- `.artel/` — `events.jsonl` (append-only event stream), per-task
+  artefacts under `.dispatches/`, cluster identity, generated state.
+
+Full architecture in [`DESIGN.md`](./DESIGN.md). Status per phase in
+[`PLAN.md`](./PLAN.md). Consumer-side upgrade notes in
+[`MIGRATION.md`](./MIGRATION.md).
+
+## Try it
 
 ```bash
-# from <consumer-project>/
-node $ARTEL_HOME/engine/run.mjs --list
-node $ARTEL_HOME/engine/spawn.mjs <role> <task-slug> --engine codex -p "..."
-node $ARTEL_HOME/engine/status.mjs --watch
+npm install -g @antongolub/artel
+
+artel-init --name my-cluster
+artel-run --list
+artel-spawn implementer my-task --engine codex --effort high -p "ship the fixture"
+artel-status --watch
 ```
 
-`$ARTEL_HOME` points at this platform repo on disk (e.g.
-`~/projects/.../artel`). Set it once per shell or per consumer
-project.
+Or clone the repo to read / hack the platform itself:
 
-## Bootstrap a consumer project
+```bash
+git clone https://github.com/antongolub/artel.git
+ARTEL_HOME=$PWD/artel
+node $ARTEL_HOME/engine/cli/init.mjs --name my-cluster
+```
 
-(Out of scope for now — `artel init` helper is a follow-up. Manual
-bootstrap: `mkdir .artel` and create `QUEUE.md` / `JOURNAL.md` with
-the section headers from this repo's docs; add `.artel/` to the
-consumer's `.gitignore`.)
+## Status
 
-## Reading order on session start
+MVP. Single-cluster, single-host. Expect breakage, expect schema
+evolution.
 
-`AGENTS.md` is mandatory. Everything else is consulted as needed.
+## License
+
+[MIT](./LICENSE)

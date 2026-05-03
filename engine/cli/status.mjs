@@ -5,20 +5,22 @@
 // provider session jsonl files for token accounting; prints a single-screen
 // text summary with token usage charts.
 //
-//   node $ARTEL_HOME/engine/status.mjs              # one-shot snapshot
-//   node $ARTEL_HOME/engine/status.mjs --watch      # dashboard mode, refresh every 30s
-//   node $ARTEL_HOME/engine/status.mjs --watch 10   # refresh every 10s
+//   node $ARTEL_HOME/engine/cli/status.mjs              # one-shot snapshot
+//   node $ARTEL_HOME/engine/cli/status.mjs --watch      # dashboard mode, refresh every 30s
+//   node $ARTEL_HOME/engine/cli/status.mjs --watch 10   # refresh every 10s
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { join, basename } from 'node:path'
-import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
+import * as claudeDriver from '../drivers/claude.mjs'
+import * as codexDriver from '../drivers/codex.mjs'
+import * as copilotDriver from '../drivers/copilot.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-// Platform dir: agents/ + engine/ skeleton, reusable across projects.
-const PLATFORM_DIR = dirname(here)
+// `here` is engine/cli/, so platform root is two levels up.
+const PLATFORM_DIR = dirname(dirname(here))
 // Project paths: each consuming repo holds its own .artel/ runtime. Resolve
 // from cwd (or env override) — never from `here`, since one platform serves
 // many projects.
@@ -28,13 +30,6 @@ const PROJECT_NAME = basename(PROJECT_DIR)
 const STATE_PATH = join(PROJECT_ARTEL, 'state.md')
 const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
 const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
-const CLAUDE_PROJECT_DIR = join(
-  homedir(),
-  '.claude/projects',
-  '-' + PROJECT_DIR.replace(/^\//, '').replace(/\//g, '-'),
-)
-const CODEX_SESSIONS_DIR = join(homedir(), '.codex/sessions')
-const COPILOT_SESSION_DIR = join(homedir(), '.copilot/session-state')
 const DAYS = 7
 
 // --- formatting ---
@@ -119,36 +114,6 @@ const parseQueue = () => {
   flush()
   for (const k of SECTIONS) out[k] = out[k].filter((s) => !s.startsWith('(none)'))
   return out
-}
-
-// --- Claude tokens ---
-
-const getClaudeTokens = (days = DAYS) => {
-  const totals = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
-  const perDay = {}
-  const since = cutoff(days)
-  if (!existsSync(CLAUDE_PROJECT_DIR)) return { totals, perDay }
-  for (const f of readdirSync(CLAUDE_PROJECT_DIR)) {
-    if (!f.endsWith('.jsonl')) continue
-    const content = readFileSync(join(CLAUDE_PROJECT_DIR, f), 'utf8')
-    for (const line of content.split('\n')) {
-      if (!line) continue
-      let e
-      try { e = JSON.parse(line) } catch { continue }
-      if (e.type !== 'assistant') continue
-      const ts = Date.parse(e.timestamp)
-      if (!ts || ts < since) continue
-      const u = e.message?.usage
-      if (!u) continue
-      totals.input += u.input_tokens || 0
-      totals.output += u.output_tokens || 0
-      totals.cacheRead += u.cache_read_input_tokens || 0
-      totals.cacheCreation += u.cache_creation_input_tokens || 0
-      const day = dayKey(ts)
-      perDay[day] = (perDay[day] || 0) + (u.output_tokens || 0)
-    }
-  }
-  return { totals, perDay }
 }
 
 // --- Shared telemetry feed (provider-neutral) ---
@@ -450,119 +415,17 @@ const getRunning = () => {
   }
 }
 
-// --- Codex tokens (delta-based, cumulative source) ---
+// --- Token aggregates (delegated to drivers) ---
 
-const walkJsonl = (dir) => {
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const e of readdirSync(dir)) {
-    const p = join(dir, e)
-    const s = statSync(p)
-    if (s.isDirectory()) out.push(...walkJsonl(p))
-    else if (e.endsWith('.jsonl')) out.push(p)
-  }
-  return out
-}
-
-const getCodexTokens = (days = DAYS) => {
-  const totals = { input: 0, output: 0, cached: 0 }
-  const perDay = {}
-  const since = cutoff(days)
-  for (const path of walkJsonl(CODEX_SESSIONS_DIR)) {
-    if (statSync(path).mtimeMs < since) continue
-    const content = readFileSync(path, 'utf8')
-    let inProject = false
-    let prev = { input: 0, output: 0, cached: 0 }
-    for (const line of content.split('\n')) {
-      if (!line) continue
-      let e
-      try { e = JSON.parse(line) } catch { continue }
-      if (e.type === 'session_meta') {
-        const cwd = e.payload?.cwd || ''
-        inProject = cwd.includes(PROJECT_NAME)
-        if (!inProject) break
-        continue
-      }
-      if (!inProject) continue
-      if (e.type !== 'event_msg') continue
-      const p = e.payload
-      if (p?.type !== 'token_count') continue
-      const tot = p.info?.total_token_usage
-      if (!tot) continue
-      const ts = Date.parse(e.timestamp)
-      const di = (tot.input_tokens || 0) - prev.input
-      const dop = (tot.output_tokens || 0) - prev.output
-      const dc = (tot.cached_input_tokens || 0) - prev.cached
-      const reset = di < 0 || dop < 0
-      const ai = reset ? (tot.input_tokens || 0) : di
-      const ao = reset ? (tot.output_tokens || 0) : dop
-      const ac = reset ? (tot.cached_input_tokens || 0) : dc
-      totals.input += ai
-      totals.output += ao
-      totals.cached += ac
-      if (ts && ts >= since) {
-        const day = dayKey(ts)
-        perDay[day] = (perDay[day] || 0) + ao
-      }
-      prev = {
-        input: tot.input_tokens || 0,
-        output: tot.output_tokens || 0,
-        cached: tot.cached_input_tokens || 0,
-      }
-    }
-  }
-  return { totals, perDay }
-}
-
-// --- Copilot tokens (per-session shutdown events) ---
-
-const getCopilotTokens = (days = DAYS) => {
-  const totals = { input: 0, output: 0, cached: 0, reasoning: 0 }
-  const perDay = {}
-  const since = cutoff(days)
-  if (!existsSync(COPILOT_SESSION_DIR)) return { totals, perDay }
-  for (const sid of readdirSync(COPILOT_SESSION_DIR)) {
-    const dir = join(COPILOT_SESSION_DIR, sid)
-    let isDir = false
-    try { isDir = statSync(dir).isDirectory() } catch {}
-    if (!isDir) continue
-    const wsPath = join(dir, 'workspace.yaml')
-    const evPath = join(dir, 'events.jsonl')
-    if (!existsSync(wsPath) || !existsSync(evPath)) continue
-    if (statSync(evPath).mtimeMs < since) continue
-    let inProject = false
-    try {
-      const ws = readFileSync(wsPath, 'utf8')
-      const cwdMatch = ws.match(/^cwd:\s*(.+)$/m)
-      if (cwdMatch && cwdMatch[1].includes(PROJECT_NAME)) inProject = true
-    } catch {}
-    if (!inProject) continue
-    const content = readFileSync(evPath, 'utf8')
-    for (const line of content.split('\n')) {
-      if (!line) continue
-      let e
-      try { e = JSON.parse(line) } catch { continue }
-      if (e.type !== 'session.shutdown') continue
-      const m = e.data?.modelMetrics
-      if (!m) continue
-      const ts = Date.parse(e.timestamp)
-      let dayOut = 0
-      for (const model of Object.keys(m)) {
-        const u = m[model].usage || {}
-        totals.input += u.inputTokens || 0
-        totals.output += u.outputTokens || 0
-        totals.cached += u.cacheReadTokens || 0
-        totals.reasoning += u.reasoningTokens || 0
-        dayOut += u.outputTokens || 0
-      }
-      if (ts && ts >= since && dayOut > 0) {
-        const day = dayKey(ts)
-        perDay[day] = (perDay[day] || 0) + dayOut
-      }
-    }
-  }
-  return { totals, perDay }
-}
+// Each driver knows its own provider's session-store layout and event
+// shape. status only asks "give me totals + perDay for this project,
+// since N days back" and renders.
+const getClaudeTokens = (days = DAYS) =>
+  claudeDriver.sessionTokens({ projectDir: PROJECT_DIR, sinceMs: cutoff(days) })
+const getCodexTokens = (days = DAYS) =>
+  codexDriver.sessionTokens({ projectName: PROJECT_NAME, sinceMs: cutoff(days) })
+const getCopilotTokens = (days = DAYS) =>
+  copilotDriver.sessionTokens({ projectName: PROJECT_NAME, sinceMs: cutoff(days) })
 
 // --- render ---
 
@@ -738,9 +601,12 @@ const renderPerDay = (claude, codex, copilot) => {
 
 // --- main ---
 
-const args = process.argv.slice(2)
-const watchIdx = args.indexOf('--watch')
-const watchSec = watchIdx >= 0 ? Number(args[watchIdx + 1]) || 30 : 0
+const watchSec = (() => {
+  const a = process.argv.slice(2)
+  const i = a.indexOf('--watch')
+  if (i < 0) return 0
+  return Number(a[i + 1]) || 30
+})()
 
 // Take over the terminal: alt screen buffer + raw stdin (silently consume mouse/key
 // escapes the terminal injects, so they don't get echoed). Same approach as htop/top.

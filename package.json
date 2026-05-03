@@ -1,13 +1,57 @@
 {
   "name": "@antongolub/artel",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Reusable multi-agent coordination platform — role definitions + dispatch engine.",
+  "version": "0.1.0",
+  "description": "Multi-agent orchestration research — coordination layer for CLI agents.",
+  "license": "MIT",
+  "author": "Anton Golub <antongolub@antongolub.com>",
+  "homepage": "https://github.com/antongolub/artel#readme",
+  "bugs": {
+    "url": "https://github.com/antongolub/artel/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antongolub/artel.git"
+  },
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "agentic",
+    "research",
+    "claude",
+    "codex",
+    "copilot",
+    "cli",
+    "event-sourcing",
+    "uuid-v7"
+  ],
   "type": "module",
+  "bin": {
+    "artel-init": "engine/cli/init.mjs",
+    "artel-run": "engine/cli/run.mjs",
+    "artel-spawn": "engine/cli/spawn.mjs",
+    "artel-status": "engine/cli/status.mjs",
+    "artel-checkpoint": "engine/cli/checkpoint.mjs"
+  },
+  "files": [
+    "engine",
+    "agents",
+    "AGENTS.md",
+    "CHALLENGE.md",
+    "DESIGN.md",
+    "MIGRATION.md",
+    "PLAN.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm test && npm run typecheck"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

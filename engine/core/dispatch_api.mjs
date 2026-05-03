@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { SCHEMA_VERSION, uuidv7, validateEventType } from './schema.mjs'
+import { SCHEMA_VERSION, validateEventType } from './schema.mjs'
+import { uuidv7 } from '../util/ids.mjs'
 
 const nowIso = () => new Date().toISOString()
 

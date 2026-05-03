@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 // Engine modules are JS-only (.mjs) without .d.ts stubs yet. Cast through any
 // so the dispatchLifecycle invocation typechecks; once the platform agent ships
 // types, drop the cast.
-import { dispatchLifecycle as dispatchLifecycleRaw } from '../engine/dispatch_lifecycle.mjs'
+import { dispatchLifecycle as dispatchLifecycleRaw } from '../engine/core/dispatch_lifecycle.mjs'
 const dispatchLifecycle = dispatchLifecycleRaw as (
   options: Record<string, unknown>,
   hooks?: Record<string, unknown>,
@@ -22,14 +22,15 @@ const claudeDriver = claudeDriverRaw as { args: DriverArgs, api_version: number 
 const codexDriver = codexDriverRaw as { args: DriverArgs, api_version: number }
 const copilotDriver = copilotDriverRaw as { args: DriverArgs, api_version: number }
 
-import * as schemaRaw from '../engine/schema.mjs'
-import * as clusterRaw from '../engine/cluster.mjs'
-const { uuidv7, validateEventType, SCHEMA_VERSION, VALID_KINDS } = schemaRaw as {
-  uuidv7: () => string
+import * as schemaRaw from '../engine/core/schema.mjs'
+import * as clusterRaw from '../engine/core/cluster.mjs'
+import * as idsRaw from '../engine/util/ids.mjs'
+const { validateEventType, SCHEMA_VERSION, VALID_KINDS } = schemaRaw as {
   validateEventType: (kind: string, type: string) => void
   SCHEMA_VERSION: string
   VALID_KINDS: Set<string>
 }
+const { uuidv7 } = idsRaw as { uuidv7: () => string }
 const { ensureClusterIdentity, instanceId, _resetCachesForTests } = clusterRaw as {
   ensureClusterIdentity: (dir: string, opts?: { name?: string }) => Record<string, unknown>
   instanceId: () => string
@@ -270,13 +271,16 @@ describe('spawn CLI regressions', () => {
   it('keeps smoke-v3 and smoke-effort-flag alive through the lifecycle refactor', () => {
     const root = createTempRepo()
     installEngineRuntime(root, [
-      'engine/spawn.mjs',
-      'engine/run.mjs',
-      'engine/dispatch_api.mjs',
-      'engine/dispatch_lifecycle.mjs',
-      'engine/parked.mjs',
-      'engine/schema.mjs',
-      'engine/cluster.mjs',
+      'engine/cli/spawn.mjs',
+      'engine/cli/run.mjs',
+      'engine/core/dispatch_api.mjs',
+      'engine/core/dispatch_lifecycle.mjs',
+      'engine/core/parked.mjs',
+      'engine/core/schema.mjs',
+      'engine/core/cluster.mjs',
+      'engine/util/ids.mjs',
+      'engine/util/frontmatter.mjs',
+      'engine/util/fs.mjs',
       'engine/drivers/claude.mjs',
       'engine/drivers/codex.mjs',
       'agents/implementer.md',
@@ -295,13 +299,13 @@ describe('spawn CLI regressions', () => {
     )
 
     const env = { PATH: `${binDir}:${process.env.PATH || ''}` }
-    const smokeV3 = runNode(root, ['engine/spawn.mjs', 'implementer', 'smoke-v3', '--engine', 'claude', '-p', 'hello'], env)
+    const smokeV3 = runNode(root, ['engine/cli/spawn.mjs', 'implementer', 'smoke-v3', '--engine', 'claude', '-p', 'hello'], env)
     expect(smokeV3.status).toBe(0)
 
     const smokeEffort = runNode(
       root,
       [
-        'engine/spawn.mjs',
+        'engine/cli/spawn.mjs',
         'implementer',
         'smoke-effort-flag',
         '--engine',
@@ -330,7 +334,7 @@ describe('spawn CLI regressions', () => {
     // Canonical --effort flag — same path, no deprecation warning required.
     const smokeEffortCanonical = runNode(
       root,
-      ['engine/spawn.mjs', 'implementer', 'smoke-effort-canonical', '--engine', 'codex', '--effort', 'high', '-p', 'hello'],
+      ['engine/cli/spawn.mjs', 'implementer', 'smoke-effort-canonical', '--engine', 'codex', '--effort', 'high', '-p', 'hello'],
       env,
     )
     expect(smokeEffortCanonical.status).toBe(0)
@@ -465,7 +469,7 @@ describe('drivers — universal terms', () => {
 describe('status CLI render new fields (C9)', () => {
   it('renders usage tokens annotation in RECENT when meta has usage', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/status.mjs'])
+    installEngineRuntime(root, ['engine/cli/status.mjs', 'engine/drivers/claude.mjs', 'engine/drivers/codex.mjs', 'engine/drivers/copilot.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     writeFileSync(
@@ -482,7 +486,7 @@ describe('status CLI render new fields (C9)', () => {
     // Need .out file for getRecentDispatches to pick it up
     writeFileSync(join(root, '.artel', '.dispatches', 'used.out'), 'test output\n')
 
-    const status = runNode(root, ['engine/status.mjs'])
+    const status = runNode(root, ['engine/cli/status.mjs'])
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('used-task')
     // Token annotation: 2k input / 800 output → 2k/800t format
@@ -491,7 +495,7 @@ describe('status CLI render new fields (C9)', () => {
 
   it('renders retry indicator when retryCount > 0', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/status.mjs'])
+    installEngineRuntime(root, ['engine/cli/status.mjs', 'engine/drivers/claude.mjs', 'engine/drivers/codex.mjs', 'engine/drivers/copilot.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     writeFileSync(
@@ -507,7 +511,7 @@ describe('status CLI render new fields (C9)', () => {
     )
     writeFileSync(join(root, '.artel', '.dispatches', 'retried.out'), 'output\n')
 
-    const status = runNode(root, ['engine/status.mjs'])
+    const status = runNode(root, ['engine/cli/status.mjs'])
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('retried-task')
     expect(status.stdout).toMatch(/r2/)
@@ -517,7 +521,7 @@ describe('status CLI render new fields (C9)', () => {
 describe('state_gen cluster surface (C9)', () => {
   it('frontmatter contains cluster_id and cluster_name from .artel/cluster.json', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/state_gen.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/state_gen.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     writeFileSync(
       join(root, '.artel', 'cluster.json'),
       JSON.stringify({
@@ -528,7 +532,7 @@ describe('state_gen cluster surface (C9)', () => {
       }, null, 2) + '\n',
     )
 
-    const result = runNode(root, ['engine/state_gen.mjs'])
+    const result = runNode(root, ['engine/cli/state_gen.mjs'])
     expect(result.status).toBe(0)
     const stateMd = readFileSync(join(root, '.artel', 'state.md'), 'utf8')
     expect(stateMd).toContain('cluster_id: "01934f00-0000-7000-8000-aaaaaaaaaaaa"')
@@ -539,7 +543,7 @@ describe('state_gen cluster surface (C9)', () => {
 describe('status CLI', () => {
   it('renders timed-out dispatches above parked dispatches', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/status.mjs'])
+    installEngineRuntime(root, ['engine/cli/status.mjs', 'engine/drivers/claude.mjs', 'engine/drivers/codex.mjs', 'engine/drivers/copilot.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
     writeFileSync(
       join(root, '.artel', '.dispatches', 'timed.meta'),
@@ -573,7 +577,7 @@ describe('status CLI', () => {
       ) + '\n',
     )
 
-    const status = runNode(root, ['engine/status.mjs'])
+    const status = runNode(root, ['engine/cli/status.mjs'])
     expect(status.status).toBe(0)
     expect(status.stdout).toContain('TIMED-OUT')
     expect(status.stdout).toContain('timed-task')
@@ -679,16 +683,16 @@ describe('cluster identity (C2)', () => {
 describe('init.mjs CLI (C2)', () => {
   it('bootstraps .artel/cluster.json idempotently', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/init.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/init.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
 
-    const first = runNode(root, ['engine/init.mjs', '--name', 'test-cluster'])
+    const first = runNode(root, ['engine/cli/init.mjs', '--name', 'test-cluster'])
     expect(first.status).toBe(0)
     const firstCluster = JSON.parse(first.stdout)
     expect(firstCluster.name).toBe('test-cluster')
     expect(firstCluster.cluster_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
 
     // Second call returns existing identity unchanged.
-    const second = runNode(root, ['engine/init.mjs'])
+    const second = runNode(root, ['engine/cli/init.mjs'])
     expect(second.status).toBe(0)
     const secondCluster = JSON.parse(second.stdout)
     expect(secondCluster.cluster_id).toBe(firstCluster.cluster_id)
@@ -853,11 +857,11 @@ describe('role dispatch policies (C8)', () => {
 describe('checkpoint API (C7)', () => {
   it('appends a valid checkpoint event with all mandatory fields', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/checkpoint.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
 
     const result = runNode(
       root,
-      ['engine/checkpoint.mjs', '--completed', 'parsed feed', '--next', 'validate schema', '--artefact', 'src/feed.ts', '--notes', 'looking good'],
+      ['engine/cli/checkpoint.mjs', '--completed', 'parsed feed', '--next', 'validate schema', '--artefact', 'src/feed.ts', '--notes', 'looking good'],
       {
         ARTEL_TASK: 'demo-task',
         ARTEL_ROLE: 'implementer',
@@ -895,25 +899,25 @@ describe('checkpoint API (C7)', () => {
 
   it('rejects when --completed or --next is missing', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/checkpoint.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     const env = {
       ARTEL_TASK: 't',
       ARTEL_ROLE: 'implementer',
       ARTEL_DISPATCH_ID: '01934f00-0000-7000-8000-000000000aaa',
     }
-    const noCompleted = runNode(root, ['engine/checkpoint.mjs', '--next', 'foo'], env)
+    const noCompleted = runNode(root, ['engine/cli/checkpoint.mjs', '--next', 'foo'], env)
     expect(noCompleted.status).not.toBe(0)
     expect(noCompleted.stderr).toMatch(/required/)
 
-    const noNext = runNode(root, ['engine/checkpoint.mjs', '--completed', 'foo'], env)
+    const noNext = runNode(root, ['engine/cli/checkpoint.mjs', '--completed', 'foo'], env)
     expect(noNext.status).not.toBe(0)
   })
 
   it('rejects when ARTEL_DISPATCH_ID env missing', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/checkpoint.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     // Clear inherited ARTEL_DISPATCH_ID from this test process if any.
-    const result = runNode(root, ['engine/checkpoint.mjs', '--completed', 'a', '--next', 'b'], {
+    const result = runNode(root, ['engine/cli/checkpoint.mjs', '--completed', 'a', '--next', 'b'], {
       ARTEL_TASK: 't',
       ARTEL_ROLE: 'implementer',
       ARTEL_DISPATCH_ID: '',
@@ -924,10 +928,10 @@ describe('checkpoint API (C7)', () => {
 
   it('trace_id defaults to dispatch_id when not provided', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
+    installEngineRuntime(root, ['engine/cli/checkpoint.mjs', 'engine/core/cluster.mjs', 'engine/core/schema.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     const result = runNode(
       root,
-      ['engine/checkpoint.mjs', '--completed', 'a', '--next', 'b'],
+      ['engine/cli/checkpoint.mjs', '--completed', 'a', '--next', 'b'],
       {
         ARTEL_TASK: 't',
         ARTEL_ROLE: 'implementer',
@@ -1206,7 +1210,7 @@ describe('event rename (C4)', () => {
 
   it('status.mjs back-compat read of legacy claim/release events', () => {
     const root = createTempRepo()
-    installEngineRuntime(root, ['engine/status.mjs'])
+    installEngineRuntime(root, ['engine/cli/status.mjs', 'engine/drivers/claude.mjs', 'engine/drivers/codex.mjs', 'engine/drivers/copilot.mjs', 'engine/util/ids.mjs', 'engine/util/fs.mjs'])
     mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     // Write a legacy events.jsonl with old names — simulates events written
@@ -1222,7 +1226,7 @@ describe('event rename (C4)', () => {
       legacyEvents.map((e) => JSON.stringify(e)).join('\n') + '\n',
     )
 
-    const status = runNode(root, ['engine/status.mjs'])
+    const status = runNode(root, ['engine/cli/status.mjs'])
     expect(status.status).toBe(0)
     // Both legacy and canonical events should be summarised — claim/release
     // back-compat path uses the same word ("claimed"/"released").

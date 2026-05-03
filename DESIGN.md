@@ -268,10 +268,10 @@ side-effect. Top-level (dispatcher chat) → env empty → no policy check.
 
 ## 9. Sub-role self-reporting
 
-CLI shim `engine/checkpoint.mjs`. Sub-role calls between phases:
+CLI shim `engine/cli/checkpoint.mjs`. Sub-role calls between phases:
 
 ```bash
-node $ARTEL_HOME/engine/checkpoint.mjs \
+node $ARTEL_HOME/engine/cli/checkpoint.mjs \
   --completed "parsed registry feed" \
   --next "validate against schema" \
   [--artefact path] [--notes "..."]
@@ -282,7 +282,7 @@ Reads `ARTEL_TASK` / `ARTEL_ROLE` / `ARTEL_DISPATCH_ID` /
 `last_completed_step` / `next_safe_step` / `artefact` / `notes`.
 
 Tool surface: relevant role files add
-`Bash(node $ARTEL_HOME/engine/checkpoint.mjs *)`.
+`Bash(node $ARTEL_HOME/engine/cli/checkpoint.mjs *)`.
 
 Role briefs add a paragraph: "between phases call checkpoint — gives
 dispatcher real-time visibility without consuming your context".
@@ -361,7 +361,7 @@ State of run fully reconstructible from events.
 
 ### 12.1 Cluster identity
 
-`engine/init.mjs` generates `.artel/cluster.json` on first run:
+`engine/cli/init.mjs` generates `.artel/cluster.json` on first run:
 ```json
 {
   "cluster_id": "01934f...UUID-v7...",

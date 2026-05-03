@@ -35,7 +35,7 @@ territorial.
                             └────────────────────────┘
 ```
 
-**Read it as.** The owner talks only to the **Dispatcher** (this chat) — single interface. The Dispatcher handles routine — status, queue moves, direct sub-role dispatch — without touching the Orchestrator. The **Orchestrator** is a *persistent* Claude session (not respawned per task) and is escalated only for strategy / coordination / integration; it can also dispatch sub-roles when planning. **Sub-roles** are *one-shot* subprocesses per [`agents/<role>.md`](./agents/), plus Codex as an external CLI for implementation. The owner observes via [`engine/status.mjs --watch`](./engine/status.mjs) in parallel — that's where movements surface (queue, branches, tokens).
+**Read it as.** The owner talks only to the **Dispatcher** (this chat) — single interface. The Dispatcher handles routine — status, queue moves, direct sub-role dispatch — without touching the Orchestrator. The **Orchestrator** is a *persistent* Claude session (not respawned per task) and is escalated only for strategy / coordination / integration; it can also dispatch sub-roles when planning. **Sub-roles** are *one-shot* subprocesses per [`agents/<role>.md`](./agents/), plus Codex as an external CLI for implementation. The owner observes via [`engine/cli/status.mjs --watch`](./engine/cli/status.mjs) in parallel — that's where movements surface (queue, branches, tokens).
 
 ## Cast
 
@@ -89,10 +89,10 @@ The interactive Claude session is the **orchestrator**. Three ways to invoke a s
 
 - **In-thread switch** — recast for one beat, return. Cheapest; sanity-checks and quick critiques.
 - **Task tool** — spawn from inside the session via the `Agent` tool. The subagent has no project context unless the brief carries it. Use for parallelism, or when distance from authoring bias is the point.
-- **CLI dispatcher** — `node $ARTEL_HOME/engine/run.mjs <role> "..."` shells out a separate `claude -p` process with the role's pre-approved tool surface. Use when the permission scope is load-bearing (no per-action grant prompts), or when orchestrator context isn't useful.
-- **Spawn wrapper** — `node $ARTEL_HOME/engine/spawn.mjs <role> <task> ...` adds task sidecars / branch precreate around `run.mjs` and enforces a per-dispatch wall-clock timeout (default 30m, override via `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`; timed-out runs release with disposition `timeout`).
+- **CLI dispatcher** — `node $ARTEL_HOME/engine/cli/run.mjs <role> "..."` shells out a separate `claude -p` process with the role's pre-approved tool surface. Use when the permission scope is load-bearing (no per-action grant prompts), or when orchestrator context isn't useful.
+- **Spawn wrapper** — `node $ARTEL_HOME/engine/cli/spawn.mjs <role> <task> ...` adds task sidecars / branch precreate around `run.mjs` and enforces a per-dispatch wall-clock timeout (default 30m, override via `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`; timed-out runs release with disposition `timeout`).
 
-Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares `tools`, `permission-mode`, `model`; body is the system prompt. Adding a role = adding a file. List with `node $ARTEL_HOME/engine/run.mjs --list`.
+Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares `tools`, `permission-mode`, `model`; body is the system prompt. Adding a role = adding a file. List with `node $ARTEL_HOME/engine/cli/run.mjs --list`.
 
 The Cooperative principle still applies: don't bounce for the sake of bouncing. Dispatch when the other surface helps — finish in-session otherwise.
 

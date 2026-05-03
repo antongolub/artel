@@ -16,14 +16,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createDispatchApi } from './dispatch_api.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { detectParked } from './parked.mjs'
-import { uuidv7 } from './schema.mjs'
+import { uuidv7 } from '../util/ids.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-// Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md). It
-// is reusable across projects and lives alongside the engine sources — derive
-// it from `here` so the engine self-locates regardless of where the platform
-// was checked out.
-const DEFAULT_PLATFORM_DIR = join(here, '..')
+// Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
+// `here` is engine/core/, so platform root is two levels up.
+const DEFAULT_PLATFORM_DIR = join(here, '..', '..')
 // Project dir is per-project: each consuming repo holds its own `.artel/`
 // runtime (.dispatches/, .sessions/, events.jsonl, dispatcher_state.json,
 // state.md, JOURNAL/QUEUE). Resolve from cwd (or env override) — never from
@@ -89,7 +87,7 @@ const dispatchPathsOf = ({
     projectArtelDir,
     agentsDir: join(platformDir, 'agents'),
     driversDir: join(engineDir, 'drivers'),
-    runPath: join(engineDir, 'run.mjs'),
+    runPath: join(engineDir, 'cli', 'run.mjs'),
     dispatchesDir: join(projectArtelDir, '.dispatches'),
     sessionsDir: join(projectArtelDir, '.sessions'),
     eventsPath: join(projectArtelDir, 'events.jsonl'),
