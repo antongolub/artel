@@ -1,3 +1,8 @@
+## [0.2.0](https://github.com/antongolub/artel/compare/v0.1.0...v0.2.0) (2026-05-03)
+
+### Features
+* feat(telemetry): git context + dispatch deltas in events / meta ([c4664d3](https://github.com/antongolub/artel/commit/c4664d3b35986fcd23123672496843e5d1b53fcb))
+
 ## [0.1.0](https://github.com/antongolub/artel/compare/v0.0.3...v0.1.0) (2026-05-03)
 
 ### Features
