@@ -50,7 +50,7 @@ implementations later requires no migration.
 | V3 | Pipeline registry + engine | `[v2]` | Orchestrator does flow-routing in-LLM today. Formalisation post-MVP. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
-| V6 | Driver `api_version` + plug-in overlay loader | `[v2]` | Current 3 drivers in-tree suffice. |
+| V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
 | V7 | Infra reconcile pass + availability events | `[v2]` | `cluster.heartbeat` ships in C2; `role.*` / `engine.*` lifecycle events when needed. |
 | V8 | Replay tooling | `[v2]` | Debugging convenience; not blocker. |
 | V9 | Mid-run heartbeats from lifecycle | `[v2]` | Checkpoint API covers observability gap. |
@@ -79,6 +79,14 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — V6 landed: driver plugin overlay loader.
+  `engine/util/drivers.mjs` (resolveDriverPath / loadDriver / listDrivers
+  / discoverDrivers). Three-layer precedence: project `.artel/drivers/`
+  > user `~/.artel/drivers/` > platform. Contract validation (`args`
+  required); throw helpful error on missing exports or unknown engine.
+  `run.mjs`, `dispatch_lifecycle.mjs`, `probe.mjs` switched off
+  hardcoded driver lists. probe shows `(project)` / `(user)` overlay
+  markers. 143 tests green (12 new).
 - **2026-05-03** — V10 landed: dispatch deltas + git context in telemetry.
   `engine/util/git.mjs` (gitContext + gitDelta + repoNameFromRemote);
   `dispatch_lifecycle` captures `git` pre-spawn and `delta` post-exit;

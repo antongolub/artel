@@ -5,11 +5,7 @@
 // Exit code: 0 if every engine is fully ready, 1 if any has problems.
 
 import { parseArgs } from 'node:util'
-import * as claudeDriver from '../drivers/claude.mjs'
-import * as codexDriver from '../drivers/codex.mjs'
-import * as copilotDriver from '../drivers/copilot.mjs'
-
-const DRIVERS = [claudeDriver, codexDriver, copilotDriver]
+import { discoverDrivers } from '../util/drivers.mjs'
 
 const tty = process.stdout.isTTY
 const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
@@ -47,7 +43,24 @@ try {
 
 if (values.help) usage(0)
 
-const results = DRIVERS.map((d) => d.probe())
+// Discover all visible drivers (platform + overlays). Drivers without a
+// `probe()` export get a placeholder row — custom drivers without
+// readiness logic surface as 'unknown' rather than crashing the panel.
+const drivers = await discoverDrivers()
+const results = drivers.map(({ id, source, module }) => {
+  if (typeof module.probe !== 'function') {
+    return {
+      engine: id,
+      binary: module.command || '?',
+      installed: false,
+      version: null,
+      authState: 'unknown',
+      hint: `driver from ${source} does not implement probe()`,
+      source,
+    }
+  }
+  return { ...module.probe(), source }
+})
 const allOk = results.every((r) => r.authState === 'ok')
 
 if (values.json) {
@@ -66,8 +79,9 @@ const stateWord = (r) =>
 console.log(`\n${bold('artel probe')} ${dim('— engine readiness')}\n`)
 for (const r of results) {
   const ver = r.version ? r.version.padEnd(10) : dim('—'.padEnd(10))
+  const overlay = r.source && r.source !== 'platform' ? dim(` (${r.source})`) : ''
   const hint = r.hint ? `${dim('·')} ${dim(r.hint)}` : ''
-  console.log(`  ${mark(r.authState)} ${r.engine.padEnd(8)} ${ver} ${stateWord(r).padEnd(15)} ${hint}`)
+  console.log(`  ${mark(r.authState)} ${r.engine.padEnd(8)}${overlay} ${ver} ${stateWord(r).padEnd(15)} ${hint}`)
 }
 const ready = results.filter((r) => r.authState === 'ok').length
 console.log(`\n${dim(`${ready}/${results.length} engines ready`)}\n`)
