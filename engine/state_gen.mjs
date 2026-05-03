@@ -9,14 +9,14 @@ import { readClusterIdentity } from './cluster.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the engine itself; project paths are per-consumer.
 const platformDir = dirname(here)
-const projectDir = process.env.COLLAB_PROJECT_DIR || process.cwd()
-const projectCollabDir = join(projectDir, '.collab')
+const projectDir = process.env.ARTEL_PROJECT_DIR || process.cwd()
+const projectArtelDir = join(projectDir, '.artel')
 const repo = projectDir
-const queuePath = join(projectCollabDir, 'QUEUE.md')
-const dispatchDir = join(projectCollabDir, '.dispatches')
-const eventsPath = join(projectCollabDir, 'events.jsonl')
-const dispatcherStatePath = join(projectCollabDir, 'dispatcher_state.json')
-const outPath = join(projectCollabDir, 'state.md')
+const queuePath = join(projectArtelDir, 'QUEUE.md')
+const dispatchDir = join(projectArtelDir, '.dispatches')
+const eventsPath = join(projectArtelDir, 'events.jsonl')
+const dispatcherStatePath = join(projectArtelDir, 'dispatcher_state.json')
+const outPath = join(projectArtelDir, 'state.md')
 
 const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 
@@ -186,7 +186,7 @@ function yamlEscape(value) {
   return JSON.stringify(value)
 }
 
-// Lazy: a fresh consumer project may not have .collab/QUEUE.md yet.
+// Lazy: a fresh consumer project may not have .artel/QUEUE.md yet.
 // Treat absence as "no tasks" rather than failing — bootstrapping should
 // not require a populated queue before the first state_gen run.
 const queue = existsSync(queuePath)
@@ -197,7 +197,7 @@ const events = loadEvents()
 const dispatcherState = loadDispatcherState()
 const tasks = activeTasks(queue, metas, events)
 const now = new Date().toISOString()
-const cluster = readClusterIdentity(projectCollabDir)
+const cluster = readClusterIdentity(projectArtelDir)
 
 const frontmatter = [
   '---',
@@ -205,12 +205,12 @@ const frontmatter = [
   'status: active',
   'authoritative: true',
   'canonical_inputs:',
-  '  - .collab/QUEUE.md',
-  '  - .collab/.dispatches/*.meta',
-  '  - .collab/events.jsonl',
-  '  - .collab/dispatcher_state.json',
-  '  - .collab/cluster.json',
-  'generator: <COLLAB_HOME>/engine/state_gen.mjs',
+  '  - .artel/QUEUE.md',
+  '  - .artel/.dispatches/*.meta',
+  '  - .artel/events.jsonl',
+  '  - .artel/dispatcher_state.json',
+  '  - .artel/cluster.json',
+  'generator: <ARTEL_HOME>/engine/state_gen.mjs',
   `generated_at: ${yamlEscape(now)}`,
   `cluster_id: ${yamlEscape(cluster?.cluster_id || 'unknown')}`,
   `cluster_name: ${yamlEscape(cluster?.name || 'unknown')}`,
@@ -239,7 +239,7 @@ const frontmatter = [
 ].join('\n')
 
 const body = [
-  '> Generated snapshot of coordination state. Source-of-truth: .collab/QUEUE.md + .dispatches/*.meta + events.jsonl. Regenerate via `node $COLLAB_HOME/engine/state_gen.mjs`.',
+  '> Generated snapshot of coordination state. Source-of-truth: .artel/QUEUE.md + .dispatches/*.meta + events.jsonl. Regenerate via `node $ARTEL_HOME/engine/state_gen.mjs`.',
   '',
   '# State Draft v2',
   '',

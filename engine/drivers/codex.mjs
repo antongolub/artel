@@ -28,7 +28,7 @@
 // canonical `model` / `effort` win when both present. Deprecation warning is
 // emitted in run.mjs frontmatter normalisation.
 //
-// parseUsage: walks `~/.codex/sessions/` (override via COLLAB_CODEX_SESSIONS_DIR)
+// parseUsage: walks `~/.codex/sessions/` (override via ARTEL_CODEX_SESSIONS_DIR)
 // to find the rollout file matching `sessionId`, then reads the last
 // `token_count` event for cumulative usage. Cost is null — codex CLI does
 // not expose dollar amounts (provider zone per DESIGN.md §14).
@@ -72,7 +72,7 @@ export function args (meta, promptParts, session = {}) {
 }
 
 const codexSessionsDir = () =>
-  process.env.COLLAB_CODEX_SESSIONS_DIR || join(homedir(), '.codex/sessions')
+  process.env.ARTEL_CODEX_SESSIONS_DIR || join(homedir(), '.codex/sessions')
 
 const findSessionFile = (sessionId) => {
   if (!sessionId) return null

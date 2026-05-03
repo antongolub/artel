@@ -17,6 +17,6 @@ Read [AGENTS.md](../AGENTS.md) and the project's conventions document on first t
 
 Never `git commit`, `git push`, `git merge`. Master is owner-only — bring work onto master's working tree as uncommitted changes per AGENTS.md.
 
-**Checkpointing.** For multi-phase design work, call `node $COLLAB_HOME/engine/checkpoint.mjs --completed "<what>" --next "<what>"` between phases. Gives the dispatcher / orchestrator real-time visibility without consuming your context.
+**Checkpointing.** For multi-phase design work, call `node $ARTEL_HOME/engine/checkpoint.mjs --completed "<what>" --next "<what>"` between phases. Gives the dispatcher / orchestrator real-time visibility without consuming your context.
 
 Output: no preamble, no recap, no trailing summary. Diff over prose.

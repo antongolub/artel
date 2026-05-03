@@ -5,10 +5,10 @@
 // notes. See DESIGN.md §9.
 //
 // Required env (auto-set by run.mjs when launching a sub-role):
-//   COLLAB_TASK, COLLAB_ROLE, COLLAB_DISPATCH_ID, COLLAB_TRACE_ID
+//   ARTEL_TASK, ARTEL_ROLE, ARTEL_DISPATCH_ID, ARTEL_TRACE_ID
 //
 // Usage:
-//   node $COLLAB_HOME/engine/checkpoint.mjs \
+//   node $ARTEL_HOME/engine/checkpoint.mjs \
 //     --completed "parsed registry feed" \
 //     --next "validate against schema" \
 //     [--artefact path] [--notes "..."]
@@ -20,9 +20,9 @@ import { ensureClusterIdentity, instanceId } from './cluster.mjs'
 
 const usage = (code = 2) => {
   console.error(
-    'Usage: node $COLLAB_HOME/engine/checkpoint.mjs --completed <text> --next <text> [--artefact <path>] [--notes <text>]',
+    'Usage: node $ARTEL_HOME/engine/checkpoint.mjs --completed <text> --next <text> [--artefact <path>] [--notes <text>]',
   )
-  console.error('Reads task/role/dispatch_id/trace_id from COLLAB_* env (auto-set by run.mjs).')
+  console.error('Reads task/role/dispatch_id/trace_id from ARTEL_* env (auto-set by run.mjs).')
   process.exit(code)
 }
 
@@ -45,22 +45,22 @@ if (!completed || !next) {
   usage(2)
 }
 
-const task = process.env.COLLAB_TASK
-const role = process.env.COLLAB_ROLE
-const dispatchId = process.env.COLLAB_DISPATCH_ID
-const traceId = process.env.COLLAB_TRACE_ID || dispatchId
+const task = process.env.ARTEL_TASK
+const role = process.env.ARTEL_ROLE
+const dispatchId = process.env.ARTEL_DISPATCH_ID
+const traceId = process.env.ARTEL_TRACE_ID || dispatchId
 
 if (!task || !role || !dispatchId) {
-  console.error('checkpoint: required env vars missing (COLLAB_TASK / COLLAB_ROLE / COLLAB_DISPATCH_ID).')
+  console.error('checkpoint: required env vars missing (ARTEL_TASK / ARTEL_ROLE / ARTEL_DISPATCH_ID).')
   console.error('Are you running inside a dispatched sub-role? checkpoint.mjs is meant to be invoked from within a dispatch.')
   process.exit(2)
 }
 
-const PROJECT_DIR = process.env.COLLAB_PROJECT_DIR || process.cwd()
-const PROJECT_COLLAB = join(PROJECT_DIR, '.collab')
-const EVENTS_PATH = join(PROJECT_COLLAB, 'events.jsonl')
+const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
+const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
+const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
 
-const cluster = ensureClusterIdentity(PROJECT_COLLAB)
+const cluster = ensureClusterIdentity(PROJECT_ARTEL)
 
 const event = {
   schema: SCHEMA_VERSION,

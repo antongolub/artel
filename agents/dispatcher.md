@@ -65,11 +65,11 @@ A dispatch is never "lost" — its `.meta` sidecar records the failure mode, and
 
 If you are substituting for a previous dispatcher (Claude → Codex, Codex → Claude, etc.), bootstrap from these artefacts in order:
 
-1. `$COLLAB_HOME/AGENTS.md` — cast, lanes, protocol.
-2. Project `.collab/QUEUE.md` — current tasks (For Owner / In progress / Pending / Blocked / Recently done).
-3. Top of project `.collab/JOURNAL.md` — recent decisions and rationales.
-4. Project `.collab/.dispatches/*.meta` — currently-running and recently-completed dispatches with task slugs.
-5. Project `.collab/_codexwtf.md` (if present) — known structural gaps in handoff.
+1. `$ARTEL_HOME/AGENTS.md` — cast, lanes, protocol.
+2. Project `.artel/QUEUE.md` — current tasks (For Owner / In progress / Pending / Blocked / Recently done).
+3. Top of project `.artel/JOURNAL.md` — recent decisions and rationales.
+4. Project `.artel/.dispatches/*.meta` — currently-running and recently-completed dispatches with task slugs.
+5. Project `.artel/_codexwtf.md` (if present) — known structural gaps in handoff.
 6. **This file** — your role definition.
 
 If the owner hands you one link to a state artefact and expects immediate continuation, but the answer to "what should I do right now" requires reading more than the above six artefacts, **say so** rather than guess. Substitution must not silently drift.

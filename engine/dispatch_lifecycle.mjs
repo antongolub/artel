@@ -24,12 +24,12 @@ const here = dirname(fileURLToPath(import.meta.url))
 // it from `here` so the engine self-locates regardless of where the platform
 // was checked out.
 const DEFAULT_PLATFORM_DIR = join(here, '..')
-// Project dir is per-project: each consuming repo holds its own `.collab/`
+// Project dir is per-project: each consuming repo holds its own `.artel/`
 // runtime (.dispatches/, .sessions/, events.jsonl, dispatcher_state.json,
 // state.md, JOURNAL/QUEUE). Resolve from cwd (or env override) — never from
 // `here`, since a single platform serves many projects.
-const projectDirOf = () => process.env.COLLAB_PROJECT_DIR || process.cwd()
-const projectCollabDirOf = (projectDir = projectDirOf()) => join(projectDir, '.collab')
+const projectDirOf = () => process.env.ARTEL_PROJECT_DIR || process.cwd()
+const projectArtelDirOf = (projectDir = projectDirOf()) => join(projectDir, '.artel')
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
@@ -80,19 +80,19 @@ const frontmatterOf = (text) => {
 const dispatchPathsOf = ({
   platformDir = DEFAULT_PLATFORM_DIR,
   projectDir = projectDirOf(),
-  projectCollabDir = projectCollabDirOf(projectDir),
+  projectArtelDir = projectArtelDirOf(projectDir),
 } = {}) => {
   const engineDir = join(platformDir, 'engine')
   return {
     platformDir,
     projectDir,
-    projectCollabDir,
+    projectArtelDir,
     agentsDir: join(platformDir, 'agents'),
     driversDir: join(engineDir, 'drivers'),
     runPath: join(engineDir, 'run.mjs'),
-    dispatchesDir: join(projectCollabDir, '.dispatches'),
-    sessionsDir: join(projectCollabDir, '.sessions'),
-    eventsPath: join(projectCollabDir, 'events.jsonl'),
+    dispatchesDir: join(projectArtelDir, '.dispatches'),
+    sessionsDir: join(projectArtelDir, '.sessions'),
+    eventsPath: join(projectArtelDir, 'events.jsonl'),
   }
 }
 
@@ -161,7 +161,7 @@ const parseTimeoutMs = (raw, label) => {
 }
 
 const normalizeTimeoutMs = (timeoutMs) =>
-  parseTimeoutMs(timeoutMs ?? process.env.COLLAB_DISPATCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
+  parseTimeoutMs(timeoutMs ?? process.env.ARTEL_DISPATCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
 
 const signalExitCode = (signal) => {
   if (!signal) return null
@@ -280,7 +280,7 @@ export async function dispatchLifecycle(
     terminationGraceMs = TERMINATION_GRACE_MS,
     platformDir = DEFAULT_PLATFORM_DIR,
     projectDir = projectDirOf(),
-    projectCollabDir = projectCollabDirOf(projectDir),
+    projectArtelDir = projectArtelDirOf(projectDir),
   } = {},
   {
     spawnProcess = spawn,
@@ -294,13 +294,13 @@ export async function dispatchLifecycle(
 
   ensureCleanTaskSlug(task)
 
-  const paths = dispatchPathsOf({ platformDir, projectDir, projectCollabDir })
+  const paths = dispatchPathsOf({ platformDir, projectDir, projectArtelDir })
   const repoDir = projectDir
   const gitImpl = spawnGit || ((args) => spawnSync('git', args, { cwd: repoDir, encoding: 'utf8' }))
 
   // Role policy guard — DESIGN.md §8. Throws BEFORE any side-effects (no
   // branch creation, no file writes) so denied dispatches leave no trace.
-  checkDispatchPolicy(process.env.COLLAB_ROLE || null, role, paths.agentsDir)
+  checkDispatchPolicy(process.env.ARTEL_ROLE || null, role, paths.agentsDir)
 
   const roleMeta = readRoleMeta(role, paths.agentsDir)
   const engineId = engine || roleMeta.engine || 'claude'
@@ -328,19 +328,19 @@ export async function dispatchLifecycle(
 
   mkdirSync(paths.dispatchesDir, { recursive: true })
 
-  // Cluster identity bootstrap — idempotent. Auto-creates `.collab/cluster.json`
+  // Cluster identity bootstrap — idempotent. Auto-creates `.artel/cluster.json`
   // on first dispatch in a fresh consumer project. instance_id is per-process.
-  const clusterIdentity = ensureClusterIdentity(paths.projectCollabDir)
+  const clusterIdentity = ensureClusterIdentity(paths.projectArtelDir)
   const instanceIdValue = getInstanceId()
 
   // Tracing — DESIGN.md §6. Dispatch graph is reconstructible from
   // (dispatch_id, parent_dispatch_id, trace_id) tuples. Top-level dispatch
   // (no parent in env) defines the trace root. Nested dispatches inherit
   // trace_id from env and record the parent.
-  const parentDispatchId = process.env.COLLAB_DISPATCH_ID || null
-  const parentRole = process.env.COLLAB_ROLE || null
+  const parentDispatchId = process.env.ARTEL_DISPATCH_ID || null
+  const parentRole = process.env.ARTEL_ROLE || null
   const dispatchId = uuidv7()
-  const traceId = process.env.COLLAB_TRACE_ID || dispatchId
+  const traceId = process.env.ARTEL_TRACE_ID || dispatchId
 
   const promptPath = join(paths.dispatchesDir, `${task}.prompt`)
   const outPath = join(paths.dispatchesDir, `${task}.out`)
@@ -410,11 +410,11 @@ export async function dispatchLifecycle(
       stdio: ['ignore', outFd, outFd],
       env: {
         ...process.env,
-        COLLAB_TASK: task,
-        COLLAB_ROLE: role,
-        COLLAB_DISPATCH_ID: dispatchId,
-        COLLAB_TRACE_ID: traceId,
-        ...(taskAttrs ? { COLLAB_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
+        ARTEL_TASK: task,
+        ARTEL_ROLE: role,
+        ARTEL_DISPATCH_ID: dispatchId,
+        ARTEL_TRACE_ID: traceId,
+        ...(taskAttrs ? { ARTEL_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
       },
     })
   } finally {

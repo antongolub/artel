@@ -51,7 +51,7 @@ territorial.
 
 Project-specific domain context (industries the owner has worked in, prior
 art the owner has authored, etc.) belongs in the consumer project's own
-`.collab/AGENTS.md` augmentation or `.collab/PROJECT.md`, not here.
+`.artel/AGENTS.md` augmentation or `.artel/PROJECT.md`, not here.
 
 ### Claude
 
@@ -81,7 +81,7 @@ art the owner has authored, etc.) belongs in the consumer project's own
 On hold: no official CLI, third-party wrappers are unstable. When a
 durable invocation path exists, Perplexity takes the research lane
 back from Claude. Until then research notes in the project's
-`.collab/research/` are produced by Claude.
+`.artel/research/` are produced by Claude.
 
 ## Dispatching roles
 
@@ -89,10 +89,10 @@ The interactive Claude session is the **orchestrator**. Three ways to invoke a s
 
 - **In-thread switch** — recast for one beat, return. Cheapest; sanity-checks and quick critiques.
 - **Task tool** — spawn from inside the session via the `Agent` tool. The subagent has no project context unless the brief carries it. Use for parallelism, or when distance from authoring bias is the point.
-- **CLI dispatcher** — `node $COLLAB_HOME/engine/run.mjs <role> "..."` shells out a separate `claude -p` process with the role's pre-approved tool surface. Use when the permission scope is load-bearing (no per-action grant prompts), or when orchestrator context isn't useful.
-- **Spawn wrapper** — `node $COLLAB_HOME/engine/spawn.mjs <role> <task> ...` adds task sidecars / branch precreate around `run.mjs` and enforces a per-dispatch wall-clock timeout (default 30m, override via `--timeout-ms` or `COLLAB_DISPATCH_TIMEOUT_MS`; timed-out runs release with disposition `timeout`).
+- **CLI dispatcher** — `node $ARTEL_HOME/engine/run.mjs <role> "..."` shells out a separate `claude -p` process with the role's pre-approved tool surface. Use when the permission scope is load-bearing (no per-action grant prompts), or when orchestrator context isn't useful.
+- **Spawn wrapper** — `node $ARTEL_HOME/engine/spawn.mjs <role> <task> ...` adds task sidecars / branch precreate around `run.mjs` and enforces a per-dispatch wall-clock timeout (default 30m, override via `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`; timed-out runs release with disposition `timeout`).
 
-Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares `tools`, `permission-mode`, `model`; body is the system prompt. Adding a role = adding a file. List with `node $COLLAB_HOME/engine/run.mjs --list`.
+Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares `tools`, `permission-mode`, `model`; body is the system prompt. Adding a role = adding a file. List with `node $ARTEL_HOME/engine/run.mjs --list`.
 
 The Cooperative principle still applies: don't bounce for the sake of bouncing. Dispatch when the other surface helps — finish in-session otherwise.
 
@@ -114,7 +114,7 @@ The Cooperative principle still applies: don't bounce for the sake of bouncing. 
 - **Significant events** (decisions, failed attempts, surprises, scope
   shifts) append to [JOURNAL.md](./JOURNAL.md), newest at top.
 - **Spec / code changes** go through the project's normal homes (its
-  spec / source directories), never through `.collab/`. This directory
+  spec / source directories), never through `.artel/`. This directory
   holds *coordination*, not artefacts.
 - **Decisions that warrant ADRs** go in the project's ADR home (e.g.
   `spec/decisions/` or whatever convention the project uses). ADRs are

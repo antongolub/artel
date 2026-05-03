@@ -1,6 +1,6 @@
 # Migration notes — MVP (C1–C10)
 
-> Audience: consumer projects upgrading to the post-MVP collab engine.
+> Audience: consumer projects upgrading to the post-MVP artel engine.
 > Scope: changes that may need consumer-side action. Internal refactors
 > not requiring consumer changes are omitted.
 >
@@ -13,7 +13,7 @@
 |---|---|
 | Universal driver terms (`model` / `effort` / `sandbox` / `tools` / `permission-mode`) | Rename engine-specific frontmatter keys; back-compat for one cycle |
 | Event rename `claim`/`release` → `dispatch.start`/`dispatch.end` | Read-side accepts both for one cycle; update any direct consumers |
-| New `.collab/cluster.json` (auto-bootstrapped) | Add to `.gitignore` |
+| New `.artel/cluster.json` (auto-bootstrapped) | Add to `.gitignore` |
 | New env vars (auto-set) | None |
 | New role frontmatter keys (`dispatchable`/`non-dispatchable`) | Optional; default = `all` (back-compat) |
 | Sub-role `checkpoint.mjs` API | Optional; opt-in via tool surface + role-brief paragraph |
@@ -38,8 +38,8 @@ to stderr. Migrate when convenient.
 **CLI flag rename:**
 
 ```diff
-- node $COLLAB_HOME/engine/spawn.mjs <role> <task> --codex-effort xhigh ...
-+ node $COLLAB_HOME/engine/spawn.mjs <role> <task> --effort xhigh ...
+- node $ARTEL_HOME/engine/spawn.mjs <role> <task> --codex-effort xhigh ...
++ node $ARTEL_HOME/engine/spawn.mjs <role> <task> --effort xhigh ...
 ```
 
 `--codex-effort` still works for one cycle (warns).
@@ -72,7 +72,7 @@ export function parseUsage (outPath, sessionId) { ... }  // optional
 
 ## 2. Cluster identity (C2)
 
-New file: **`.collab/cluster.json`**, auto-created on first dispatch by
+New file: **`.artel/cluster.json`**, auto-created on first dispatch by
 `engine/cluster.mjs#ensureClusterIdentity` or via `engine/init.mjs`:
 
 ```json
@@ -84,21 +84,21 @@ New file: **`.collab/cluster.json`**, auto-created on first dispatch by
 }
 ```
 
-**Action: add `.collab/cluster.json` to your `.gitignore`.** Each
+**Action: add `.artel/cluster.json` to your `.gitignore`.** Each
 developer / install gets its own cluster_id. Federation (when v2 lands)
 relies on independent ids per cluster.
 
 You can run the bootstrap explicitly:
 
 ```bash
-node $COLLAB_HOME/engine/init.mjs --name my-cluster
+node $ARTEL_HOME/engine/init.mjs --name my-cluster
 ```
 
 Idempotent — re-running prints the existing identity without changes.
 
 ## 3. Event schema baseline (C2)
 
-Every event in `.collab/events.jsonl` now carries mandatory fields:
+Every event in `.artel/events.jsonl` now carries mandatory fields:
 
 ```
 schema: "v1"
@@ -141,11 +141,11 @@ parent_role          <string?>     parent role name, only when nested
 New env vars (set automatically by `dispatch_lifecycle` and propagated by
 `run.mjs` to the engine CLI subprocess):
 ```
-COLLAB_DISPATCH_ID
-COLLAB_TRACE_ID
+ARTEL_DISPATCH_ID
+ARTEL_TRACE_ID
 ```
 
-(plus existing `COLLAB_TASK`, `COLLAB_ROLE`, `COLLAB_TASK_ATTRS`.)
+(plus existing `ARTEL_TASK`, `ARTEL_ROLE`, `ARTEL_TASK_ATTRS`.)
 
 Top-level dispatch (Anton's chat → spawn.mjs) sees no parent in env.
 Nested dispatches (a sub-role's engine CLI shells out to spawn.mjs again)
@@ -185,7 +185,7 @@ export function parseUsage (outPath, sessionId) {
 **Implementations:**
 - `codex`: walks `~/.codex/sessions/`, finds rollout file by id, reads
   last `token_count` event. `cost_usd` is null (codex doesn't expose).
-  Override sessions dir via `COLLAB_CODEX_SESSIONS_DIR`.
+  Override sessions dir via `ARTEL_CODEX_SESSIONS_DIR`.
 - `claude`: returns null. Wiring `--output-format json` deferred to v2.
 - `copilot`: returns null. CLI has no per-dispatch surface.
 
@@ -219,13 +219,13 @@ New CLI: `engine/checkpoint.mjs`. Sub-roles call it between phases of
 their work:
 
 ```bash
-node $COLLAB_HOME/engine/checkpoint.mjs \
+node $ARTEL_HOME/engine/checkpoint.mjs \
   --completed "<what just finished>" \
   --next "<what comes next>" \
   [--artefact <path>] [--notes "..."]
 ```
 
-Reads task / role / dispatch_id / trace_id from `COLLAB_*` env (set
+Reads task / role / dispatch_id / trace_id from `ARTEL_*` env (set
 automatically by `run.mjs`). Appends a `checkpoint` event.
 
 **Action: add to relevant role files.**
@@ -250,7 +250,7 @@ dispatchable: all | none | <comma-list>     # allowlist; default 'all'
 non-dispatchable: <comma-list>               # denylist on top
 ```
 
-`dispatch_lifecycle` reads parent role from `COLLAB_ROLE` env, looks up
+`dispatch_lifecycle` reads parent role from `ARTEL_ROLE` env, looks up
 parent's frontmatter, and rejects nested dispatches that violate policy.
 Top-level dispatch (no env) skips check.
 
@@ -273,7 +273,7 @@ usage `[<in>/<out>t]` (when meta has usage) and retry indicator `r<N>`
 (when retry_count > 0).
 
 `engine/state_gen.mjs` frontmatter adds `cluster_id` + `cluster_name`
-read from `.collab/cluster.json`.
+read from `.artel/cluster.json`.
 
 **No consumer action.** Pass-through of new fields into existing
 artefacts.
@@ -299,7 +299,7 @@ Tracked in `PLAN.md` as `[v2]`:
 - Capability manifest + federation transports
 - Real claim/lease + fence_token enforcement
 - Driver `api_version` + plug-in overlay loader (`.local/drivers/`,
-  project `.collab/drivers/`)
+  project `.artel/drivers/`)
 - Infra reconcile pass + availability events
 - Replay tooling (`engine/replay.mjs`)
 - Mid-run heartbeats from lifecycle

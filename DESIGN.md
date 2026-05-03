@@ -1,4 +1,4 @@
-# Design — collab platform
+# Design — artel platform
 
 > Living document. Source of truth for architecture through the v1 reshape.
 > Update when decisions land; never delete history (use *Revision log* at end).
@@ -80,7 +80,7 @@ incompatible → refuse.
 | `http` | remote Repository over REST/gRPC | yes |
 
 Loader: `engine/repos/<name>.mjs`, parallel to `engine/drivers/`.
-Selection: env `COLLAB_REPO=postgres` or `.collab/cluster.json`.
+Selection: env `ARTEL_REPO=postgres` or `.artel/cluster.json`.
 
 **Markdown queue/journal — hybrid policy** (open question, leaning):
 - `fs` backend: markdown is primary storage (compatible with current
@@ -218,10 +218,10 @@ header comment.
 ## 6. Tracing
 
 ```
-COLLAB_DISPATCH_ID         UUID of this dispatch
-COLLAB_TRACE_ID            UUID of root chain
-COLLAB_PARENT_DISPATCH_ID  UUID of direct parent (null at top level)
-COLLAB_PARENT_ROLE         parent role (for policy check)
+ARTEL_DISPATCH_ID         UUID of this dispatch
+ARTEL_TRACE_ID            UUID of root chain
+ARTEL_PARENT_DISPATCH_ID  UUID of direct parent (null at top level)
+ARTEL_PARENT_ROLE         parent role (for policy check)
 ```
 
 Env propagated by `run.mjs` to child process. If child itself spawns
@@ -262,7 +262,7 @@ Defaults (platform-shipped, consumer-overridable):
 - `implementer`/`architect`/`cold-reader`/`adversary`/`maintainer`:
   dispatchable = (none) — leaf roles
 
-Enforcement: `spawn.mjs` / `run.mjs` read `COLLAB_PARENT_ROLE` from env;
+Enforcement: `spawn.mjs` / `run.mjs` read `ARTEL_PARENT_ROLE` from env;
 if set and parent's policy denies the requested role, throw before any
 side-effect. Top-level (dispatcher chat) → env empty → no policy check.
 
@@ -271,18 +271,18 @@ side-effect. Top-level (dispatcher chat) → env empty → no policy check.
 CLI shim `engine/checkpoint.mjs`. Sub-role calls between phases:
 
 ```bash
-node $COLLAB_HOME/engine/checkpoint.mjs \
+node $ARTEL_HOME/engine/checkpoint.mjs \
   --completed "parsed registry feed" \
   --next "validate against schema" \
   [--artefact path] [--notes "..."]
 ```
 
-Reads `COLLAB_TASK` / `COLLAB_ROLE` / `COLLAB_DISPATCH_ID` /
-`COLLAB_TRACE_ID` from env. Appends `checkpoint` event with
+Reads `ARTEL_TASK` / `ARTEL_ROLE` / `ARTEL_DISPATCH_ID` /
+`ARTEL_TRACE_ID` from env. Appends `checkpoint` event with
 `last_completed_step` / `next_safe_step` / `artefact` / `notes`.
 
 Tool surface: relevant role files add
-`Bash(node $COLLAB_HOME/engine/checkpoint.mjs *)`.
+`Bash(node $ARTEL_HOME/engine/checkpoint.mjs *)`.
 
 Role briefs add a paragraph: "between phases call checkpoint — gives
 dispatcher real-time visibility without consuming your context".
@@ -324,7 +324,7 @@ node.attrs         object
 
 ## 11. Pipelines
 
-Declarative flow definitions. Stored as `.collab/pipelines/<id>.yaml`.
+Declarative flow definitions. Stored as `.artel/pipelines/<id>.yaml`.
 Versioned. Lifecycle: `pipeline.registered/.updated/.deregistered`.
 
 **Node types:**
@@ -361,7 +361,7 @@ State of run fully reconstructible from events.
 
 ### 12.1 Cluster identity
 
-`engine/init.mjs` generates `.collab/cluster.json` on first run:
+`engine/init.mjs` generates `.artel/cluster.json` on first run:
 ```json
 {
   "cluster_id": "01934f...UUID-v7...",
@@ -408,7 +408,7 @@ Race on `claim.requested`:
 
 ### 12.5 Discovery
 
-V1: static `.collab/federation.json` listing peer clusters.
+V1: static `.artel/federation.json` listing peer clusters.
 V2 (deferred): gossip / DNS-style. Events:
 ```
 control.peer.registered    { peer_cluster_id, transport_endpoint, manifest_hash }

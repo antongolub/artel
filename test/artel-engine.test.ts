@@ -111,23 +111,23 @@ const stateFixture = () =>
   ].join('\n')
 
 const createTempRepo = () => {
-  const root = mkdtempSync(join(tmpdir(), 'collab-engine-test-'))
+  const root = mkdtempSync(join(tmpdir(), 'artel-engine-test-'))
   tempRoots.push(root)
   mkdirSync(join(root, 'agents'), { recursive: true })
   mkdirSync(join(root, 'engine', 'drivers'), { recursive: true })
-  mkdirSync(join(root, '.collab'), { recursive: true })
+  mkdirSync(join(root, '.artel'), { recursive: true })
   writeFileSync(
     join(root, 'package.json'),
-    JSON.stringify({ name: 'collab-engine-test-test', private: true, type: 'module' }, null, 2) + '\n',
+    JSON.stringify({ name: 'artel-engine-test-test', private: true, type: 'module' }, null, 2) + '\n',
   )
   writeFileSync(
     join(root, '.gitignore'),
     [
       'bin/',
-      '.collab/.dispatches/',
-      '.collab/.sessions/',
-      '.collab/events.jsonl',
-      '.collab/cluster.json',
+      '.artel/.dispatches/',
+      '.artel/.sessions/',
+      '.artel/events.jsonl',
+      '.artel/cluster.json',
     ].join('\n') + '\n',
   )
   writeFileSync(
@@ -139,10 +139,10 @@ const createTempRepo = () => {
     ['---', 'engine: claude', '---', 'adversary test role'].join('\n'),
   )
   writeFileSync(join(root, 'engine', 'drivers', 'claude.mjs'), 'export const id = "claude"\n')
-  writeFileSync(join(root, '.collab', 'QUEUE.md'), queueFixture())
-  writeFileSync(join(root, '.collab', 'state.md'), stateFixture())
+  writeFileSync(join(root, '.artel', 'QUEUE.md'), queueFixture())
+  writeFileSync(join(root, '.artel', 'state.md'), stateFixture())
   writeFileSync(
-    join(root, '.collab', 'dispatcher_state.json'),
+    join(root, '.artel', 'dispatcher_state.json'),
     JSON.stringify({ role: 'dispatcher', provider: 'claude', control_status: 'idle', session: 'test' }, null, 2) + '\n',
   )
   initRepo(root)
@@ -201,7 +201,7 @@ describe('dispatchLifecycle', () => {
         prompt: 'noop',
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
       }),
     ).rejects.toThrow(`branch ${branch} exists at ${branchCommit}`)
   })
@@ -230,7 +230,7 @@ describe('dispatchLifecycle', () => {
         terminationGraceMs: 30,
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
       },
       {
         spawnProcess: () => child as never,
@@ -244,7 +244,7 @@ describe('dispatchLifecycle', () => {
     expect(kills[0]!.at - startedAt).toBeGreaterThanOrEqual(15)
     expect(kills[1]!.at - kills[0]!.at).toBeGreaterThanOrEqual(25)
 
-    const meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'timeout-smoke.meta'), 'utf8'))
+    const meta = JSON.parse(readFileSync(join(root, '.artel', '.dispatches', 'timeout-smoke.meta'), 'utf8'))
     expect(meta.status).toBe('timed-out')
     expect(meta.disposition).toBe('timeout')
     expect(meta.exitCode).toBe(137)
@@ -252,7 +252,7 @@ describe('dispatchLifecycle', () => {
     expect(meta.timeout.graceMs).toBe(30)
     expect(meta.timeout.signal).toBe('SIGKILL')
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -315,7 +315,7 @@ describe('spawn CLI regressions', () => {
     )
     expect(smokeEffort.status).toBe(0)
 
-    const v3Meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'smoke-v3.meta'), 'utf8'))
+    const v3Meta = JSON.parse(readFileSync(join(root, '.artel', '.dispatches', 'smoke-v3.meta'), 'utf8'))
     expect(v3Meta).toMatchObject({
       task: 'smoke-v3',
       role: 'implementer',
@@ -324,7 +324,7 @@ describe('spawn CLI regressions', () => {
       disposition: 'success',
     })
 
-    const effortOut = readFileSync(join(root, '.collab', '.dispatches', 'smoke-effort-flag.out'), 'utf8')
+    const effortOut = readFileSync(join(root, '.artel', '.dispatches', 'smoke-effort-flag.out'), 'utf8')
     expect(effortOut).toContain('model_reasoning_effort=xhigh')
 
     // Canonical --effort flag — same path, no deprecation warning required.
@@ -334,7 +334,7 @@ describe('spawn CLI regressions', () => {
       env,
     )
     expect(smokeEffortCanonical.status).toBe(0)
-    const effortCanonicalOut = readFileSync(join(root, '.collab', '.dispatches', 'smoke-effort-canonical.out'), 'utf8')
+    const effortCanonicalOut = readFileSync(join(root, '.artel', '.dispatches', 'smoke-effort-canonical.out'), 'utf8')
     expect(effortCanonicalOut).toContain('model_reasoning_effort=high')
   })
 })
@@ -466,10 +466,10 @@ describe('status CLI render new fields (C9)', () => {
   it('renders usage tokens annotation in RECENT when meta has usage', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/status.mjs'])
-    mkdirSync(join(root, '.collab', '.dispatches'), { recursive: true })
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     writeFileSync(
-      join(root, '.collab', '.dispatches', 'used.meta'),
+      join(root, '.artel', '.dispatches', 'used.meta'),
       JSON.stringify({
         task: 'used-task',
         role: 'implementer',
@@ -480,7 +480,7 @@ describe('status CLI render new fields (C9)', () => {
       }, null, 2) + '\n',
     )
     // Need .out file for getRecentDispatches to pick it up
-    writeFileSync(join(root, '.collab', '.dispatches', 'used.out'), 'test output\n')
+    writeFileSync(join(root, '.artel', '.dispatches', 'used.out'), 'test output\n')
 
     const status = runNode(root, ['engine/status.mjs'])
     expect(status.status).toBe(0)
@@ -492,10 +492,10 @@ describe('status CLI render new fields (C9)', () => {
   it('renders retry indicator when retryCount > 0', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/status.mjs'])
-    mkdirSync(join(root, '.collab', '.dispatches'), { recursive: true })
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     writeFileSync(
-      join(root, '.collab', '.dispatches', 'retried.meta'),
+      join(root, '.artel', '.dispatches', 'retried.meta'),
       JSON.stringify({
         task: 'retried-task',
         role: 'implementer',
@@ -505,7 +505,7 @@ describe('status CLI render new fields (C9)', () => {
         retryCount: 2,
       }, null, 2) + '\n',
     )
-    writeFileSync(join(root, '.collab', '.dispatches', 'retried.out'), 'output\n')
+    writeFileSync(join(root, '.artel', '.dispatches', 'retried.out'), 'output\n')
 
     const status = runNode(root, ['engine/status.mjs'])
     expect(status.status).toBe(0)
@@ -515,11 +515,11 @@ describe('status CLI render new fields (C9)', () => {
 })
 
 describe('state_gen cluster surface (C9)', () => {
-  it('frontmatter contains cluster_id and cluster_name from .collab/cluster.json', () => {
+  it('frontmatter contains cluster_id and cluster_name from .artel/cluster.json', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/state_gen.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
     writeFileSync(
-      join(root, '.collab', 'cluster.json'),
+      join(root, '.artel', 'cluster.json'),
       JSON.stringify({
         cluster_id: '01934f00-0000-7000-8000-aaaaaaaaaaaa',
         name: 'test-cluster',
@@ -530,7 +530,7 @@ describe('state_gen cluster surface (C9)', () => {
 
     const result = runNode(root, ['engine/state_gen.mjs'])
     expect(result.status).toBe(0)
-    const stateMd = readFileSync(join(root, '.collab', 'state.md'), 'utf8')
+    const stateMd = readFileSync(join(root, '.artel', 'state.md'), 'utf8')
     expect(stateMd).toContain('cluster_id: "01934f00-0000-7000-8000-aaaaaaaaaaaa"')
     expect(stateMd).toContain('cluster_name: "test-cluster"')
   })
@@ -540,9 +540,9 @@ describe('status CLI', () => {
   it('renders timed-out dispatches above parked dispatches', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/status.mjs'])
-    mkdirSync(join(root, '.collab', '.dispatches'), { recursive: true })
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
     writeFileSync(
-      join(root, '.collab', '.dispatches', 'timed.meta'),
+      join(root, '.artel', '.dispatches', 'timed.meta'),
       JSON.stringify(
         {
           task: 'timed-task',
@@ -558,7 +558,7 @@ describe('status CLI', () => {
       ) + '\n',
     )
     writeFileSync(
-      join(root, '.collab', '.dispatches', 'parked.meta'),
+      join(root, '.artel', '.dispatches', 'parked.meta'),
       JSON.stringify(
         {
           task: 'parked-task',
@@ -650,24 +650,24 @@ describe('schema (C2)', () => {
 describe('cluster identity (C2)', () => {
   it('ensureClusterIdentity creates cluster.json on first call', () => {
     const root = createTempRepo()
-    const cluster = ensureClusterIdentity(join(root, '.collab'))
+    const cluster = ensureClusterIdentity(join(root, '.artel'))
     expect(cluster.cluster_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
     expect(cluster.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     expect(cluster.schema).toBe('cluster-v1')
-    expect(JSON.parse(readFileSync(join(root, '.collab', 'cluster.json'), 'utf8')).cluster_id).toBe(cluster.cluster_id)
+    expect(JSON.parse(readFileSync(join(root, '.artel', 'cluster.json'), 'utf8')).cluster_id).toBe(cluster.cluster_id)
   })
 
   it('ensureClusterIdentity is idempotent — same cluster_id on second call', () => {
     const root = createTempRepo()
-    const first = ensureClusterIdentity(join(root, '.collab'))
-    const second = ensureClusterIdentity(join(root, '.collab'))
+    const first = ensureClusterIdentity(join(root, '.artel'))
+    const second = ensureClusterIdentity(join(root, '.artel'))
     expect(second.cluster_id).toBe(first.cluster_id)
     expect(second.created_at).toBe(first.created_at)
   })
 
   it('ensureClusterIdentity uses --name override on first bootstrap', () => {
     const root = createTempRepo()
-    const cluster = ensureClusterIdentity(join(root, '.collab'), { name: 'my-cluster' })
+    const cluster = ensureClusterIdentity(join(root, '.artel'), { name: 'my-cluster' })
     expect(cluster.name).toBe('my-cluster')
   })
 
@@ -677,7 +677,7 @@ describe('cluster identity (C2)', () => {
 })
 
 describe('init.mjs CLI (C2)', () => {
-  it('bootstraps .collab/cluster.json idempotently', () => {
+  it('bootstraps .artel/cluster.json idempotently', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/init.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
 
@@ -711,12 +711,12 @@ describe('event schema enrichment (C2)', () => {
         prompt: 'noop',
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
       },
       { spawnProcess: () => child as never, log: () => {} },
     )
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -732,7 +732,7 @@ describe('event schema enrichment (C2)', () => {
     }
 
     // Cluster identity persisted to disk.
-    const cluster = JSON.parse(readFileSync(join(root, '.collab', 'cluster.json'), 'utf8'))
+    const cluster = JSON.parse(readFileSync(join(root, '.artel', 'cluster.json'), 'utf8'))
     expect(cluster.cluster_id).toBe(events[0].cluster_id)
   })
 })
@@ -759,8 +759,8 @@ describe('role dispatch policies (C8)', () => {
     setTimeout(() => child.emit('exit', 0, null), 5)
 
     const savedEnv = { ...process.env }
-    if (parentRole) process.env.COLLAB_ROLE = parentRole
-    else delete process.env.COLLAB_ROLE
+    if (parentRole) process.env.ARTEL_ROLE = parentRole
+    else delete process.env.ARTEL_ROLE
     try {
       return await dispatchLifecycle(
         {
@@ -769,7 +769,7 @@ describe('role dispatch policies (C8)', () => {
           prompt: 'noop',
           platformDir: root,
           projectDir: root,
-          projectCollabDir: join(root, '.collab'),
+          projectArtelDir: join(root, '.artel'),
         },
         { spawnProcess: () => child as never, log: () => {} },
       )
@@ -782,7 +782,7 @@ describe('role dispatch policies (C8)', () => {
   it('top-level dispatch (no parent role in env) skips policy check', async () => {
     const root = createTempRepo()
     // implementer.md created by fixture has no `dispatchable` (defaults to 'all').
-    // No COLLAB_ROLE in env → policy bypassed regardless.
+    // No ARTEL_ROLE in env → policy bypassed regardless.
     const result = await dispatchAs(root, null, 'implementer', 'top-level')
     expect(result.disposition).toBe('success')
   })
@@ -859,15 +859,15 @@ describe('checkpoint API (C7)', () => {
       root,
       ['engine/checkpoint.mjs', '--completed', 'parsed feed', '--next', 'validate schema', '--artefact', 'src/feed.ts', '--notes', 'looking good'],
       {
-        COLLAB_TASK: 'demo-task',
-        COLLAB_ROLE: 'implementer',
-        COLLAB_DISPATCH_ID: '01934f00-0000-7000-8000-000000000abc',
-        COLLAB_TRACE_ID: '01934f00-0000-7000-8000-000000000def',
+        ARTEL_TASK: 'demo-task',
+        ARTEL_ROLE: 'implementer',
+        ARTEL_DISPATCH_ID: '01934f00-0000-7000-8000-000000000abc',
+        ARTEL_TRACE_ID: '01934f00-0000-7000-8000-000000000def',
       },
     )
     expect(result.status).toBe(0)
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -897,9 +897,9 @@ describe('checkpoint API (C7)', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
     const env = {
-      COLLAB_TASK: 't',
-      COLLAB_ROLE: 'implementer',
-      COLLAB_DISPATCH_ID: '01934f00-0000-7000-8000-000000000aaa',
+      ARTEL_TASK: 't',
+      ARTEL_ROLE: 'implementer',
+      ARTEL_DISPATCH_ID: '01934f00-0000-7000-8000-000000000aaa',
     }
     const noCompleted = runNode(root, ['engine/checkpoint.mjs', '--next', 'foo'], env)
     expect(noCompleted.status).not.toBe(0)
@@ -909,17 +909,17 @@ describe('checkpoint API (C7)', () => {
     expect(noNext.status).not.toBe(0)
   })
 
-  it('rejects when COLLAB_DISPATCH_ID env missing', () => {
+  it('rejects when ARTEL_DISPATCH_ID env missing', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/checkpoint.mjs', 'engine/cluster.mjs', 'engine/schema.mjs'])
-    // Clear inherited COLLAB_DISPATCH_ID from this test process if any.
+    // Clear inherited ARTEL_DISPATCH_ID from this test process if any.
     const result = runNode(root, ['engine/checkpoint.mjs', '--completed', 'a', '--next', 'b'], {
-      COLLAB_TASK: 't',
-      COLLAB_ROLE: 'implementer',
-      COLLAB_DISPATCH_ID: '',
+      ARTEL_TASK: 't',
+      ARTEL_ROLE: 'implementer',
+      ARTEL_DISPATCH_ID: '',
     })
     expect(result.status).not.toBe(0)
-    expect(result.stderr).toMatch(/COLLAB_DISPATCH_ID/)
+    expect(result.stderr).toMatch(/ARTEL_DISPATCH_ID/)
   })
 
   it('trace_id defaults to dispatch_id when not provided', () => {
@@ -929,13 +929,13 @@ describe('checkpoint API (C7)', () => {
       root,
       ['engine/checkpoint.mjs', '--completed', 'a', '--next', 'b'],
       {
-        COLLAB_TASK: 't',
-        COLLAB_ROLE: 'implementer',
-        COLLAB_DISPATCH_ID: '01934f00-0000-7000-8000-000000000bbb',
+        ARTEL_TASK: 't',
+        ARTEL_ROLE: 'implementer',
+        ARTEL_DISPATCH_ID: '01934f00-0000-7000-8000-000000000bbb',
       },
     )
     expect(result.status).toBe(0)
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -960,12 +960,12 @@ describe('retry tracking (C6)', () => {
         prompt: 'noop',
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
         ...extra,
       },
       { spawnProcess: () => child as never, log: () => {} },
     )
-    return readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    return readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -1051,13 +1051,13 @@ describe('driver usage capture (C5)', () => {
     const root = createTempRepo()
     const sessionsDir = join(root, 'fake-codex-sessions')
     mkdirSync(sessionsDir, { recursive: true })
-    const savedEnv = process.env.COLLAB_CODEX_SESSIONS_DIR
-    process.env.COLLAB_CODEX_SESSIONS_DIR = sessionsDir
+    const savedEnv = process.env.ARTEL_CODEX_SESSIONS_DIR
+    process.env.ARTEL_CODEX_SESSIONS_DIR = sessionsDir
     try {
       expect(driver.parseUsage('/tmp/whatever', 'no-such-session')).toBeNull()
     } finally {
-      if (savedEnv) process.env.COLLAB_CODEX_SESSIONS_DIR = savedEnv
-      else delete process.env.COLLAB_CODEX_SESSIONS_DIR
+      if (savedEnv) process.env.ARTEL_CODEX_SESSIONS_DIR = savedEnv
+      else delete process.env.ARTEL_CODEX_SESSIONS_DIR
     }
   })
 
@@ -1098,8 +1098,8 @@ describe('driver usage capture (C5)', () => {
     ]
     writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
 
-    const savedEnv = process.env.COLLAB_CODEX_SESSIONS_DIR
-    process.env.COLLAB_CODEX_SESSIONS_DIR = join(root, 'fake-codex-sessions')
+    const savedEnv = process.env.ARTEL_CODEX_SESSIONS_DIR
+    process.env.ARTEL_CODEX_SESSIONS_DIR = join(root, 'fake-codex-sessions')
     try {
       const usage = driver.parseUsage('/tmp/unused', sessionId)
       expect(usage).not.toBeNull()
@@ -1109,8 +1109,8 @@ describe('driver usage capture (C5)', () => {
       expect(usage!.model).toBe('gpt-5')
       expect(usage!.cost_usd).toBeNull()
     } finally {
-      if (savedEnv) process.env.COLLAB_CODEX_SESSIONS_DIR = savedEnv
-      else delete process.env.COLLAB_CODEX_SESSIONS_DIR
+      if (savedEnv) process.env.ARTEL_CODEX_SESSIONS_DIR = savedEnv
+      else delete process.env.ARTEL_CODEX_SESSIONS_DIR
     }
   })
 
@@ -1142,12 +1142,12 @@ describe('driver usage capture (C5)', () => {
         prompt: 'noop',
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
       },
       { spawnProcess: () => child as never, log: () => {} },
     )
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -1161,7 +1161,7 @@ describe('driver usage capture (C5)', () => {
       cost_usd: null,
     })
 
-    const meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'usage-merge.meta'), 'utf8'))
+    const meta = JSON.parse(readFileSync(join(root, '.artel', '.dispatches', 'usage-merge.meta'), 'utf8'))
     expect(meta.usage).toEqual({
       tokens_in: 100,
       tokens_out: 50,
@@ -1188,12 +1188,12 @@ describe('event rename (C4)', () => {
         prompt: 'noop',
         platformDir: root,
         projectDir: root,
-        projectCollabDir: join(root, '.collab'),
+        projectArtelDir: join(root, '.artel'),
       },
       { spawnProcess: () => child as never, log: () => {} },
     )
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -1207,7 +1207,7 @@ describe('event rename (C4)', () => {
   it('status.mjs back-compat read of legacy claim/release events', () => {
     const root = createTempRepo()
     installEngineRuntime(root, ['engine/status.mjs'])
-    mkdirSync(join(root, '.collab', '.dispatches'), { recursive: true })
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
 
     // Write a legacy events.jsonl with old names — simulates events written
     // before the rename. Status CLI should still summarise them.
@@ -1218,7 +1218,7 @@ describe('event rename (C4)', () => {
       { schema: 'v1', kind: 'workload', type: 'dispatch.end', at: '2026-05-01T11:05:00.000Z', task: 'new-task', owner_role: 'implementer', disposition: 'success' },
     ]
     writeFileSync(
-      join(root, '.collab', 'events.jsonl'),
+      join(root, '.artel', 'events.jsonl'),
       legacyEvents.map((e) => JSON.stringify(e)).join('\n') + '\n',
     )
 
@@ -1248,7 +1248,7 @@ describe('tracing (C3)', () => {
           prompt: 'noop',
           platformDir: root,
           projectDir: root,
-          projectCollabDir: join(root, '.collab'),
+          projectArtelDir: join(root, '.artel'),
         },
         { spawnProcess: () => child as never, log: () => {} },
       )
@@ -1258,7 +1258,7 @@ describe('tracing (C3)', () => {
       Object.assign(process.env, savedEnv)
     }
 
-    return readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    return readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))
@@ -1284,9 +1284,9 @@ describe('tracing (C3)', () => {
     const parentDispatchId = '01934f00-0000-7000-8000-000000000001'
     const parentTraceId = '01934f00-0000-7000-8000-000000000000'
     const events = await runOneDispatch(root, 'nested-task', {
-      COLLAB_DISPATCH_ID: parentDispatchId,
-      COLLAB_TRACE_ID: parentTraceId,
-      COLLAB_ROLE: 'orchestrator',
+      ARTEL_DISPATCH_ID: parentDispatchId,
+      ARTEL_TRACE_ID: parentTraceId,
+      ARTEL_ROLE: 'orchestrator',
     })
 
     expect(events.length).toBeGreaterThan(0)
@@ -1303,12 +1303,12 @@ describe('tracing (C3)', () => {
   it('.meta sidecar carries dispatchId / traceId / parentDispatchId / parentRole', async () => {
     const root = createTempRepo()
     await runOneDispatch(root, 'meta-trace', {
-      COLLAB_DISPATCH_ID: '01934f00-0000-7000-8000-000000000099',
-      COLLAB_TRACE_ID: '01934f00-0000-7000-8000-000000000088',
-      COLLAB_ROLE: 'dispatcher',
+      ARTEL_DISPATCH_ID: '01934f00-0000-7000-8000-000000000099',
+      ARTEL_TRACE_ID: '01934f00-0000-7000-8000-000000000088',
+      ARTEL_ROLE: 'dispatcher',
     })
 
-    const meta = JSON.parse(readFileSync(join(root, '.collab', '.dispatches', 'meta-trace.meta'), 'utf8'))
+    const meta = JSON.parse(readFileSync(join(root, '.artel', '.dispatches', 'meta-trace.meta'), 'utf8'))
     expect(meta.dispatchId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
     expect(meta.traceId).toBe('01934f00-0000-7000-8000-000000000088')
     expect(meta.parentDispatchId).toBe('01934f00-0000-7000-8000-000000000099')
@@ -1320,7 +1320,7 @@ describe('tracing (C3)', () => {
     await runOneDispatch(root, 'first')
     await runOneDispatch(root, 'second')
 
-    const events = readFileSync(join(root, '.collab', 'events.jsonl'), 'utf8')
+    const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line))

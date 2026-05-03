@@ -1,4 +1,4 @@
-# collab — agent platform
+# artel — agent platform
 
 A reusable multi-agent coordination layer: role definitions + dispatch
 engine that consumer projects share across repos.
@@ -25,23 +25,23 @@ runtime**. They live in different places.
   (terminal dashboard), `drivers/{claude,codex,copilot}.mjs`.
 - `test/` — engine integration tests (vitest).
 
-### Per-project runtime (consumer's `.collab/`)
+### Per-project runtime (consumer's `.artel/`)
 
-Each consumer project keeps its own runtime under `.collab/`
+Each consumer project keeps its own runtime under `.artel/`
 (typically gitignored — runtime mutates faster than the codebase):
 
-- `.collab/QUEUE.md` — current backlog grouped by status.
-- `.collab/JOURNAL.md` — append-only log of significant events.
-- `.collab/state.md` — generated coordination snapshot.
-- `.collab/dispatcher_state.json` — dispatcher live state.
-- `.collab/events.jsonl` — append-only transactional log
+- `.artel/QUEUE.md` — current backlog grouped by status.
+- `.artel/JOURNAL.md` — append-only log of significant events.
+- `.artel/state.md` — generated coordination snapshot.
+- `.artel/dispatcher_state.json` — dispatcher live state.
+- `.artel/events.jsonl` — append-only transactional log
   (claim/release/checkpoint/parked/...).
-- `.collab/.dispatches/<task>.{prompt,out,meta}` — per-task artefacts
+- `.artel/.dispatches/<task>.{prompt,out,meta}` — per-task artefacts
   from `spawn.mjs`.
-- `.collab/.sessions/<role>.<engine>.id` — persistent-role session ids.
-- `.collab/research/`, `.collab/handoffs/` — long-form notes when
+- `.artel/.sessions/<role>.<engine>.id` — persistent-role session ids.
+- `.artel/research/`, `.artel/handoffs/` — long-form notes when
   QUEUE entries aren't enough.
-- `.collab/AGENTS.md` *(optional augmentation)* — project-specific
+- `.artel/AGENTS.md` *(optional augmentation)* — project-specific
   cast detail (industries, prior art, domain context). The platform's
   `AGENTS.md` is canon; the project's augmentation layers on top.
 
@@ -49,28 +49,28 @@ Each consumer project keeps its own runtime under `.collab/`
 
 The engine self-locates platform paths via its own file location
 (`PLATFORM_DIR = dirname(import.meta.url)/..`). Project paths come
-from `process.env.COLLAB_PROJECT_DIR` (or `process.cwd()` if unset);
-the engine reads/writes `${PROJECT_DIR}/.collab/...` for runtime
+from `process.env.ARTEL_PROJECT_DIR` (or `process.cwd()` if unset);
+the engine reads/writes `${PROJECT_DIR}/.artel/...` for runtime
 artefacts.
 
 Dispatch invocation pattern from a consumer project:
 
 ```bash
 # from <consumer-project>/
-node $COLLAB_HOME/engine/run.mjs --list
-node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> --engine codex -p "..."
-node $COLLAB_HOME/engine/status.mjs --watch
+node $ARTEL_HOME/engine/run.mjs --list
+node $ARTEL_HOME/engine/spawn.mjs <role> <task-slug> --engine codex -p "..."
+node $ARTEL_HOME/engine/status.mjs --watch
 ```
 
-`$COLLAB_HOME` points at this platform repo on disk (e.g.
-`~/projects/.../collab`). Set it once per shell or per consumer
+`$ARTEL_HOME` points at this platform repo on disk (e.g.
+`~/projects/.../artel`). Set it once per shell or per consumer
 project.
 
 ## Bootstrap a consumer project
 
-(Out of scope for now — `collab init` helper is a follow-up. Manual
-bootstrap: `mkdir .collab` and create `QUEUE.md` / `JOURNAL.md` with
-the section headers from this repo's docs; add `.collab/` to the
+(Out of scope for now — `artel init` helper is a follow-up. Manual
+bootstrap: `mkdir .artel` and create `QUEUE.md` / `JOURNAL.md` with
+the section headers from this repo's docs; add `.artel/` to the
 consumer's `.gitignore`.)
 
 ## Reading order on session start

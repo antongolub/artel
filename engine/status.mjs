@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// Status snapshot for the collab agent platform — see AGENTS.md.
-// Reads project-local runtime (.collab/QUEUE/state/events/journal/dispatcher_state),
+// Status snapshot for the artel agent platform — see AGENTS.md.
+// Reads project-local runtime (.artel/QUEUE/state/events/journal/dispatcher_state),
 // platform-wide role files (agents/<role>.md), open agent branches, and
 // provider session jsonl files for token accounting; prints a single-screen
 // text summary with token usage charts.
 //
-//   node $COLLAB_HOME/engine/status.mjs              # one-shot snapshot
-//   node $COLLAB_HOME/engine/status.mjs --watch      # dashboard mode, refresh every 30s
-//   node $COLLAB_HOME/engine/status.mjs --watch 10   # refresh every 10s
+//   node $ARTEL_HOME/engine/status.mjs              # one-shot snapshot
+//   node $ARTEL_HOME/engine/status.mjs --watch      # dashboard mode, refresh every 30s
+//   node $ARTEL_HOME/engine/status.mjs --watch 10   # refresh every 10s
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
@@ -19,15 +19,15 @@ import { dirname } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir: agents/ + engine/ skeleton, reusable across projects.
 const PLATFORM_DIR = dirname(here)
-// Project paths: each consuming repo holds its own .collab/ runtime. Resolve
+// Project paths: each consuming repo holds its own .artel/ runtime. Resolve
 // from cwd (or env override) — never from `here`, since one platform serves
 // many projects.
-const PROJECT_DIR = process.env.COLLAB_PROJECT_DIR || process.cwd()
-const PROJECT_COLLAB = join(PROJECT_DIR, '.collab')
+const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
+const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const PROJECT_NAME = basename(PROJECT_DIR)
-const STATE_PATH = join(PROJECT_COLLAB, 'state.md')
-const EVENTS_PATH = join(PROJECT_COLLAB, 'events.jsonl')
-const DISPATCHER_STATE_PATH = join(PROJECT_COLLAB, 'dispatcher_state.json')
+const STATE_PATH = join(PROJECT_ARTEL, 'state.md')
+const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
+const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
 const CLAUDE_PROJECT_DIR = join(
   homedir(),
   '.claude/projects',
@@ -91,7 +91,7 @@ const dayLabel = (iso) => {
 const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 
 const parseQueue = () => {
-  const text = readFileSync(join(PROJECT_COLLAB, 'QUEUE.md'), 'utf8')
+  const text = readFileSync(join(PROJECT_ARTEL, 'QUEUE.md'), 'utf8')
   const out = Object.fromEntries(SECTIONS.map((s) => [s, []]))
   let cur = null
   let item = null
@@ -263,7 +263,7 @@ const getDispatcherStatus = () => {
 const ROLES = ['orchestrator', 'architect', 'implementer', 'cold-reader', 'adversary', 'maintainer']
 
 const getRecentDispatches = (n = 5) => {
-  const dir = join(PROJECT_COLLAB, '.dispatches')
+  const dir = join(PROJECT_ARTEL, '.dispatches')
   if (!existsSync(dir)) return []
   return readdirSync(dir)
     .filter((f) => f.endsWith('.out'))
@@ -320,7 +320,7 @@ const getRecentDispatches = (n = 5) => {
 // --- Parked dispatches (recoverable tail markers) ---
 
 const getParked = () => {
-  const dir = join(PROJECT_COLLAB, '.dispatches')
+  const dir = join(PROJECT_ARTEL, '.dispatches')
   if (!existsSync(dir)) return []
   const out = []
   for (const f of readdirSync(dir)) {
@@ -336,7 +336,7 @@ const getParked = () => {
 }
 
 const getTimedOut = () => {
-  const dir = join(PROJECT_COLLAB, '.dispatches')
+  const dir = join(PROJECT_ARTEL, '.dispatches')
   if (!existsSync(dir)) return []
   const out = []
   for (const f of readdirSync(dir)) {
@@ -406,7 +406,7 @@ const roleEngineFromFile = (role) => {
 }
 
 const readMetaByPid = () => {
-  const dir = join(PROJECT_COLLAB, '.dispatches')
+  const dir = join(PROJECT_ARTEL, '.dispatches')
   if (!existsSync(dir)) return new Map()
   const m = new Map()
   for (const f of readdirSync(dir)) {
@@ -774,7 +774,7 @@ const render = () => {
   const copilot = getCopilotTokens()
   const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ')
   if (watchSec) process.stdout.write('\x1b[H\x1b[2J')
-  console.log(`${bold(`=== ${PROJECT_NAME} collab status ===`)}                       ${dim(stamp + ' UTC')}`)
+  console.log(`${bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${dim(stamp + ' UTC')}`)
   process.stdout.write(renderFeed(feed))
   process.stdout.write(renderRunning(dispatcher, running))
   process.stdout.write(renderRecent(recent))

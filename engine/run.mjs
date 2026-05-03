@@ -7,10 +7,10 @@
 // Universal terms (DESIGN.md §5): runner speaks model / effort / sandbox /
 // tools / permission-mode. Drivers translate to engine-native flags.
 //
-//   node $COLLAB_HOME/engine/run.mjs architect "review the design"
-//   node $COLLAB_HOME/engine/run.mjs --engine codex --effort xhigh implementer "ship the fixture"
-//   node $COLLAB_HOME/engine/run.mjs --task adr-…  --task-attrs '{"phase":"A"}' implementer "ship it"
-//   node $COLLAB_HOME/engine/run.mjs --list
+//   node $ARTEL_HOME/engine/run.mjs architect "review the design"
+//   node $ARTEL_HOME/engine/run.mjs --engine codex --effort xhigh implementer "ship the fixture"
+//   node $ARTEL_HOME/engine/run.mjs --task adr-…  --task-attrs '{"phase":"A"}' implementer "ship it"
+//   node $ARTEL_HOME/engine/run.mjs --list
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -73,8 +73,8 @@ const listEngines = () =>
 const usage = (code = 2) => {
   const roles = listRoles()
   const engines = listEngines()
-  console.error('Usage: node $COLLAB_HOME/engine/run.mjs [options] <role> [...prompt]')
-  console.error('       node $COLLAB_HOME/engine/run.mjs --list')
+  console.error('Usage: node $ARTEL_HOME/engine/run.mjs [options] <role> [...prompt]')
+  console.error('       node $ARTEL_HOME/engine/run.mjs --list')
   console.error('')
   console.error('Options:')
   console.error('  --engine <name>            override engine driver')
@@ -105,8 +105,8 @@ let effortOverride = null
 let sandboxOverride = null
 let toolsOverride = null
 let permissionModeOverride = null
-let task = process.env.COLLAB_TASK || null
-let taskAttrs = process.env.COLLAB_TASK_ATTRS ? parseJsonObject(process.env.COLLAB_TASK_ATTRS, 'COLLAB_TASK_ATTRS') : null
+let task = process.env.ARTEL_TASK || null
+let taskAttrs = process.env.ARTEL_TASK_ATTRS ? parseJsonObject(process.env.ARTEL_TASK_ATTRS, 'ARTEL_TASK_ATTRS') : null
 const filtered = []
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === '--engine' && argv[i + 1]) {
@@ -182,15 +182,15 @@ const cliArgs = driver.args(driverMeta, effectivePromptParts, { resumeId, sessio
 // (codex prints "Reading additional input from stdin..." and blocks otherwise)
 // don't hang waiting for input that isn't coming.
 //
-// COLLAB_DISPATCH_ID / COLLAB_TRACE_ID inherit from process.env (set by
+// ARTEL_DISPATCH_ID / ARTEL_TRACE_ID inherit from process.env (set by
 // dispatch_lifecycle when it spawned us). If the engine CLI itself shells
 // out to spawn.mjs (nested dispatch), the new dispatch reads these env
 // vars and treats this dispatch as parent. See DESIGN.md §6.
 const childEnv = {
   ...process.env,
-  COLLAB_ROLE: role,
-  ...(task ? { COLLAB_TASK: task } : {}),
-  ...(taskAttrs ? { COLLAB_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
+  ARTEL_ROLE: role,
+  ...(task ? { ARTEL_TASK: task } : {}),
+  ...(taskAttrs ? { ARTEL_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
 }
 const child = spawn(driver.command, cliArgs, { stdio: ['ignore', 'inherit', 'inherit'], env: childEnv })
 child.on('exit', (code) => process.exit(code ?? 1))

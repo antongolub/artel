@@ -18,7 +18,7 @@ import {
 
 const usage = (code = 2) => {
   console.error(
-    'Usage: node $COLLAB_HOME/engine/spawn.mjs <role> <task-slug> [options] (-p "prompt" | -f file | < stdin)',
+    'Usage: node $ARTEL_HOME/engine/spawn.mjs <role> <task-slug> [options] (-p "prompt" | -f file | < stdin)',
   )
   console.error('')
   console.error('Options:')
@@ -34,7 +34,7 @@ const usage = (code = 2) => {
   console.error('  --attrs-file <path>        merge JSON file into task attrs')
   console.error('  --attr key=value           set single task attr')
   console.error(
-    `default timeout: ${defaultDispatchTimeoutMs}ms (override with --timeout-ms or COLLAB_DISPATCH_TIMEOUT_MS)`,
+    `default timeout: ${defaultDispatchTimeoutMs}ms (override with --timeout-ms or ARTEL_DISPATCH_TIMEOUT_MS)`,
   )
   process.exit(code)
 }

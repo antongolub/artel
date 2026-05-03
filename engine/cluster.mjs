@@ -1,4 +1,4 @@
-// Cluster identity — bootstrap and read .collab/cluster.json.
+// Cluster identity — bootstrap and read .artel/cluster.json.
 // See DESIGN.md §12.1.
 //
 // `cluster_id` is stable across processes (committed to disk, optionally
@@ -16,10 +16,10 @@ const CLUSTER_FILE_NAME = 'cluster.json'
 let cachedClusterId = null
 let cachedInstanceId = null
 
-const clusterFilePath = (projectCollabDir) => join(projectCollabDir, CLUSTER_FILE_NAME)
+const clusterFilePath = (projectArtelDir) => join(projectArtelDir, CLUSTER_FILE_NAME)
 
-export function readClusterIdentity (projectCollabDir) {
-  const path = clusterFilePath(projectCollabDir)
+export function readClusterIdentity (projectArtelDir) {
+  const path = clusterFilePath(projectArtelDir)
   if (!existsSync(path)) return null
   try {
     return JSON.parse(readFileSync(path, 'utf8'))
@@ -28,27 +28,27 @@ export function readClusterIdentity (projectCollabDir) {
   }
 }
 
-export function ensureClusterIdentity (projectCollabDir, { name = null } = {}) {
-  const existing = readClusterIdentity(projectCollabDir)
+export function ensureClusterIdentity (projectArtelDir, { name = null } = {}) {
+  const existing = readClusterIdentity(projectArtelDir)
   if (existing && existing.cluster_id) {
     cachedClusterId = existing.cluster_id
     return existing
   }
-  mkdirSync(projectCollabDir, { recursive: true })
+  mkdirSync(projectArtelDir, { recursive: true })
   const cluster = {
     cluster_id: uuidv7(),
-    name: name || basename(projectCollabDir.replace(/\/?\.collab\/?$/, '')) || 'unnamed-cluster',
+    name: name || basename(projectArtelDir.replace(/\/?\.artel\/?$/, '')) || 'unnamed-cluster',
     created_at: new Date().toISOString(),
     schema: 'cluster-v1',
   }
-  writeFileSync(clusterFilePath(projectCollabDir), JSON.stringify(cluster, null, 2) + '\n')
+  writeFileSync(clusterFilePath(projectArtelDir), JSON.stringify(cluster, null, 2) + '\n')
   cachedClusterId = cluster.cluster_id
   return cluster
 }
 
-export function clusterIdOf (projectCollabDir) {
+export function clusterIdOf (projectArtelDir) {
   if (cachedClusterId) return cachedClusterId
-  const existing = readClusterIdentity(projectCollabDir)
+  const existing = readClusterIdentity(projectArtelDir)
   if (existing && existing.cluster_id) {
     cachedClusterId = existing.cluster_id
     return cachedClusterId
