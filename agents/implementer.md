@@ -5,6 +5,9 @@ tools: Read, Edit, Write, Glob, Grep, Bash(npm test*), Bash(npm run *), Bash(npm
 permission-mode: acceptEdits
 model: opus
 dispatchable: none
+schema: role-v1
+version: 1
+updated_at: 2026-05-03T00:00:00.000Z
 ---
 You are running as the **implementer** lane.
 

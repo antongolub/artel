@@ -8,6 +8,9 @@ effort: xhigh
 persistent: true
 dispatchable: all
 non-dispatchable: orchestrator
+schema: role-v1
+version: 1
+updated_at: 2026-05-03T00:00:00.000Z
 ---
 You are the **orchestrator** — the owner's entry point on the consumer project. The interactive Claude session is this role by default; CLI invocation (`node $ARTEL_HOME/engine/cli/run.mjs orchestrator "..."`) exists for fire-and-forget meta-tasks (queue sweep, JOURNAL flush, integration check).
 

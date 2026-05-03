@@ -248,9 +248,39 @@ meta. CLI surface: `spawn.mjs --retry-of <prev_dispatch_id>`.
 Threshold (`retry_count >= N`, default 3) → emit
 `signal.backoff_required` referencing the chain.
 
-## 8. Role policies (dispatch ACL)
+## 8. Role file format
 
-Frontmatter:
+Each `agents/<role>.md` is a markdown file with a YAML-ish frontmatter
+fence and a body. Body is the system prompt. Frontmatter declares:
+
+```yaml
+name: implementer                 # role identifier (matches filename)
+description: <one-line summary>
+schema: role-v1                   # frontmatter schema version (mandatory)
+version: 1                        # role content version, bumped on edit
+updated_at: 2026-05-03T00:00:00.000Z   # ISO-8601 UTC timestamp of last edit
+engine: claude                    # default driver; CLI override possible
+model: opus                       # universal — drivers translate
+effort: high                      # universal (codex-only) — drivers translate
+sandbox: workspace-write          # universal — drivers translate
+tools: Read, Edit, Bash(npm *)    # universal — drivers translate
+permission-mode: acceptEdits      # universal (claude-only) — drivers translate
+persistent: true                  # optional — keep session across dispatches
+dispatchable: all                 # ACL allowlist (see §8.1)
+non-dispatchable: orchestrator    # ACL denylist (see §8.1)
+```
+
+`schema` / `version` / `updated_at` are **mandatory in v1**. Tooling
+uses them to detect drift between platform and project overlays, surface
+stale roles in dashboards, and gate v2 features on schema migrations.
+Bump `version` on any meaningful body or frontmatter edit; refresh
+`updated_at` with a full ISO-8601 UTC timestamp (`new Date().toISOString()`).
+
+Drivers / runners read these fields opportunistically — unknown
+frontmatter keys are ignored, so adding project-specific keys is safe.
+
+### 8.1 Role policies (dispatch ACL)
+
 ```yaml
 dispatchable: all                  # or comma-list of role names; missing = none
 non-dispatchable: orchestrator     # denylist on top of `dispatchable`

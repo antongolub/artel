@@ -18,6 +18,7 @@
 | New role frontmatter keys (`dispatchable`/`non-dispatchable`) | Optional; default = `all` (back-compat) |
 | Sub-role `checkpoint.mjs` API | Optional; opt-in via tool surface + role-brief paragraph |
 | Event schema enrichment (mandatory fields) | None — additive on read |
+| Role frontmatter metadata (`schema` / `version` / `updated_at`) | Add to each consumer role file (see §12) |
 
 ## 1. Universal driver terms (C1)
 
@@ -288,6 +289,26 @@ The platform ships:
 Consumer projects typically maintain their own test infra. The
 `engine/test/` directory inside the platform is platform-internal and
 should not be vendored into consumer repos.
+
+## 12. Role frontmatter metadata
+
+Each `agents/<role>.md` now declares schema + version + last-updated date
+in its frontmatter:
+
+```yaml
+schema: role-v1                          # frontmatter schema version
+version: 1                               # role content version, bumped on edit
+updated_at: 2026-05-03T00:00:00.000Z     # ISO-8601 UTC timestamp of last edit
+```
+
+**Action: add these three fields to each consumer role file**, then
+bump `version` and refresh `updated_at` whenever you edit the body or
+frontmatter.
+
+Tooling uses these fields to detect drift between platform-shipped and
+consumer-overlayed roles, surface stale roles in dashboards, and gate
+v2 schema migrations. Unknown frontmatter keys remain ignored, so
+adding the trio is non-breaking.
 
 ## Open follow-ups (post-MVP)
 
