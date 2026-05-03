@@ -96,8 +96,18 @@ const dayLabel = (iso) => {
 const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 
 const parseQueue = () => {
-  const text = readFileSync(join(PROJECT_ARTEL, 'QUEUE.md'), 'utf8')
   const out = Object.fromEntries(SECTIONS.map((s) => [s, []]))
+  const path = join(PROJECT_ARTEL, 'QUEUE.md')
+  // Empty fallback when QUEUE.md doesn't exist yet — happens after `artel
+  // init` and before the user populates the queue, or when running
+  // `artel status` from a directory without artel runtime. Status should
+  // still render a meaningful skeleton in those cases. The `_missing`
+  // flag lets renderQueue surface a hint instead of a misleading "0".
+  if (!existsSync(path)) {
+    Object.defineProperty(out, '_missing', { value: true })
+    return out
+  }
+  const text = readFileSync(path, 'utf8')
   let cur = null
   let item = null
   const flush = () => {
@@ -517,6 +527,21 @@ const renderFeed = (items) => {
 
 const renderRunning = (dispatcher, procs) => {
   let out = `\n${bold('RUNNING')} ${dim('(background subprocesses)')}\n`
+  // Empty-state: dispatcher_state.json missing → show a friendly hint
+  // instead of a row full of "null"/"unknown".
+  if (!dispatcher.role) {
+    if (procs.length) {
+      for (const p of procs) {
+        const role = cyan(p.role.padEnd(13))
+        const exec = `${p.engine} ${p.version}`
+        const task = p.task ? truncate(p.task, 28) : dim('—')
+        out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}\n`
+      }
+    } else {
+      out += `  ${dim('(no dispatcher_state.json — no active dispatcher session)')}\n`
+    }
+    return out
+  }
   const status = dispatcher.controlStatus === 'active' ? yellow(dispatcher.controlStatus) : dim(dispatcher.controlStatus)
   const last = dispatcher.lastActionAt ? relativeTime(dispatcher.lastActionAt) : '?'
   const orch = `${dispatcher.orchestratorEngine}/${dispatcher.orchestratorSessionId ? truncate(dispatcher.orchestratorSessionId, 12) : 'unknown'}`
@@ -605,6 +630,9 @@ const renderTimedOut = (items) => {
 const renderQueue = (q) => {
   const cols = process.stdout.columns || 120
   const trunc = Math.min(120, cols - 4)
+  if (q._missing) {
+    return `\n${bold('QUEUE')} ${dim('(no .artel/QUEUE.md — create one to start tracking work)')}\n`
+  }
   const counts = SECTIONS.map((s) => {
     const n = q[s].length
     const v = `${s}: ${n}`

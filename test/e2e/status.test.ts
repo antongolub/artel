@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cleanupTempRoots, createTempRepo, ENGINE_FILES_CORE, ENGINE_FILES_DRIVERS, ENGINE_FILES_UTIL, installEngineRuntime, runNode } from '../_helpers.js'
 
@@ -190,6 +190,30 @@ describe('artel status: dashboard context', () => {
     expect(status.status).toBe(0)
     // Copilot row should be flagged with ⚠ marker.
     expect(status.stdout).toMatch(/⚠\s+Copilot/)
+  })
+})
+
+describe('artel status: empty-state robustness', () => {
+  it('renders skeleton without crashing when QUEUE.md is missing', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    // createTempRepo writes a default QUEUE.md fixture — remove it to
+    // simulate a freshly-initialised project that hasn't been populated.
+    const queuePath = join(root, '.artel', 'QUEUE.md')
+    rmSync(queuePath, { force: true })
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/QUEUE\s+\(no \.artel\/QUEUE\.md/)
+    expect(r.stdout).not.toContain('In progress: 0')
+  })
+
+  it('renders skeleton without crashing when dispatcher_state.json is missing', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    rmSync(join(root, '.artel', 'dispatcher_state.json'), { force: true })
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/no dispatcher_state\.json/)
   })
 })
 

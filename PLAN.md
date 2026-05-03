@@ -79,6 +79,12 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — `artel status` empty-state robustness. Was crashing
+  with `ENOENT` on missing `.artel/QUEUE.md` (e.g. fresh init, or
+  status invoked from a directory without artel runtime). Now renders
+  a skeleton with friendly per-section hints — `QUEUE (no .artel/QUEUE.md
+  — create one to start tracking work)`, `RUNNING  (no dispatcher_state.json
+  — no active dispatcher session)`. 151 tests green (2 new e2e).
 - **2026-05-03** — `artel logs <task>` — single-dispatch drilldown.
   Reads `.meta` + `.out` + `.prompt` sidecars + matching events from
   `events.jsonl`; renders a cohesive view with meta / events / prompt /
