@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cleanupTempRoots, createTempRepo, ENGINE_FILES_DRIVERS, ENGINE_FILES_UTIL, installEngineRuntime, runNode } from '../_helpers.js'
+import { cleanupTempRoots, createTempRepo, ENGINE_FILES_CORE, ENGINE_FILES_DRIVERS, ENGINE_FILES_UTIL, installEngineRuntime, runNode } from '../_helpers.js'
 
 afterEach(cleanupTempRoots)
 
 const installStatus = (root: string) => {
-  installEngineRuntime(root, ['engine/cli/status.mjs', ...ENGINE_FILES_DRIVERS, ...ENGINE_FILES_UTIL])
+  installEngineRuntime(root, [
+    'engine/cli/status.mjs',
+    ...ENGINE_FILES_CORE,
+    ...ENGINE_FILES_DRIVERS,
+    ...ENGINE_FILES_UTIL,
+  ])
 }
 
 describe('artel status: render new fields', () => {
@@ -82,6 +87,88 @@ describe('artel status: timed-out vs parked rendering', () => {
     expect(status.stdout).toContain('PARKED')
     expect(status.stdout).toContain('parked-task')
     expect(status.stdout.indexOf('TIMED-OUT')).toBeLessThan(status.stdout.indexOf('PARKED'))
+  })
+})
+
+describe('artel status: dashboard context', () => {
+  it('renders cluster id (short) + name on header context line', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    writeFileSync(
+      join(root, '.artel', 'cluster.json'),
+      JSON.stringify({
+        cluster_id: '01934f00-aaaa-7bbb-8ccc-dddddddddddd',
+        name: 'demo-cluster',
+        schema: 'cluster-v1',
+      }) + '\n',
+    )
+    const status = runNode(root, ['engine/cli/status.mjs'])
+    expect(status.status).toBe(0)
+    expect(status.stdout).toMatch(/cluster\s+01934f00/)
+    expect(status.stdout).toContain('demo-cluster')
+  })
+
+  it('expands PENDING and BLOCKED queue sections with task names', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    writeFileSync(
+      join(root, '.artel', 'QUEUE.md'),
+      [
+        '# Work queue', '',
+        '## For Owner', '- (none)', '',
+        '## In progress', '- (none)', '',
+        '## Pending', '- [spec] something to design', '- [impl] another task', '',
+        '## Blocked', '- [research] external dependency', '',
+        '## Recently done', '- (none)', '',
+      ].join('\n'),
+    )
+    const status = runNode(root, ['engine/cli/status.mjs'])
+    expect(status.status).toBe(0)
+    expect(status.stdout).toContain('PENDING')
+    expect(status.stdout).toContain('something to design')
+    expect(status.stdout).toContain('another task')
+    expect(status.stdout).toContain('BLOCKED')
+    expect(status.stdout).toContain('external dependency')
+  })
+
+  it('renders dispatch duration in RECENT when meta has dispatchedAt + completedAt', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    writeFileSync(
+      join(root, '.artel', '.dispatches', 'dur.meta'),
+      JSON.stringify({
+        task: 'duration-task', role: 'implementer', engine: 'codex',
+        status: 'completed', disposition: 'success',
+        dispatchedAt: '2026-05-01T00:00:00.000Z',
+        completedAt: '2026-05-01T00:00:42.000Z',
+      }) + '\n',
+    )
+    writeFileSync(join(root, '.artel', '.dispatches', 'dur.out'), 'output\n')
+    const status = runNode(root, ['engine/cli/status.mjs'])
+    expect(status.status).toBe(0)
+    expect(status.stdout).toContain('duration-task')
+    // formatDuration(42000) → '42s'
+    expect(status.stdout).toMatch(/codex \S+ \(42s\)/)
+  })
+
+  it('flags engine with recent auth-expired park as ⚠ in TOKENS', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    writeFileSync(
+      join(root, '.artel', '.dispatches', 'authfail.meta'),
+      JSON.stringify({
+        task: 'fail', role: 'orchestrator', engine: 'copilot',
+        status: 'parked', disposition: 'parked',
+        completedAt: new Date().toISOString(),
+        parked: { reason: 'auth-expired', raw: 'Not logged in' },
+      }) + '\n',
+    )
+    const status = runNode(root, ['engine/cli/status.mjs'])
+    expect(status.status).toBe(0)
+    // Copilot row should be flagged with ⚠ marker.
+    expect(status.stdout).toMatch(/⚠\s+Copilot/)
   })
 })
 

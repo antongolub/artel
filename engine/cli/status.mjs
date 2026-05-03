@@ -17,6 +17,7 @@ import { dirname } from 'node:path'
 import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
+import { readClusterIdentity } from '../core/cluster.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // `here` is engine/cli/, so platform root is two levels up.
@@ -39,6 +40,7 @@ const bold = (s) => c('1', s)
 const dim = (s) => c('2', s)
 const cyan = (s) => c('36', s)
 const yellow = (s) => c('33', s)
+const green = (s) => c('32', s)
 
 const fmt = (n) => {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -62,6 +64,14 @@ const sparkChar = (val, max) => {
 
 const cutoff = (days) => Date.now() - days * 86400000
 const dayKey = (ts) => new Date(ts).toISOString().slice(0, 10)
+
+const formatDuration = (ms) => {
+  if (!Number.isFinite(ms) || ms < 0) return null
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
+  return `${(ms / 3600000).toFixed(1)}h`
+}
 
 const relativeTime = (iso) => {
   const ms = Date.now() - Date.parse(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z'))
@@ -237,6 +247,7 @@ const getRecentDispatches = (n = 5) => {
       let retryCount = 0
       let dispatchId = null
       let traceId = null
+      let durationMs = null
       const metaPath = join(dir, `${base}.meta`)
       if (existsSync(metaPath)) {
         try {
@@ -248,6 +259,10 @@ const getRecentDispatches = (n = 5) => {
           retryCount = meta.retryCount || 0
           dispatchId = meta.dispatchId || null
           traceId = meta.traceId || null
+          if (meta.dispatchedAt && meta.completedAt) {
+            const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
+            if (Number.isFinite(d) && d >= 0) durationMs = d
+          }
         } catch {}
       }
       // Legacy fallback: detect from filename (`<role>-<task>.out`) and content
@@ -262,7 +277,7 @@ const getRecentDispatches = (n = 5) => {
         task = role !== '?' && f.startsWith(role + '-') ? base.slice(role.length + 1) : base
       }
       const version = probeEngineVersion(engine)
-      return { role, mtime: stat.mtimeMs, summary, engine, version, task, usage, retryCount, dispatchId, traceId }
+      return { role, mtime: stat.mtimeMs, summary, engine, version, task, usage, retryCount, dispatchId, traceId, durationMs }
     })
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, n)
@@ -401,6 +416,74 @@ const getRunning = () => {
   }
 }
 
+// --- Cluster + git context (header line) ---
+
+const getClusterContext = () => {
+  try {
+    const id = readClusterIdentity(PROJECT_ARTEL)
+    if (!id) return null
+    return {
+      shortId: (id.cluster_id || '').slice(0, 8) || null,
+      name: id.name || null,
+    }
+  } catch {
+    return null
+  }
+}
+
+const gitOf = (cwd, args) => {
+  try {
+    return execSync(`git ${args}`, {
+      cwd, encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+const getGitContext = () => {
+  const branch = gitOf(PROJECT_DIR, 'rev-parse --abbrev-ref HEAD')
+  if (!branch) return null
+  const porcelain = gitOf(PROJECT_DIR, 'status --porcelain')
+  const dirty = porcelain ? porcelain.split('\n').filter(Boolean).length : 0
+  return { branch, dirty }
+}
+
+// --- Auth health per engine (heuristic) ---
+
+// Scan parked metas for `auth-expired` reason within the last 24h. Cross
+// against the latest successful release per engine. Recent failure → ⚠;
+// recent success → ✓; nothing on record → ?.
+const getAuthHealth = (engine) => {
+  const window = Date.now() - 86400000
+  const dir = join(PROJECT_ARTEL, '.dispatches')
+  let recentAuthFail = false
+  let recentSuccess = false
+  let latestFailAt = 0
+  let latestSuccessAt = 0
+  if (!existsSync(dir)) return { mark: '?', color: dim }
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.meta')) continue
+    let meta
+    try { meta = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+    if (meta.engine !== engine) continue
+    const ts = Date.parse(meta.completedAt || '') || 0
+    if (!ts || ts < window) continue
+    if (meta.parked?.reason === 'auth-expired' && ts > latestFailAt) {
+      recentAuthFail = true
+      latestFailAt = ts
+    }
+    if (meta.disposition === 'success' && ts > latestSuccessAt) {
+      recentSuccess = true
+      latestSuccessAt = ts
+    }
+  }
+  // If success post-dates the failure, treat as recovered.
+  if (recentAuthFail && latestFailAt > latestSuccessAt) return { mark: '⚠', color: yellow }
+  if (recentSuccess) return { mark: '✓', color: green }
+  return { mark: '?', color: dim }
+}
+
 // --- Token aggregates (delegated to drivers) ---
 
 // Each driver knows its own provider's session-store layout and event
@@ -459,7 +542,8 @@ const renderRecent = (items) => {
   for (const item of items) {
     const age = relativeTime(new Date(item.mtime).toISOString())
     const role = cyan(item.role.padEnd(13))
-    const exec = `${item.engine} ${item.version}`
+    const dur = formatDuration(item.durationMs)
+    const exec = dur ? `${item.engine} ${item.version} (${dur})` : `${item.engine} ${item.version}`
     const task = item.task ? truncate(item.task, 28).padEnd(30) : ' '.repeat(30)
     // Suffix with usage / retry signals when present (DESIGN.md §C5–C6).
     const annot = []
@@ -469,7 +553,7 @@ const renderRecent = (items) => {
     if (item.retryCount > 0) annot.push(yellow(`r${item.retryCount}`))
     const annotStr = annot.length ? `${dim('[')}${annot.join(' ')}${dim(']')} ` : ''
     const summary = truncate(item.summary.replace(/\s+/g, ' '), trunc)
-    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(18))} ${task} ${annotStr}${summary}\n`
+    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(24))} ${task} ${annotStr}${summary}\n`
   }
   return out
 }
@@ -534,6 +618,14 @@ const renderQueue = (q) => {
       out += `  ${prefix}${truncate(cleaned, trunc - 11)}\n`
     }
   }
+  if (q['Blocked'].length) {
+    out += `\n${bold('BLOCKED')} ${dim('(needs attention)')}\n`
+    for (const it of q['Blocked']) out += `  ${yellow('!')} ${truncate(it, trunc - 4)}\n`
+  }
+  if (q['Pending'].length) {
+    out += `\n${bold('PENDING')}\n`
+    for (const it of q['Pending']) out += `  ${dim('•')} ${truncate(it, trunc - 4)}\n`
+  }
   return out
 }
 
@@ -541,29 +633,33 @@ const renderTokens = (claude, codex, copilot) => {
   const rows = [
     {
       label: 'Claude',
+      engine: 'claude',
       input: claude.totals.input + claude.totals.cacheCreation + claude.totals.cacheRead,
       output: claude.totals.output,
       cached: claude.totals.cacheRead,
     },
     {
       label: 'Codex',
+      engine: 'codex',
       input: codex.totals.input + codex.totals.cached,
       output: codex.totals.output,
       cached: codex.totals.cached,
     },
     {
       label: 'Copilot',
+      engine: 'copilot',
       input: copilot.totals.input + copilot.totals.cached,
       output: copilot.totals.output,
       cached: copilot.totals.cached,
     },
   ]
   const max = Math.max(...rows.map((x) => x.output), 1)
-  let out = `\n${bold('TOKENS')} ${dim(`(last ${DAYS}d, project-scoped)`)}\n`
+  let out = `\n${bold('TOKENS')} ${dim(`(last ${DAYS}d, project-scoped)`)} ${dim('· health: ✓ recent success / ⚠ recent auth fail / ? unknown')}\n`
   for (const x of rows) {
     const cachePct = x.input > 0 ? Math.round((x.cached / x.input) * 100) : 0
+    const health = getAuthHealth(x.engine)
     out +=
-      `  ${x.label.padEnd(8)} ${bar(x.output, max)}   ` +
+      `  ${health.color(health.mark)} ${x.label.padEnd(8)} ${bar(x.output, max)}   ` +
       `out: ${fmt(x.output).padEnd(6)} ${dim('·')} in: ${fmt(x.input)} ${dim(`(${cachePct}% cached)`)}\n`
   }
   return out
@@ -627,6 +723,20 @@ const render = () => {
   const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ')
   if (watchSec) process.stdout.write('\x1b[H\x1b[2J')
   console.log(`${bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${dim(stamp + ' UTC')}`)
+  const cluster = getClusterContext()
+  const git = getGitContext()
+  const ctx = []
+  if (cluster) {
+    const id = cluster.shortId ? cyan(cluster.shortId) : '?'
+    ctx.push(cluster.name && cluster.name !== PROJECT_NAME
+      ? `${dim('cluster')} ${id} ${dim('·')} ${dim(cluster.name)}`
+      : `${dim('cluster')} ${id}`)
+  }
+  if (git) {
+    const dirty = git.dirty > 0 ? yellow(`${git.dirty} modified`) : green('clean')
+    ctx.push(`${dim('branch')} ${cyan(git.branch)} ${dim('·')} ${dirty}`)
+  }
+  if (ctx.length) console.log(`  ${ctx.join(`  ${dim('·')}  `)}`)
   process.stdout.write(renderFeed(feed))
   process.stdout.write(renderRunning(dispatcher, running))
   process.stdout.write(renderRecent(recent))
