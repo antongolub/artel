@@ -31,7 +31,6 @@ const projectArtelDirOf = (projectDir = projectDirOf()) => join(projectDir, '.ar
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
-const PROTECTED_RESET_ROLES = new Set(['architect', 'cold-reader', 'adversary', 'maintainer'])
 
 // Find the dispatch.start event (or legacy 'claim') with matching dispatch_id
 // in events.jsonl. Used by retry-counter to compare engine+model against the
@@ -213,7 +212,7 @@ const preparePersistentSession = ({ role, engineId, persistent, sessionsDir }) =
   return { sessionFlag, sessionId, sessionIdPath, captureCodexSession }
 }
 
-const prepareBranch = ({ role, task, persistent, gitImpl, log }) => {
+const prepareBranch = ({ role, task, persistent, protectedBranch, gitImpl, log }) => {
   if (persistent) return null
 
   const branch = `${role}/${task}`
@@ -236,7 +235,10 @@ const prepareBranch = ({ role, task, persistent, gitImpl, log }) => {
   const branchExists = gitOk(branchShaResult)
   const branchSha = branchExists ? branchShaResult.stdout.trim() : null
 
-  if (branchExists && PROTECTED_RESET_ROLES.has(role)) {
+  // protected_branch: refuse to overwrite a divergent branch unless its tip is
+  // an ancestor of HEAD. Declared per-role in frontmatter — the platform does
+  // not name protected roles itself.
+  if (branchExists && protectedBranch) {
     const reachable = gitImpl(['merge-base', '--is-ancestor', branchRef, 'HEAD'])
     if (reachable.status !== 0) {
       throw new Error(
@@ -253,6 +255,9 @@ const prepareBranch = ({ role, task, persistent, gitImpl, log }) => {
   log(`spawn: branch=${branch} (${branchExists ? 'reset' : 'created'})`)
   return branch
 }
+
+const truthyFlag = (raw) =>
+  raw === true || raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on'
 
 export const defaultDispatchTimeoutMs = DEFAULT_TIMEOUT_MS
 export const dispatchTerminationGraceMs = TERMINATION_GRACE_MS
@@ -307,10 +312,11 @@ export async function dispatchLifecycle(
     throw new Error(`Unknown engine: ${engineId}\nAvailable engines: ${engines.join(', ')}`)
   }
 
-  const persistent = roleMeta.persistent === 'true'
+  const persistent = truthyFlag(roleMeta.persistent)
+  const protectedBranch = truthyFlag(roleMeta.protected_branch)
   const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs)
   const effectiveGraceMs = parseTimeoutMs(terminationGraceMs, 'dispatch termination grace')
-  const branch = prepareBranch({ role, task, persistent, gitImpl, log })
+  const branch = prepareBranch({ role, task, persistent, protectedBranch, gitImpl, log })
   const { sessionFlag, sessionId: initialSessionId, sessionIdPath, captureCodexSession } = preparePersistentSession({
     role,
     engineId,

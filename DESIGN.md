@@ -20,8 +20,15 @@
 
 ## 2. Core principles
 
-- **Append-only events are source of truth.** Queue, dispatcher state,
-  meta sidecars, capability manifest — all projections of `events`.
+- **Single source of truth.** The event stream (`events.jsonl`) plus
+  per-dispatch sidecars (`.dispatches/*.meta`), cluster identity
+  (`cluster.json`), and dispatcher state (`dispatcher_state.json`) are
+  the canonical inputs. Everything else is a projection — regenerable,
+  derivable, never authoritative.
+- **Projections are independent.** Each presentation layer (state.md
+  snapshot, terminal dashboard, future HTML view, replay tool) reads
+  the canonical inputs directly. Projections do **not** depend on each
+  other; the snapshot is not the source for the dashboard, and so on.
 - **Markdown is a human surface, not storage.** `QUEUE.md` / `JOURNAL.md`
   / `state.md` are projections (or human-edit overlays in fs backend).
 - **Process-per-dispatch.** No in-process actor system. Each role is a
@@ -266,6 +273,7 @@ sandbox: workspace-write          # universal — drivers translate
 tools: Read, Edit, Bash(npm *)    # universal — drivers translate
 permission-mode: acceptEdits      # universal (claude-only) — drivers translate
 persistent: true                  # optional — keep session across dispatches
+protected_branch: true            # optional — refuse to overwrite divergent <role>/<task> branches (see §8.2)
 dispatchable: all                 # ACL allowlist (see §8.1)
 non-dispatchable: orchestrator    # ACL denylist (see §8.1)
 ```
@@ -295,6 +303,83 @@ Defaults (platform-shipped, consumer-overridable):
 Enforcement: `spawn.mjs` / `run.mjs` read `ARTEL_PARENT_ROLE` from env;
 if set and parent's policy denies the requested role, throw before any
 side-effect. Top-level (dispatcher chat) → env empty → no policy check.
+
+### 8.2 Frontmatter contracts
+
+Both role files (`role-v1`) and skill files (`skill-v1`) carry a
+mandatory metadata trio:
+
+```yaml
+schema: role-v1            # or skill-v1
+version: 1                 # positive integer, bumped on edit
+updated_at: 2026-05-03T00:00:00.000Z   # ISO-8601 UTC
+```
+
+Plus type-specific required fields:
+- **role-v1**: `name`, `description`
+- **skill-v1**: `description`, `tools`
+
+Validators (`engine/util/contract.mjs`) enforce on every load —
+`engine/util/skills.mjs` validates skill files when expanded into
+tool patterns; `engine/cli/run.mjs` validates the role file before
+dispatching. Files that fail validation are rejected with a clear
+error before any side-effects.
+
+Schema version is the migration boundary: when the contract changes,
+bump to `role-v2` / `skill-v2` and ship a parallel validator. Old
+files keep working under the old validator until consumers migrate.
+
+### 8.3 Skills (tool-surface composition)
+
+Concrete `Bash(...)` patterns are project-specific (`npm` vs `bun` vs
+`pnpm` vs `cargo`). Roles must not embed them — that ties an abstract
+role to a specific stack. Instead, a role declares **skills** it
+needs; each skill maps to concrete tool patterns; projects override
+the mapping in their own `.artel/skills/` overlay.
+
+Role frontmatter:
+```yaml
+skills: file-edit, git-write, package-manager, test-runner
+tools: <raw patterns, optional escape hatch>
+```
+
+Skill files live at `<platform>/skills/<name>.md` and
+`<project>/.artel/skills/<name>.md`. Each skill declares its tool
+patterns in its own frontmatter:
+```yaml
+---
+schema: skill-v1
+description: <one-liner>
+tools: Bash(npm install*), Bash(npm ci*), Bash(npm ls*)
+---
+<docs about the skill>
+```
+
+Resolution at dispatch time (`engine/cli/run.mjs`):
+1. Lookup each skill in project overlay first, platform default
+   second; first match wins.
+2. Concatenate all skill tool lists.
+3. Append the role's raw `tools:` (escape hatch — for one-off bits).
+4. Deduplicate; pass to driver.
+5. CLI `--tools` replaces the whole composed surface.
+
+Projects swapping `npm` → `bun` write a single
+`.artel/skills/package-manager.md` override; every role using that
+skill picks it up automatically. Role files don't change.
+
+### 8.4 Protected branches
+
+```yaml
+protected_branch: true        # default false
+```
+
+When set, dispatchLifecycle refuses to overwrite an existing
+`<role>/<task>` branch whose tip is not an ancestor of HEAD (would lose
+work). Used for review-only roles where every dispatch is meant to be a
+fresh fork from master, not a reset of in-flight work.
+
+The platform names no specific roles as protected — projects declare
+this per role.
 
 ## 9. Sub-role self-reporting
 

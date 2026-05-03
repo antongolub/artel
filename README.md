@@ -55,8 +55,7 @@ runtime** under `.artel/` (gitignored).
   artefacts under `.dispatches/`, cluster identity, generated state.
 
 Full architecture in [`DESIGN.md`](./DESIGN.md). Status per phase in
-[`PLAN.md`](./PLAN.md). Consumer-side upgrade notes in
-[`MIGRATION.md`](./MIGRATION.md).
+[`PLAN.md`](./PLAN.md).
 
 ## Try it
 

@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Implementation lane per AGENTS.md
-tools: Read, Edit, Write, Glob, Grep, Bash(npm test*), Bash(npm run *), Bash(npm install*), Bash(npm ci*), Bash(npm ls*), Bash(node *), Bash(node_modules/bun/bin/bun.exe *), Bash(git status*), Bash(git diff*), Bash(git log*), Bash(git show*), Bash(git blame*), Bash(git checkout*), Bash(git add*), Bash(git branch*), Bash(git rebase*), Bash(git stash*)
+skills: file-edit, git-write, node-runtime, package-manager, test-runner
 permission-mode: acceptEdits
 model: opus
 dispatchable: none
@@ -9,6 +9,9 @@ schema: role-v1
 version: 1
 updated_at: 2026-05-03T00:00:00.000Z
 ---
+
+> v1 · updated 2026-05-03
+
 You are running as the **implementer** lane.
 
 Read [AGENTS.md](../AGENTS.md) and the project's `.artel/QUEUE.md` on first turn — the cooperative principle and current backlog bind your behaviour.

@@ -13,11 +13,16 @@ import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { buildTaskContextBlock, parseJsonObject } from '../core/dispatch_api.mjs'
 import { parseFrontmatter, normaliseFrontmatter } from '../util/frontmatter.mjs'
+import { expandSkills } from '../util/skills.mjs'
+import { validateRoleFrontmatter } from '../util/contract.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PLATFORM_DIR = join(here, '..', '..')
 const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
 const DRIVERS_DIR = join(here, '..', 'drivers')
+const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
+const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
+const PROJECT_SKILLS_DIR = join(PROJECT_DIR, '.artel', 'skills')
 
 const listDir = (dir, ext) =>
   existsSync(dir)
@@ -103,6 +108,7 @@ if (!existsSync(rolePath)) die(`Role not found: ${rolePath}`)
 
 const { meta, body } = parseFrontmatter(readFileSync(rolePath, 'utf8'))
 normaliseFrontmatter(meta, rolePath)
+validateRoleFrontmatter(meta, rolePath)
 
 const engineId = values.engine || meta.engine || 'claude'
 
@@ -116,10 +122,19 @@ if (!engines.includes(engineId)) {
 
 const driver = await import(pathToFileURL(join(DRIVERS_DIR, `${engineId}.mjs`)).href)
 
+// Compose the role's tool surface from declared skills + raw `tools:`.
+// Skills (e.g. `git-write, file-edit`) expand from skills/<name>.md;
+// `tools:` adds raw patterns inline. Project skill overrides win over
+// platform defaults. CLI `--tools` replaces the whole composed surface.
+const skillNames = (meta.skills || '').split(',').map((s) => s.trim()).filter(Boolean)
+const skillTools = expandSkills(skillNames, [PROJECT_SKILLS_DIR, PLATFORM_SKILLS_DIR])
+const rawTools = (meta.tools || '').split(',').map((s) => s.trim()).filter(Boolean)
+const composedTools = [...new Set([...skillTools, ...rawTools])].join(', ')
+
 // Precedence for universal terms: CLI override > role frontmatter > driver
 // default. Per-dispatch CLI override means `implementer.md` can stay clean
 // while a one-off run uses `--effort xhigh`.
-const driverMeta = { ...meta, body, task, taskAttrs }
+const driverMeta = { ...meta, body, task, taskAttrs, tools: composedTools }
 for (const key of ['model', 'effort', 'sandbox', 'tools', 'permission-mode']) {
   if (values[key]) driverMeta[key] = values[key]
 }

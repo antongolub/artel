@@ -77,6 +77,57 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — Architectural refactor sweep, post-MVP cleanup before
+  public publish. Twelve themed blocks landed in one commit:
+  1. README rewrite (research-frame) + LICENSE (MIT) + package.json
+     publish-prep (bin / files / publishConfig / engines / keywords /
+     prepublishOnly gate)
+  2. Layered structure: `engine/{cli,core,drivers,util}/` — entry
+     points, platform primitives, provider adapters, helpers split
+  3. Native `node:util#parseArgs` + template-literal usage strings
+     across run / spawn / init / checkpoint CLIs
+  4. Util extraction: `util/frontmatter.mjs` (parser + legacy-key
+     normaliser), `util/fs.mjs` (walkJsonl / readJsonl / mtimeMs),
+     `util/ids.mjs` (uuidv7)
+  5. Drivers refactored to use `util/fs`; duplicate `nonce` dropped
+     (uuidv7 replaces it everywhere)
+  6. `cluster.mjs` simplified — unused `clusterIdOf` + cached
+     singleton dropped
+  7. Role frontmatter metadata trio: `schema` / `version` /
+     `updated_at` (mandatory in v1, ISO-8601 UTC)
+  8. `PROTECTED_RESET_ROLES` set in core removed → per-role
+     `protected_branch: true` frontmatter; platform names no specific
+     roles
+  9. Hardcoded role-name lists in status / state_gen replaced with
+     runtime discovery from `agents/` + `drivers/`
+  10. `state.md` and `status.mjs` decoupled — single source of truth
+      principle. Both are independent projections over canonical
+      inputs; neither feeds the other. `state.md` trimmed 368 → 227
+      lines, narrative body moved out
+  11. Skills layer: roles declare abstract `skills:` (file-edit /
+      git-write / package-manager / test-runner / …); platform ships
+      12 defaults under `skills/`; projects override in
+      `.artel/skills/`. Stack swap (npm→bun) = one file edit, no role
+      changes
+  12. status.mjs delegates per-provider session-token aggregation to
+      drivers — provider paths (`~/.claude`, `~/.codex`, `~/.copilot`)
+      live in their drivers, not in the runner
+  13. Frontmatter contracts: `engine/util/contract.mjs` with
+      `validateRoleFrontmatter` (role-v1) and
+      `validateSkillFrontmatter` (skill-v1). Validators enforce the
+      schema/version/updated_at trio + type-specific required fields.
+      Wired into `engine/cli/run.mjs` (role load) and
+      `engine/util/skills.mjs` (skill load); files that fail
+      validation are rejected before any side-effects.
+
+  DESIGN.md §2 reformulated around single-source-of-truth + independent
+  projections. §8 expanded to "Role file format" with sub-sections
+  §8.2 (frontmatter contracts), §8.3 (skills), §8.4 (protected_branch).
+  MIGRATION.md gains §12 (role metadata), §13 (protected_branch),
+  §14 (skills).
+
+  75 tests + typecheck green throughout (8 new contract tests).
+
 - **2026-05-02** — C10 done. `MIGRATION.md` shipped — full consumer
   upgrade guide for all 9 MVP feature commits + test infra notes + v2
   follow-up index.

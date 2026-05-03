@@ -1,6 +1,6 @@
 {
   "name": "@antongolub/artel",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Multi-agent orchestration research — coordination layer for CLI agents.",
   "license": "MIT",
   "author": "Anton Golub <antongolub@antongolub.com>",
@@ -35,11 +35,9 @@
   "files": [
     "engine",
     "agents",
+    "skills",
     "AGENTS.md",
-    "CHALLENGE.md",
-    "DESIGN.md",
-    "MIGRATION.md",
-    "PLAN.md"
+    "CHALLENGE.md"
   ],
   "engines": {
     "node": ">=20"

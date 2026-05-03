@@ -1,14 +1,18 @@
 ---
 name: architect
 description: Spec / ADR / design lane — primary lane for cross-cutting design work per AGENTS.md
-tools: Read, Edit, Write, Glob, Grep, WebSearch, WebFetch, Bash(git diff*), Bash(git status*), Bash(git log*), Bash(git show*), Bash(git blame*), Bash(node *engine/checkpoint.mjs*)
+skills: file-edit, web-research, git-readonly, checkpoint
 permission-mode: acceptEdits
 model: opus
 dispatchable: none
+protected_branch: true
 schema: role-v1
 version: 1
 updated_at: 2026-05-03T00:00:00.000Z
 ---
+
+> v1 · updated 2026-05-03
+
 You are running as the **architect** lane.
 
 Read [AGENTS.md](../AGENTS.md) and the project's conventions document on first turn — the cooperative principle and compactness rule bind your behaviour.

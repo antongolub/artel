@@ -27,7 +27,6 @@ const PLATFORM_DIR = dirname(dirname(here))
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const PROJECT_NAME = basename(PROJECT_DIR)
-const STATE_PATH = join(PROJECT_ARTEL, 'state.md')
 const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
 const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
 const DAYS = 7
@@ -118,18 +117,10 @@ const parseQueue = () => {
 
 // --- Shared telemetry feed (provider-neutral) ---
 
-const parseStateFrontmatter = () => {
-  if (!existsSync(STATE_PATH)) return null
-  const text = readFileSync(STATE_PATH, 'utf8')
-  const m = text.match(/^---\n([\s\S]*?)\n---/)
-  if (!m) return null
-  const meta = {}
-  for (const line of m[1].split('\n')) {
-    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/)
-    if (kv) meta[kv[1]] = kv[2].replace(/^"|"$/g, '')
-  }
-  return meta
-}
+// status reads canonical inputs (events.jsonl, dispatcher_state.json, etc.)
+// directly. It does NOT read state.md — state.md is an independent
+// projection (see engine/cli/state_gen.mjs), not a source of truth, and
+// keeping the dashboard live means staying close to the event stream.
 
 const readDispatcherState = () => {
   if (!existsSync(DISPATCHER_STATE_PATH)) return null
@@ -186,46 +177,41 @@ const summarizeEvent = (e) => {
   return `${e.type} ${e.task || e.topic || ''}`.trim()
 }
 
-const getSharedFeed = (n = 5) => {
-  const out = []
-  const state = parseStateFrontmatter()
-  if (state?.generated_at) {
-    out.push({
-      ts: state.generated_at,
-      role: 'state',
-      text: `snapshot generated (${state.acting_role || 'unknown'}/${state.acting_provider || 'unknown'})`,
-    })
-  }
-  for (const e of readEvents()) {
-    const role = e.owner_role || e.from_role || e.type
-    out.push({ ts: e.at, role, text: summarizeEvent(e) })
-  }
-  return out
+const getSharedFeed = (n = 5) =>
+  readEvents()
+    .map((e) => ({ ts: e.at, role: e.owner_role || e.from_role || e.type, text: summarizeEvent(e) }))
     .filter((x) => x.ts && x.text)
     .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
     .slice(0, n)
-}
 
 const getDispatcherStatus = () => {
-  const disk = readDispatcherState()
-  const state = parseStateFrontmatter()
+  const disk = readDispatcherState() || {}
   return {
-    role: disk?.role || state?.acting_role || 'dispatcher',
-    provider: disk?.provider || state?.acting_provider || 'unknown',
-    controlStatus: disk?.control_status || state?.dispatcher_status || 'unknown',
-    session: disk?.session || state?.dispatcher_session || 'unknown',
-    orchestratorEngine: disk?.orchestrator_engine || state?.orchestrator_engine || 'unknown',
-    orchestratorSessionId: disk?.orchestrator_session_id || state?.orchestrator_session_id || 'unknown',
-    lastActionAt: disk?.last_action_at || state?.generated_at || null,
-    lastActionKind: disk?.last_action_kind || 'snapshot-generated',
-    lastActionTask: disk?.last_action_task || null,
-    notes: disk?.notes || null,
+    role: disk.role || null,
+    provider: disk.provider || 'unknown',
+    controlStatus: disk.control_status || 'unknown',
+    session: disk.session || 'unknown',
+    orchestratorEngine: disk.orchestrator_engine || 'unknown',
+    orchestratorSessionId: disk.orchestrator_session_id || 'unknown',
+    lastActionAt: disk.last_action_at || null,
+    lastActionKind: disk.last_action_kind || null,
+    lastActionTask: disk.last_action_task || null,
+    notes: disk.notes || null,
   }
 }
 
 // --- Recent dispatches (read .out files) ---
 
-const ROLES = ['orchestrator', 'architect', 'implementer', 'cold-reader', 'adversary', 'maintainer']
+// Roles are project-defined; the platform discovers them from the
+// agents/ directory at runtime. Fallback only — when meta sidecar
+// is missing we try to detect role from filename `<role>-<task>.out`.
+const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
+const knownRoles = () =>
+  existsSync(AGENTS_DIR)
+    ? readdirSync(AGENTS_DIR)
+        .filter((f) => f.endsWith('.md') && f !== 'README.md')
+        .map((f) => f.slice(0, -'.md'.length))
+    : []
 
 const getRecentDispatches = (n = 5) => {
   const dir = join(PROJECT_ARTEL, '.dispatches')
@@ -265,7 +251,7 @@ const getRecentDispatches = (n = 5) => {
         } catch {}
       }
       // Legacy fallback: detect from filename (`<role>-<task>.out`) and content
-      if (!role) role = ROLES.find((r) => f.startsWith(r + '-')) || '?'
+      if (!role) role = knownRoles().find((r) => f.startsWith(r + '-')) || '?'
       if (!engine) {
         if (/OpenAI Codex/.test(head)) engine = 'codex'
         else if (/Copilot CLI/i.test(head)) engine = 'copilot'
