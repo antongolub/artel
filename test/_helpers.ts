@@ -183,6 +183,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/frontmatter.mjs',
   'engine/util/skills.mjs',
   'engine/util/contract.mjs',
+  'engine/util/git.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',

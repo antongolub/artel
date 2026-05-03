@@ -152,6 +152,27 @@ describe('artel status: dashboard context', () => {
     expect(status.stdout).toMatch(/codex \S+ \(42s\)/)
   })
 
+  it('renders delta annotation in RECENT when meta has delta', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    writeFileSync(
+      join(root, '.artel', '.dispatches', 'delta.meta'),
+      JSON.stringify({
+        task: 'delta-task', role: 'implementer', engine: 'codex',
+        status: 'completed', disposition: 'success',
+        completedAt: '2026-05-01T00:00:42.000Z',
+        delta: { files_changed: 3, lines_added: 12, lines_removed: 5 },
+      }) + '\n',
+    )
+    writeFileSync(join(root, '.artel', '.dispatches', 'delta.out'), 'output\n')
+    const status = runNode(root, ['engine/cli/status.mjs'])
+    expect(status.status).toBe(0)
+    expect(status.stdout).toContain('delta-task')
+    // RECENT row should include `+12/-5` delta annotation.
+    expect(status.stdout).toMatch(/\+12\/-5/)
+  })
+
   it('flags engine with recent auth-expired park as ⚠ in TOKENS', () => {
     const root = createTempRepo()
     installStatus(root)

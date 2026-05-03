@@ -54,7 +54,7 @@ implementations later requires no migration.
 | V7 | Infra reconcile pass + availability events | `[v2]` | `cluster.heartbeat` ships in C2; `role.*` / `engine.*` lifecycle events when needed. |
 | V8 | Replay tooling | `[v2]` | Debugging convenience; not blocker. |
 | V9 | Mid-run heartbeats from lifecycle | `[v2]` | Checkpoint API covers observability gap. |
-| V10 | **Dispatch deltas + git context in telemetry** | `[v2]` | `dispatch.end` (+ `.meta`) gains `delta: { files_changed, lines_added, lines_removed }` (from `git diff` over the dispatch window). When the project is a git repo: also `git: { commit_sha, branch, repo_name }` (commit_sha = HEAD at dispatch start; repo_name = derived from `origin` remote, falling back to project dir basename). Surfaced in `status.mjs` recent rows. No schema migration — additive on read. |
+| V10 | **Dispatch deltas + git context in telemetry** | `[done]` | `engine/util/git.mjs` exposes `gitContext` + `gitDelta`. Lifecycle calls `gitContext` pre-`markRunning` (captures `commit_sha` / `branch` / `repo_name` — origin URL parsed; SSH + HTTPS; falls back to project basename). Calls `gitDelta(commit_sha)` post-exit (working-tree diff via `git diff --shortstat <sha>` covers committed + uncommitted, tracked-only). Both flow into `dispatch.start` / `dispatch.end` event payloads + `.meta` sidecar. `status.mjs` RECENT row gets `+N/-M` delta annotation when present. Tolerates non-git dirs / git-not-on-PATH. 131 tests green (20 new — 11 git unit + 1 spawn e2e + 1 status e2e + existing). |
 | V11 | **Agent identity & truststore** | `[v2]` | Agents commit under their own identity, not the owner's. (a) Dedicated `name <email>` + signing key per agent / cluster; (b) SSH key separate from owner's for push; (c) truststore abstraction for agent credentials (tokens / OAuth / SSH / API keys) — mounted into the dispatch env on demand, not embedded in events. Lives outside `events.jsonl` (operational state, not history). Open: in-tree under `.artel/trust/` with strict file perms vs external secret manager (1Password / pass / OS keychain) integration. Drives §C10 follow-up: "only owner commits to master" is a current invariant; agent-identity commits don't relax that — the agent-branch protocol still funnels through owner review at the master boundary. |
 
 ## Open questions — defaults locked
@@ -79,6 +79,12 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — V10 landed: dispatch deltas + git context in telemetry.
+  `engine/util/git.mjs` (gitContext + gitDelta + repoNameFromRemote);
+  `dispatch_lifecycle` captures `git` pre-spawn and `delta` post-exit;
+  fields flow into `.meta` and `dispatch.start/end` events. `status.mjs`
+  RECENT shows `+N/-M` annotation. Non-git dirs / missing git tolerated
+  (fields just absent). 131 tests green (20 new).
 - **2026-05-03** — `artel probe` subcommand — engine readiness check.
   Each driver gains a `probe()` export returning
   `{ engine, binary, installed, version, authState, hint? }`. CLI iterates
