@@ -41,6 +41,7 @@ const dim = (s) => c('2', s)
 const cyan = (s) => c('36', s)
 const yellow = (s) => c('33', s)
 const green = (s) => c('32', s)
+const red = (s) => c('31', s)
 
 const fmt = (n) => {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -248,6 +249,7 @@ const getRecentDispatches = (n = 5) => {
       let dispatchId = null
       let traceId = null
       let durationMs = null
+      let delta = null
       const metaPath = join(dir, `${base}.meta`)
       if (existsSync(metaPath)) {
         try {
@@ -259,6 +261,7 @@ const getRecentDispatches = (n = 5) => {
           retryCount = meta.retryCount || 0
           dispatchId = meta.dispatchId || null
           traceId = meta.traceId || null
+          delta = meta.delta || null
           if (meta.dispatchedAt && meta.completedAt) {
             const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
             if (Number.isFinite(d) && d >= 0) durationMs = d
@@ -277,7 +280,7 @@ const getRecentDispatches = (n = 5) => {
         task = role !== '?' && f.startsWith(role + '-') ? base.slice(role.length + 1) : base
       }
       const version = probeEngineVersion(engine)
-      return { role, mtime: stat.mtimeMs, summary, engine, version, task, usage, retryCount, dispatchId, traceId, durationMs }
+      return { role, mtime: stat.mtimeMs, summary, engine, version, task, usage, retryCount, dispatchId, traceId, durationMs, delta }
     })
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, n)
@@ -545,10 +548,14 @@ const renderRecent = (items) => {
     const dur = formatDuration(item.durationMs)
     const exec = dur ? `${item.engine} ${item.version} (${dur})` : `${item.engine} ${item.version}`
     const task = item.task ? truncate(item.task, 28).padEnd(30) : ' '.repeat(30)
-    // Suffix with usage / retry signals when present (DESIGN.md §C5–C6).
+    // Suffix with usage / retry / delta signals when present (DESIGN.md §C5–C6, V10).
     const annot = []
     if (item.usage && (item.usage.tokens_in || item.usage.tokens_out)) {
       annot.push(`${fmt(item.usage.tokens_in || 0)}/${fmt(item.usage.tokens_out || 0)}t`)
+    }
+    if (item.delta && (item.delta.lines_added || item.delta.lines_removed || item.delta.files_changed)) {
+      const d = item.delta
+      annot.push(`${green('+' + (d.lines_added || 0))}/${red('-' + (d.lines_removed || 0))}`)
     }
     if (item.retryCount > 0) annot.push(yellow(`r${item.retryCount}`))
     const annotStr = annot.length ? `${dim('[')}${annot.join(' ')}${dim(']')} ` : ''

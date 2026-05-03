@@ -17,6 +17,7 @@ import { createDispatchApi } from './dispatch_api.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { detectParked } from './parked.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { gitContext, gitDelta } from '../util/git.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -425,6 +426,9 @@ export async function dispatchLifecycle(
     closeSync(outFd)
   }
 
+  // V10: capture git context at dispatch start. `gitContext` returns null if
+  // the project isn't a git repo or git is unavailable — skip the field then.
+  const git = gitContext(paths.projectDir)
   dispatchApi.markRunning({
     pid: child.pid,
     branch,
@@ -433,6 +437,7 @@ export async function dispatchLifecycle(
     retryOf: retryOf || null,
     retryCount,
     retryReason,
+    git,
   })
   log(`spawn: task=${task} role=${role} engine=${engineId} pid=${child.pid}`)
   log(`out: ${outPath}`)
@@ -528,6 +533,9 @@ export async function dispatchLifecycle(
         disposition = parked ? 'parked' : 'error'
       }
 
+      // V10: compute working-tree delta against the dispatch-start commit.
+      // gitDelta tolerates missing git / unreachable sha → null.
+      const delta = git ? gitDelta(paths.projectDir, git.commit_sha) : null
       dispatchApi.markReleased({
         exitCode,
         exitSignal: signal,
@@ -537,6 +545,7 @@ export async function dispatchLifecycle(
         parked,
         timeout,
         usage,
+        delta,
         error: error?.message || null,
         notes:
           disposition === 'timeout'

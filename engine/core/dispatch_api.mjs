@@ -197,6 +197,7 @@ export const createDispatchApi = ({
     retryOf = null,
     retryCount = 0,
     retryReason = null,
+    git = null,
   } = {}) => {
     const current = writeMeta(
       {
@@ -209,6 +210,7 @@ export const createDispatchApi = ({
         ...(retryOf ? { retryOf } : {}),
         ...(retryCount ? { retryCount } : {}),
         ...(retryReason ? { retryReason } : {}),
+        ...(git ? { git } : {}),
       },
       'dispatch.start',
     )
@@ -225,6 +227,7 @@ export const createDispatchApi = ({
       ...(retryCount ? { retry_count: retryCount } : {}),
       ...(retryReason ? { retry_reason: retryReason } : {}),
       ...(notes ? { notes } : {}),
+      ...(git ? { git } : {}),
     })
     return current
   }
@@ -243,6 +246,7 @@ export const createDispatchApi = ({
     notes = null,
     replacementTask = null,
     blockingClass = null,
+    delta = null,
   } = {}) => {
     const status =
       disposition === 'success'
@@ -266,6 +270,7 @@ export const createDispatchApi = ({
         ...(parked ? { parked } : {}),
         ...(timeout ? { timeout } : {}),
         ...(usage ? { usage } : {}),
+        ...(delta ? { delta } : {}),
       },
       'dispatch.end',
     )
@@ -290,6 +295,7 @@ export const createDispatchApi = ({
       ...(notes ? { notes } : {}),
       ...(replacementTask ? { replacement_task: replacementTask } : {}),
       ...(blockingClass ? { blocking_class: blockingClass } : {}),
+      ...(delta ? { delta } : {}),
     })
 
     return current
