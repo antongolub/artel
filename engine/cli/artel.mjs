@@ -12,6 +12,7 @@ const SUBCOMMANDS = {
   spawn: 'spawn.mjs',
   status: 'status.mjs',
   probe: 'probe.mjs',
+  logs: 'logs.mjs',
   checkpoint: 'checkpoint.mjs',
 }
 
@@ -25,6 +26,7 @@ Usage: artel <${cmds}> [...args]
   spawn       dispatch with task sidecar + branch + timeout
   status      cluster snapshot or live dashboard
   probe       engine readiness (binary + version + auth state)
+  logs        drill into a single dispatch (meta + events + prompt + out)
   checkpoint  emit a sub-role checkpoint event
 
 Run 'artel <command> --help' for command-specific options.`)

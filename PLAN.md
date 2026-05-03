@@ -79,6 +79,13 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-03** — `artel logs <task>` — single-dispatch drilldown.
+  Reads `.meta` + `.out` + `.prompt` sidecars + matching events from
+  `events.jsonl`; renders a cohesive view with meta / events / prompt /
+  out sections. `--json` for scripting, `--events-only` to skip body,
+  `--lines N` to tail .out (default 30). Sets up V8 (replay) — same
+  data assembly. 149 tests green (6 new e2e). Out-of-backlog QoL win,
+  not in [v2] list.
 - **2026-05-03** — V6 landed: driver plugin overlay loader.
   `engine/util/drivers.mjs` (resolveDriverPath / loadDriver / listDrivers
   / discoverDrivers). Three-layer precedence: project `.artel/drivers/`
