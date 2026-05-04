@@ -33,6 +33,7 @@ const projectArtelDirOf = (projectDir = projectDirOf()) => join(projectDir, '.ar
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 60 * 1000
 
 // Find the dispatch.start event (or legacy 'claim') with matching dispatch_id
 // in events.jsonl. Used by retry-counter to compare engine+model against the
@@ -468,10 +469,12 @@ export async function dispatchLifecycle(
     let finalTimeoutSignal = null
     let timeoutHandle = null
     let graceHandle = null
+    let heartbeatHandle = null
 
     const cleanupTimers = () => {
       if (timeoutHandle) clearTimeout(timeoutHandle)
       if (graceHandle) clearTimeout(graceHandle)
+      if (heartbeatHandle) clearInterval(heartbeatHandle)
     }
 
     const maybeCaptureCodexSession = () => {
@@ -552,6 +555,27 @@ export async function dispatchLifecycle(
             : error?.message || null,
       })
       resolve({ exitCode, exitSignal: signal, disposition, branch, sessionId, timedOut })
+    }
+
+    // V9 — mid-run heartbeats. Emits a `heartbeat` event every
+    // `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) and updates `.meta`'s
+    // `lastHeartbeatAt`/`pidAlive` so `artel status` can show "alive Ns ago"
+    // without scanning events.jsonl. Cleared on settle / timeout / error.
+    const heartbeatIntervalMs = Number(process.env.ARTEL_HEARTBEAT_INTERVAL_MS) || DEFAULT_HEARTBEAT_INTERVAL_MS
+    if (heartbeatIntervalMs > 0) {
+      heartbeatHandle = setInterval(() => {
+        if (settled || child.killed) return
+        try {
+          const at = new Date().toISOString()
+          dispatchApi.appendEvent('heartbeat', { pid_alive: true })
+          dispatchApi.writeMeta({ lastHeartbeatAt: at, pidAlive: true }, 'heartbeat')
+        } catch (err) {
+          log(`heartbeat emit failed: ${err.message}`)
+        }
+      }, heartbeatIntervalMs)
+      // unref so a stuck heartbeat interval doesn't keep node alive past
+      // settle (defence in depth — cleanupTimers should always clear it).
+      if (heartbeatHandle.unref) heartbeatHandle.unref()
     }
 
     timeoutHandle = setTimeout(() => {

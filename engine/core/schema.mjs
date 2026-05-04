@@ -17,6 +17,7 @@ export const RESERVED_TYPE_PREFIXES = {
   workload: [
     'dispatch.',
     'checkpoint',
+    'heartbeat',
     'parked',
     'unparked',
     'escalation',

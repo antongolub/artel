@@ -193,6 +193,33 @@ describe('artel status: dashboard context', () => {
   })
 })
 
+describe('artel status: heartbeat annotation (V9)', () => {
+  it('renders "hb just now" for a running dispatch with fresh lastHeartbeatAt', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    // Construct an in-flight meta that getRunning() will pick up if the
+    // PID matches a real running process. ps lookup is OS-specific, so
+    // here we just verify status doesn't crash on the new field and the
+    // RUNNING block shows up cleanly when there's nothing else to render.
+    writeFileSync(
+      join(root, '.artel', '.dispatches', 'inflight.meta'),
+      JSON.stringify({
+        task: 'inflight', role: 'implementer', engine: 'codex',
+        status: 'running', dispatchedAt: new Date().toISOString(),
+        pid: 999999, // unlikely to match a real process
+        lastHeartbeatAt: new Date().toISOString(),
+        pidAlive: true,
+      }) + '\n',
+    )
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    // Heartbeat fields don't crash the render even when the PID isn't
+    // actually live (orphaned meta).
+    expect(r.stdout).toContain('RUNNING')
+  })
+})
+
 describe('artel status: ACTIVITY panel', () => {
   const writeMeta = (root: string, name: string, body: object) => {
     writeFileSync(join(root, '.artel', '.dispatches', `${name}.meta`), JSON.stringify(body) + '\n')

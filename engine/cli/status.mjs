@@ -457,7 +457,8 @@ const getRunning = () => {
         const engine = (meta && meta.engine) || cliEngine || roleEngineFromFile(role) || 'claude'
         const version = probeEngineVersion(engine)
         const task = meta ? meta.task : null
-        return { pid: m[1], etime: m[2], role, engine, version, task }
+        const lastHeartbeatAt = meta ? meta.lastHeartbeatAt : null
+        return { pid: m[1], etime: m[2], role, engine, version, task, lastHeartbeatAt }
       })
       .filter(Boolean)
   } catch {
@@ -593,7 +594,16 @@ const renderRunning = (dispatcher, procs) => {
     const role = cyan(p.role.padEnd(13))
     const exec = `${p.engine} ${p.version}`
     const task = p.task ? truncate(p.task, 28) : dim('—')
-    out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}\n`
+    // V9: heartbeat freshness — green when recent (≤90s), yellow when
+    // stale (≤5m), red when older (likely stuck). Threshold tuned around
+    // default 60s heartbeat interval.
+    let heartbeat = ''
+    if (p.lastHeartbeatAt) {
+      const ageMs = Date.now() - Date.parse(p.lastHeartbeatAt)
+      const colour = ageMs <= 90000 ? green : ageMs <= 300000 ? yellow : red
+      heartbeat = `  ${dim('hb')} ${colour(relativeTime(p.lastHeartbeatAt))}`
+    }
+    out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}${heartbeat}\n`
   }
   return out
 }
