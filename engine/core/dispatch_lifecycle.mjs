@@ -19,6 +19,7 @@ import { detectParked } from './parked.mjs'
 import { uuidv7 } from '../util/ids.mjs'
 import { gitContext, gitDelta } from '../util/git.mjs'
 import { listDrivers } from '../util/drivers.mjs'
+import { identityEnv, resolveIdentity } from '../util/trust.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -282,6 +283,7 @@ export async function dispatchLifecycle(
     backoffThreshold = DEFAULT_BACKOFF_THRESHOLD,
     timeoutMs = null,
     terminationGraceMs = TERMINATION_GRACE_MS,
+    identity = null,
     platformDir = DEFAULT_PLATFORM_DIR,
     projectDir = projectDirOf(),
     projectArtelDir = projectArtelDirOf(projectDir),
@@ -408,6 +410,13 @@ export async function dispatchLifecycle(
   if (taskAttrs) runArgs.push('--task-attrs', JSON.stringify(taskAttrs))
   runArgs.push(role, prompt)
 
+  // V11 — agent identity injection. Per-dispatch CLI override beats
+  // role frontmatter; absent both, no identity is set and the child
+  // inherits the operator's git config.
+  const identityName = identity || roleMeta.identity || null
+  const identityRecord = resolveIdentity(paths.projectDir, identityName)
+  const identityEnvVars = identityEnv(identityRecord)
+
   const outFd = openSync(outPath, 'w')
   let child
   try {
@@ -415,10 +424,12 @@ export async function dispatchLifecycle(
       stdio: ['ignore', outFd, outFd],
       env: {
         ...process.env,
+        ...identityEnvVars,
         ARTEL_TASK: task,
         ARTEL_ROLE: role,
         ARTEL_DISPATCH_ID: dispatchId,
         ARTEL_TRACE_ID: traceId,
+        ...(identityName ? { ARTEL_IDENTITY: identityName } : {}),
         ...(taskAttrs ? { ARTEL_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
       },
     })

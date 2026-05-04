@@ -55,7 +55,7 @@ implementations later requires no migration.
 | V8 | **Replay tooling** | `[done]` | `artel replay <task | dispatch-id>` re-runs a past dispatch on the same or a different engine. Resolves target by slug (most-recent meta) or UUID v7 dispatch_id; pulls role + prompt from `.meta` and `.prompt` sidecars; spawns a new dispatch with auto-generated slug `<orig>-replay-<short>` and `--retry-of <orig-id>` so the chain reconstructs from events.jsonl. Flags: `--engine`, `--model`, `--task` (override slug), `--effort`, `--sandbox`, `--tools`, `--permission-mode`, `--timeout-ms`. Errors helpfully when target / prompt missing. 162 tests green (6 new e2e). |
 | V9 | **Mid-run heartbeats from lifecycle** | `[done]` | Lifecycle emits a `heartbeat` event every `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) until the child exits or settles, plus updates `.meta.lastHeartbeatAt` + `.meta.pidAlive`. `0` disables. `heartbeat` added to reserved workload types in schema. `interval.unref()` so a stuck heartbeat can never keep node alive past settle. Status RUNNING gets a `hb Ns ago` annotation coloured by freshness (green ≤90s, yellow ≤5m, red older). 176 tests green (5 new — 4 unit + 1 status e2e). |
 | V10 | **Dispatch deltas + git context in telemetry** | `[done]` | `engine/util/git.mjs` exposes `gitContext` + `gitDelta`. Lifecycle calls `gitContext` pre-`markRunning` (captures `commit_sha` / `branch` / `repo_name` — origin URL parsed; SSH + HTTPS; falls back to project basename). Calls `gitDelta(commit_sha)` post-exit (working-tree diff via `git diff --shortstat <sha>` covers committed + uncommitted, tracked-only). Both flow into `dispatch.start` / `dispatch.end` event payloads + `.meta` sidecar. `status.mjs` RECENT row gets `+N/-M` delta annotation when present. Tolerates non-git dirs / git-not-on-PATH. 131 tests green (20 new — 11 git unit + 1 spawn e2e + 1 status e2e + existing). |
-| V11 | **Agent identity & truststore** | `[v2]` | Agents commit under their own identity, not the owner's. (a) Dedicated `name <email>` + signing key per agent / cluster; (b) SSH key separate from owner's for push; (c) truststore abstraction for agent credentials (tokens / OAuth / SSH / API keys) — mounted into the dispatch env on demand, not embedded in events. Lives outside `events.jsonl` (operational state, not history). Open: in-tree under `.artel/trust/` with strict file perms vs external secret manager (1Password / pass / OS keychain) integration. Drives §C10 follow-up: "only owner commits to master" is a current invariant; agent-identity commits don't relax that — the agent-branch protocol still funnels through owner review at the master boundary. |
+| V11 | **Agent identity (truststore v1)** | `[done]` | `.artel/trust/identities.json` registers named git identities (`name` / `email` / optional `ssh_key`). Roles declare `identity: <name>` in frontmatter; `--identity` CLI overrides per-dispatch; `ARTEL_IDENTITY` env exposed to the child. Lifecycle injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` / `GIT_SSH_COMMAND` (path shell-quoted, `IdentitiesOnly=yes`). Unknown name fails dispatch with `Known: ...` list. `artel trust list` is read-only inspector (`--json`). Credentials axis (tokens / API keys via parallel `credentials.json`) deferred to V11.2. SSH key generation deferred — user provides path. 195 tests green (19 new — 12 unit + 7 e2e). |
 
 ## Open questions — defaults locked
 
@@ -79,6 +79,15 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V11.1 landed: agent identity (truststore v1).
+  `.artel/trust/identities.json` registers named git identities (name +
+  email + optional ssh_key path); `engine/util/trust.mjs` resolves and
+  builds the env-var slice. Lifecycle injects `GIT_AUTHOR_*` /
+  `GIT_COMMITTER_*` / `GIT_SSH_COMMAND` per role's `identity:`
+  frontmatter, with `--identity` CLI override (CLI wins). `ARTEL_IDENTITY`
+  exposed to child. Unknown names fail with helpful Known: list.
+  `artel trust list` read-only inspector. Credentials (tokens / OAuth)
+  and SSH keygen deferred to V11.2. 195 tests green (19 new).
 - **2026-05-04** — V9 landed: mid-run heartbeats. Lifecycle emits a
   `heartbeat` event every `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s)
   while the child is alive; updates `.meta.lastHeartbeatAt` + `pidAlive`.

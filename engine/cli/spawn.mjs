@@ -22,6 +22,7 @@ Options:
   --permission-mode <mode>   permission mode (claude)
   --timeout-ms <n>           dispatch wall-clock timeout
   --retry-of <dispatch_id>   mark this as retry of <id>
+  --identity <name>          git identity from .artel/trust/identities.json
   --attrs <json>             merge JSON object into task attrs
   --attrs-file <path>        merge JSON file into task attrs
   --attr key=value           set single task attr (repeatable)
@@ -42,6 +43,7 @@ const OPTIONS = {
   'permission-mode': { type: 'string' },
   'timeout-ms': { type: 'string' },
   'retry-of': { type: 'string' },
+  identity: { type: 'string' },
   attrs: { type: 'string', multiple: true },
   'attrs-file': { type: 'string', multiple: true },
   attr: { type: 'string', multiple: true },
@@ -95,6 +97,7 @@ try {
     permissionMode: values['permission-mode'] ?? null,
     timeoutMs: values['timeout-ms'] ?? null,
     retryOf: values['retry-of'] ?? null,
+    identity: values.identity ?? null,
     taskAttrs,
   })
   process.exit(result.exitCode)
