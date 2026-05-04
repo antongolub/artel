@@ -1,3 +1,14 @@
+## [0.3.0](https://github.com/antongolub/artel/compare/v0.2.0...v0.3.0) (2026-05-04)
+
+### Features
+* feat: artel replay <task|dispatch-id> ([4f876d3](https://github.com/antongolub/artel/commit/4f876d3e7b48b3d8fef5905eb1c8485b3f76ddfa))
+* feat(probe): --json mode emits detailed checks + live model roundtrip ([8fb40c5](https://github.com/antongolub/artel/commit/8fb40c52d7153016bc49b1ea981c5f959c3ff58a))
+* feat(logs): artel logs <task> — single-dispatch drilldown ([6432fc3](https://github.com/antongolub/artel/commit/6432fc35bd5e5947d3fea720f142bccb42520507))
+* feat(drivers): driver plugin overlay loader ([df58ec2](https://github.com/antongolub/artel/commit/df58ec2818e4cc03cd7d01e9a00dbddb8dfbb28c))
+
+### Fixes & improvements
+* fix(status): tolerate missing .artel/QUEUE.md and dispatcher_state.json ([aa2c149](https://github.com/antongolub/artel/commit/aa2c149f32fae31aface9c4650dc9027b7f47270))
+
 ## [0.2.0](https://github.com/antongolub/artel/compare/v0.1.0...v0.2.0) (2026-05-03)
 
 ### Features
