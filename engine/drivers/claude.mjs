@@ -27,6 +27,7 @@ import { execSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readJsonl } from '../util/fs.mjs'
+import { runWithTimeout } from '../util/proc.mjs'
 
 export const id = 'claude'
 export const command = 'claude'
@@ -128,6 +129,34 @@ export function probe () {
       ? null
       : `no session activity in ${dir} (last 30d) — run \`${command}\` interactively to authenticate`,
     sessions,
+  }
+}
+
+// Live ping-pong against the model — used by `artel probe --json`. Minimal
+// prompt; just verify the engine round-trips a recognisable token. Cost
+// is a few tokens; latency dominates by network. 30s hard timeout.
+export async function roundtrip ({ timeoutMs = 30000 } = {}) {
+  const r = await runWithTimeout(
+    command,
+    ['-p', 'Reply with exactly the single word: pong'],
+    { timeoutMs },
+  )
+  if (r.timedOut) {
+    return { status: 'down', detail: `timeout after ${timeoutMs}ms`, durationMs: r.durationMs }
+  }
+  if (r.code !== 0) {
+    const err = (r.stderr || r.stdout || `exit ${r.code}`).trim().split('\n')[0].slice(0, 200)
+    return { status: 'down', detail: `${command} exit ${r.code}: ${err}`, durationMs: r.durationMs }
+  }
+  const out = (r.stdout || '').trim()
+  const match = /\bpong\b/i.test(out)
+  return {
+    status: match ? 'ok' : 'unexpected',
+    detail: match
+      ? `pong received in ${r.durationMs}ms`
+      : `response missing "pong": ${out.slice(0, 80)}`,
+    durationMs: r.durationMs,
+    response: out.slice(0, 200),
   }
 }
 

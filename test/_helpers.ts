@@ -185,6 +185,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/contract.mjs',
   'engine/util/git.mjs',
   'engine/util/drivers.mjs',
+  'engine/util/proc.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',
