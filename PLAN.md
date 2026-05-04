@@ -52,7 +52,7 @@ implementations later requires no migration.
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
 | V7 | Infra reconcile pass + availability events | `[v2]` | `cluster.heartbeat` ships in C2; `role.*` / `engine.*` lifecycle events when needed. |
-| V8 | Replay tooling | `[v2]` | Debugging convenience; not blocker. |
+| V8 | **Replay tooling** | `[done]` | `artel replay <task | dispatch-id>` re-runs a past dispatch on the same or a different engine. Resolves target by slug (most-recent meta) or UUID v7 dispatch_id; pulls role + prompt from `.meta` and `.prompt` sidecars; spawns a new dispatch with auto-generated slug `<orig>-replay-<short>` and `--retry-of <orig-id>` so the chain reconstructs from events.jsonl. Flags: `--engine`, `--model`, `--task` (override slug), `--effort`, `--sandbox`, `--tools`, `--permission-mode`, `--timeout-ms`. Errors helpfully when target / prompt missing. 162 tests green (6 new e2e). |
 | V9 | Mid-run heartbeats from lifecycle | `[v2]` | Checkpoint API covers observability gap. |
 | V10 | **Dispatch deltas + git context in telemetry** | `[done]` | `engine/util/git.mjs` exposes `gitContext` + `gitDelta`. Lifecycle calls `gitContext` pre-`markRunning` (captures `commit_sha` / `branch` / `repo_name` — origin URL parsed; SSH + HTTPS; falls back to project basename). Calls `gitDelta(commit_sha)` post-exit (working-tree diff via `git diff --shortstat <sha>` covers committed + uncommitted, tracked-only). Both flow into `dispatch.start` / `dispatch.end` event payloads + `.meta` sidecar. `status.mjs` RECENT row gets `+N/-M` delta annotation when present. Tolerates non-git dirs / git-not-on-PATH. 131 tests green (20 new — 11 git unit + 1 spawn e2e + 1 status e2e + existing). |
 | V11 | **Agent identity & truststore** | `[v2]` | Agents commit under their own identity, not the owner's. (a) Dedicated `name <email>` + signing key per agent / cluster; (b) SSH key separate from owner's for push; (c) truststore abstraction for agent credentials (tokens / OAuth / SSH / API keys) — mounted into the dispatch env on demand, not embedded in events. Lives outside `events.jsonl` (operational state, not history). Open: in-tree under `.artel/trust/` with strict file perms vs external secret manager (1Password / pass / OS keychain) integration. Drives §C10 follow-up: "only owner commits to master" is a current invariant; agent-identity commits don't relax that — the agent-branch protocol still funnels through owner review at the master boundary. |
@@ -79,6 +79,13 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V8 landed: `artel replay <task | dispatch-id>`.
+  Resolves target by slug or dispatch_id, pulls role + prompt from
+  sidecars, spawns a new dispatch with `--retry-of <orig-id>` and auto-
+  generated `<orig>-replay-<short>` slug. CLI overrides for engine /
+  model / task / effort / sandbox / tools / permission-mode /
+  timeout-ms. Helpful errors for missing target or pre-V1 dispatches
+  without a prompt sidecar. 162 tests green (6 new e2e).
 - **2026-05-04** — `artel probe --json` — detailed checks + live roundtrip.
   Each driver gains an async `roundtrip()` export that invokes the engine
   with a minimal "say pong" prompt and reports `{ status, detail,
