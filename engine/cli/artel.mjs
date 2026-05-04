@@ -13,6 +13,7 @@ const SUBCOMMANDS = {
   status: 'status.mjs',
   probe: 'probe.mjs',
   logs: 'logs.mjs',
+  replay: 'replay.mjs',
   checkpoint: 'checkpoint.mjs',
 }
 
@@ -27,6 +28,7 @@ Usage: artel <${cmds}> [...args]
   status      cluster snapshot or live dashboard
   probe       engine readiness (binary + version + auth state)
   logs        drill into a single dispatch (meta + events + prompt + out)
+  replay      re-run a past dispatch (same role + prompt, optionally new engine)
   checkpoint  emit a sub-role checkpoint event
 
 Run 'artel <command> --help' for command-specific options.`)
