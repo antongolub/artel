@@ -314,6 +314,42 @@ const getParked = () => {
     .slice(0, 10)
 }
 
+// Aggregate activity over the last `days` days from .dispatches/*.meta:
+// disposition counts, role/engine breakdown, summed delta. Returns null
+// when there are no dispatches in the window — render skips the panel.
+const getActivity = (days = DAYS) => {
+  const dir = join(PROJECT_ARTEL, '.dispatches')
+  if (!existsSync(dir)) return null
+  const cutoffMs = cutoff(days)
+  let total = 0
+  const dispositions = {}
+  const byRole = {}
+  const byEngine = {}
+  let linesAdded = 0
+  let linesRemoved = 0
+  let filesChanged = 0
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.meta')) continue
+    let m
+    try { m = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+    if (!m.completedAt) continue
+    const ts = Date.parse(m.completedAt)
+    if (!ts || ts < cutoffMs) continue
+    total++
+    const d = m.disposition || 'unknown'
+    dispositions[d] = (dispositions[d] || 0) + 1
+    if (m.role) byRole[m.role] = (byRole[m.role] || 0) + 1
+    if (m.engine) byEngine[m.engine] = (byEngine[m.engine] || 0) + 1
+    if (m.delta) {
+      linesAdded += m.delta.lines_added || 0
+      linesRemoved += m.delta.lines_removed || 0
+      filesChanged += m.delta.files_changed || 0
+    }
+  }
+  if (total === 0) return null
+  return { total, dispositions, byRole, byEngine, linesAdded, linesRemoved, filesChanged }
+}
+
 const getTimedOut = () => {
   const dir = join(PROJECT_ARTEL, '.dispatches')
   if (!existsSync(dir)) return []
@@ -608,6 +644,33 @@ const renderParked = (items) => {
   return out
 }
 
+const renderActivity = (stats) => {
+  if (!stats) return ''
+  const dispoOrder = [
+    ['success', green('✓')],
+    ['parked', yellow('⚠')],
+    ['timeout', red('⏱')],
+    ['error', red('✗')],
+  ]
+  const dispoChunks = dispoOrder
+    .filter(([d]) => stats.dispositions[d])
+    .map(([d, icon]) => `${stats.dispositions[d]}${icon}`)
+    .join(' ')
+  const sortedRoles = Object.entries(stats.byRole).sort(([, a], [, b]) => b - a).slice(0, 5)
+  const sortedEngines = Object.entries(stats.byEngine).sort(([, a], [, b]) => b - a)
+  const roleStr = sortedRoles.map(([r, n]) => `${r} ${n}`).join(dim(' · '))
+  const engineStr = sortedEngines.map(([e, n]) => `${e} ${n}`).join(dim(' · '))
+  let out = `\n${bold('ACTIVITY')} ${dim(`(last ${DAYS}d)`)}\n`
+  out += `  ${stats.total} dispatches  ${dispoChunks}`
+  if (stats.filesChanged) {
+    out += `  ${dim('·')}  ${green('+' + stats.linesAdded)}/${red('-' + stats.linesRemoved)} ${dim(`across ${stats.filesChanged} files`)}`
+  }
+  out += '\n'
+  if (sortedRoles.length) out += `  ${dim('by role:  ')}${roleStr}\n`
+  if (sortedEngines.length) out += `  ${dim('by engine:')} ${engineStr}\n`
+  return out
+}
+
 const renderTimedOut = (items) => {
   if (!items.length) return ''
   const cols = process.stdout.columns || 120
@@ -749,6 +812,7 @@ const render = () => {
   const dispatcher = getDispatcherStatus()
   const running = getRunning()
   const recent = getRecentDispatches(5)
+  const activity = getActivity()
   const timedOut = getTimedOut()
   const parked = getParked()
   const queue = parseQueue()
@@ -775,6 +839,7 @@ const render = () => {
   process.stdout.write(renderFeed(feed))
   process.stdout.write(renderRunning(dispatcher, running))
   process.stdout.write(renderRecent(recent))
+  process.stdout.write(renderActivity(activity))
   process.stdout.write(renderTimedOut(timedOut))
   process.stdout.write(renderParked(parked))
   process.stdout.write(renderQueue(queue))

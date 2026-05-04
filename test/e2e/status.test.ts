@@ -193,6 +193,52 @@ describe('artel status: dashboard context', () => {
   })
 })
 
+describe('artel status: ACTIVITY panel', () => {
+  const writeMeta = (root: string, name: string, body: object) => {
+    writeFileSync(join(root, '.artel', '.dispatches', `${name}.meta`), JSON.stringify(body) + '\n')
+  }
+
+  it('aggregates dispositions, roles, engines, and delta totals', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    const now = new Date().toISOString()
+    writeMeta(root, 'a', { task: 'a', role: 'implementer', engine: 'codex', completedAt: now, disposition: 'success', delta: { files_changed: 2, lines_added: 12, lines_removed: 3 } })
+    writeMeta(root, 'b', { task: 'b', role: 'implementer', engine: 'codex', completedAt: now, disposition: 'success', delta: { files_changed: 1, lines_added: 4, lines_removed: 1 } })
+    writeMeta(root, 'c', { task: 'c', role: 'architect', engine: 'claude', completedAt: now, disposition: 'parked' })
+    writeMeta(root, 'd', { task: 'd', role: 'adversary', engine: 'claude', completedAt: now, disposition: 'success' })
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('ACTIVITY')
+    expect(r.stdout).toContain('4 dispatches')
+    expect(r.stdout).toMatch(/3✓ 1⚠/)
+    expect(r.stdout).toMatch(/\+16\/-4/)
+    expect(r.stdout).toMatch(/across 3 files/)
+    expect(r.stdout).toMatch(/by role:.*implementer 2.*architect 1.*adversary 1/)
+    expect(r.stdout).toMatch(/by engine:.*codex 2.*claude 2/)
+  })
+
+  it('omits the panel entirely when no dispatches in window', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).not.toContain('ACTIVITY')
+  })
+
+  it('skips delta line when dispatches lack delta data', () => {
+    const root = createTempRepo()
+    installStatus(root)
+    mkdirSync(join(root, '.artel', '.dispatches'), { recursive: true })
+    writeMeta(root, 'old', { task: 'old', role: 'implementer', engine: 'codex', completedAt: new Date().toISOString(), disposition: 'success' })
+    const r = runNode(root, ['engine/cli/status.mjs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('ACTIVITY')
+    expect(r.stdout).toContain('1 dispatches')
+    expect(r.stdout).not.toMatch(/across \d+ files/)
+  })
+})
+
 describe('artel status: empty-state robustness', () => {
   it('renders skeleton without crashing when QUEUE.md is missing', () => {
     const root = createTempRepo()

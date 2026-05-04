@@ -40,6 +40,7 @@ import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
 import { mtimeMs, readJsonl, walkJsonl } from '../util/fs.mjs'
+import { runWithTimeout } from '../util/proc.mjs'
 
 export const id = 'codex'
 export const command = 'codex'
@@ -131,6 +132,34 @@ export function probe () {
     version,
     authState: 'missing',
     hint: `${auth} not found — run \`${command} login\` to authenticate`,
+  }
+}
+
+// Live ping-pong against the model — used by `artel probe --json`.
+// `codex exec` emits header + final assistant text; we extract the last
+// non-empty line and look for "pong". 30s hard timeout.
+export async function roundtrip ({ timeoutMs = 30000 } = {}) {
+  const r = await runWithTimeout(
+    command,
+    ['exec', '--skip-git-repo-check', 'Reply with exactly the single word: pong'],
+    { timeoutMs },
+  )
+  if (r.timedOut) {
+    return { status: 'down', detail: `timeout after ${timeoutMs}ms`, durationMs: r.durationMs }
+  }
+  if (r.code !== 0) {
+    const err = (r.stderr || r.stdout || `exit ${r.code}`).trim().split('\n').pop()?.slice(0, 200) || ''
+    return { status: 'down', detail: `${command} exit ${r.code}: ${err}`, durationMs: r.durationMs }
+  }
+  const out = (r.stdout || '').trim()
+  const match = /\bpong\b/i.test(out)
+  return {
+    status: match ? 'ok' : 'unexpected',
+    detail: match
+      ? `pong received in ${r.durationMs}ms`
+      : `response missing "pong": ${out.split('\n').pop()?.slice(0, 80) || ''}`,
+    durationMs: r.durationMs,
+    response: out.split('\n').filter((l) => l.trim()).slice(-3).join(' / ').slice(0, 200),
   }
 }
 

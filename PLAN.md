@@ -79,6 +79,23 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — `artel probe --json` — detailed checks + live roundtrip.
+  Each driver gains an async `roundtrip()` export that invokes the engine
+  with a minimal "say pong" prompt and reports `{ status, detail,
+  durationMs, response }`. probe.mjs `--json` mode runs probe() (sync)
+  and roundtrip() (async, parallel via Promise.all) per driver, assembles
+  a `checks: [binary, auth, roundtrip]` array per engine, plus an overall
+  `status: ok | degraded | down`. Plain text mode unchanged (instant
+  snapshot, no model call). Flags: `--no-ping` to skip roundtrip in JSON
+  mode, `--timeout-ms <n>` for per-engine timeout (default 30s).
+  New `engine/util/proc.mjs` async-spawn-with-timeout helper. 156 tests
+  green (2 new e2e — roundtrip ok/unexpected/skipped paths).
+- **2026-05-03** — `artel status` ACTIVITY panel — surface for V10 deltas.
+  Aggregates `.dispatches/*.meta` over 7d: total count, dispositions
+  (`N✓ M⚠ K⏱ L✗`), summed `delta` (`+lines/-lines across N files`),
+  by-role and by-engine breakdowns. Skips entirely when no dispatches in
+  window. Renders between RECENT and TIMED-OUT sections. 154 tests
+  green (3 new e2e).
 - **2026-05-03** — `artel status` empty-state robustness. Was crashing
   with `ENOENT` on missing `.artel/QUEUE.md` (e.g. fresh init, or
   status invoked from a directory without artel runtime). Now renders
