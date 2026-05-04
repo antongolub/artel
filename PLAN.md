@@ -79,6 +79,13 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — `artel events` — tail / filter the event stream.
+  Replaces manual `tail -f .artel/events.jsonl | jq` workflow. Filters:
+  `--task` / `--trace` / `--kind` / `--type` / `--since 30s|5m|2h|1d` /
+  `--limit N`. Follow mode (`-f`) polls jsonl every 500ms and renders
+  new appends. JSON pass-through (`--json`) for piping. Per-kind colour:
+  workload cyan, signal/infra yellow, control magenta. Out-of-backlog
+  QoL win. 171 tests green (8 new e2e).
 - **2026-05-04** — V8 landed: `artel replay <task | dispatch-id>`.
   Resolves target by slug or dispatch_id, pulls role + prompt from
   sidecars, spawns a new dispatch with `--retry-of <orig-id>` and auto-
