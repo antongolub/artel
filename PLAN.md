@@ -55,7 +55,7 @@ implementations later requires no migration.
 | V8 | **Replay tooling** | `[done]` | `artel replay <task | dispatch-id>` re-runs a past dispatch on the same or a different engine. Resolves target by slug (most-recent meta) or UUID v7 dispatch_id; pulls role + prompt from `.meta` and `.prompt` sidecars; spawns a new dispatch with auto-generated slug `<orig>-replay-<short>` and `--retry-of <orig-id>` so the chain reconstructs from events.jsonl. Flags: `--engine`, `--model`, `--task` (override slug), `--effort`, `--sandbox`, `--tools`, `--permission-mode`, `--timeout-ms`. Errors helpfully when target / prompt missing. 162 tests green (6 new e2e). |
 | V9 | **Mid-run heartbeats from lifecycle** | `[done]` | Lifecycle emits a `heartbeat` event every `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) until the child exits or settles, plus updates `.meta.lastHeartbeatAt` + `.meta.pidAlive`. `0` disables. `heartbeat` added to reserved workload types in schema. `interval.unref()` so a stuck heartbeat can never keep node alive past settle. Status RUNNING gets a `hb Ns ago` annotation coloured by freshness (green ≤90s, yellow ≤5m, red older). 176 tests green (5 new — 4 unit + 1 status e2e). |
 | V10 | **Dispatch deltas + git context in telemetry** | `[done]` | `engine/util/git.mjs` exposes `gitContext` + `gitDelta`. Lifecycle calls `gitContext` pre-`markRunning` (captures `commit_sha` / `branch` / `repo_name` — origin URL parsed; SSH + HTTPS; falls back to project basename). Calls `gitDelta(commit_sha)` post-exit (working-tree diff via `git diff --shortstat <sha>` covers committed + uncommitted, tracked-only). Both flow into `dispatch.start` / `dispatch.end` event payloads + `.meta` sidecar. `status.mjs` RECENT row gets `+N/-M` delta annotation when present. Tolerates non-git dirs / git-not-on-PATH. 131 tests green (20 new — 11 git unit + 1 spawn e2e + 1 status e2e + existing). |
-| V11 | **Agent identity (truststore v1)** | `[done]` | `.artel/trust/identities.json` registers named git identities (`name` / `email` / optional `ssh_key`). Roles declare `identity: <name>` in frontmatter; `--identity` CLI overrides per-dispatch; `ARTEL_IDENTITY` env exposed to the child. Lifecycle injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` / `GIT_SSH_COMMAND` (path shell-quoted, `IdentitiesOnly=yes`). Unknown name fails dispatch with `Known: ...` list. `artel trust list` is read-only inspector (`--json`). Credentials axis (tokens / API keys via parallel `credentials.json`) deferred to V11.2. SSH key generation deferred — user provides path. 195 tests green (19 new — 12 unit + 7 e2e). |
+| V11 | **Agent identity & credentials (truststore)** | `[done]` | **V11.1 (identities):** `.artel/trust/identities.json` registers named git identities. Roles declare `identity: <name>`; lifecycle injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` / `GIT_SSH_COMMAND`. **V11.2 (credentials):** `.artel/trust/credentials.json` (gitignore) holds opaque secrets. Roles declare `requires: <NAMES>`; lifecycle merges into spawn env, strict on missing. CLI shows names only. **V11.3 (mutators + keygen):** `artel trust` is multi-subcommand — `set-identity` / `delete-identity` / `set-credential` (stdin or `--from-env`, never `--value`) / `delete-credential` / `gen-ssh` (ed25519, prints pubkey on stdout for `\| gh repo deploy-key add -`). Atomic writes; credentials.json auto-`chmod 600`. **V11.4 (encryption at rest):** AES-256-GCM via pure node `crypto`. Master key (32 random bytes, base64) at `~/.config/artel/master.key` by default — overridable via `ARTEL_MASTER_KEY_FILE` (path) or `ARTEL_MASTER_KEY` (inline base64, for CI). `artel trust gen-key [--print]` writes the key 0600. `artel trust encrypt` seals existing creds in place to `credentials.json.enc` (fresh IV per write); `decrypt` reverses. Mode auto-detected by file shape; mutators reseal on every write; reads transparently decrypt. Auth-tag failure or wrong key throws helpful error. `artel trust list` shows mode badge (empty / plaintext / encrypted). Encrypted creds still flow into dispatch env via existing `requires:` path. 267 tests green (91 new across V11.1–V11.4). |
 
 ## Open questions — defaults locked
 
@@ -79,6 +79,46 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V11.4 landed: encryption at rest for credentials.
+  Pure-node `crypto.mjs` exposes `encryptJson` / `decryptJson` /
+  `generateMasterKey` / `loadMasterKey` / `masterKeyPath` (AES-256-GCM,
+  fresh IV per write, schema `secret-aes-256-gcm-v1`). Master key
+  default at `~/.config/artel/master.key` (XDG-aware), overridable via
+  `ARTEL_MASTER_KEY_FILE` (path) or `ARTEL_MASTER_KEY` (inline base64
+  — CI-friendly). `trust.mjs` gains `credentialsMode` /
+  `encryptCredentials` / `decryptCredentials`; `readCredentials` and
+  `writeCredentials` auto-detect mode and route through the cipher
+  when `.enc` is on disk. New CLI subcommands `gen-key` (writes 0600,
+  refuses overwrite), `encrypt` (seals plaintext → .enc + removes
+  plaintext, idempotent), `decrypt` (reverse). `artel trust list`
+  shows the mode badge. Encrypted creds still flow into dispatch env
+  via `requires:` — no change for downstream roles. 267 tests green
+  (30 new across crypto unit + trust integration + CLI e2e).
+  Encryption-at-rest closes V11. Per-cluster scoping + audit log
+  remain open follow-ups but are not blocking — flagged informally,
+  no [v2] entry filed.
+- **2026-05-04** — V11.3 landed: trust mutators + SSH keygen.
+  `artel trust` now multi-subcommand: `set-identity --author "N <e>"
+  [--ssh-key]`, `delete-identity`, `set-credential` (stdin or
+  `--from-env VAR` — never `--value` for shell-history safety),
+  `delete-credential`, `gen-ssh <identity> [--force]`. Atomic JSON
+  writes (rename-into-place); credentials.json auto-chmod 0600;
+  gen-ssh shells `ssh-keygen -t ed25519 -N ''`, writes to
+  `.artel/trust/keys/<name>`, updates identity's ssh_key, prints public
+  key on stdout (other output to stderr — pipe-friendly). 237 tests
+  green (21 new — 13 unit + 8 e2e + 3 keygen guarded by host
+  `ssh-keygen` availability). Encryption-at-rest deferred (V11.4 —
+  needs key-management design call).
+- **2026-05-04** — V11.2 landed: credential injection.
+  `.artel/trust/credentials.json` (gitignore!) — opaque token/secret
+  registry keyed by env-var name. Roles declare `requires: A, B, C` in
+  frontmatter; lifecycle resolves each via `resolveRequires` and merges
+  into spawn env. Strict — missing names throw before the child starts
+  (`requires: X but credentials.json is missing`). `artel trust list`
+  shows credential **names only** — values never exposed by CLI. JSON
+  shape changed to `{ identities, credentials: [names] }`. Truststore
+  values override operator env on name collision. 216 tests green
+  (21 new — 16 unit + 5 e2e).
 - **2026-05-04** — V11.1 landed: agent identity (truststore v1).
   `.artel/trust/identities.json` registers named git identities (name +
   email + optional ssh_key path); `engine/util/trust.mjs` resolves and

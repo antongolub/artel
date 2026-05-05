@@ -19,7 +19,7 @@ import { detectParked } from './parked.mjs'
 import { uuidv7 } from '../util/ids.mjs'
 import { gitContext, gitDelta } from '../util/git.mjs'
 import { listDrivers } from '../util/drivers.mjs'
-import { identityEnv, resolveIdentity } from '../util/trust.mjs'
+import { identityEnv, resolveIdentity, resolveRequires } from '../util/trust.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -410,12 +410,18 @@ export async function dispatchLifecycle(
   if (taskAttrs) runArgs.push('--task-attrs', JSON.stringify(taskAttrs))
   runArgs.push(role, prompt)
 
-  // V11 — agent identity injection. Per-dispatch CLI override beats
+  // V11.1 — agent identity injection. Per-dispatch CLI override beats
   // role frontmatter; absent both, no identity is set and the child
   // inherits the operator's git config.
   const identityName = identity || roleMeta.identity || null
   const identityRecord = resolveIdentity(paths.projectDir, identityName)
   const identityEnvVars = identityEnv(identityRecord)
+
+  // V11.2 — credential injection. Strict: role declares `requires:` of
+  // env-var names; lifecycle resolves each from .artel/trust/credentials.json
+  // and merges into spawn env. Missing names throw before the child
+  // starts, so dispatches don't get partway through and then 401.
+  const credentialEnvVars = resolveRequires(paths.projectDir, roleMeta.requires)
 
   const outFd = openSync(outPath, 'w')
   let child
@@ -425,6 +431,7 @@ export async function dispatchLifecycle(
       env: {
         ...process.env,
         ...identityEnvVars,
+        ...credentialEnvVars,
         ARTEL_TASK: task,
         ARTEL_ROLE: role,
         ARTEL_DISPATCH_ID: dispatchId,
