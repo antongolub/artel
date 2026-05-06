@@ -68,7 +68,7 @@ upgrade cycle).
 ## CLI
 
 ```
-artel <init | probe | run | spawn | status | logs | events | replay | trust | checkpoint>
+artel <init | probe | run | spawn | status | logs | events | replay | trust | queue | sweep | checkpoint>
 ```
 
 | command | what it does |
@@ -82,6 +82,8 @@ artel <init | probe | run | spawn | status | logs | events | replay | trust | ch
 | `events` | tail / filter the event stream — `--task` `--trace` `--kind` `--type` `--since` `-f` |
 | `replay <task | dispatch-id>` | re-run a past dispatch on the same or a different engine |
 | `trust` | inspect / manage agent identities, credentials, SSH keys, encryption |
+| `queue` | inspect / mutate `.artel/QUEUE.md` — `list / add / move / done / rm` |
+| `sweep` | prune old `.dispatches/` artefacts (keeps active + newest `--keep`) |
 | `checkpoint` | sub-role self-report between phases |
 
 Run `artel <cmd> --help` for command-specific options.

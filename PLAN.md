@@ -79,6 +79,23 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — `artel queue` + `artel sweep` (housekeeping pair).
+  **`artel queue`** is a programmatic editor for `.artel/QUEUE.md` —
+  `list` (`--section` filter, `--json`), `add` (slug + optional `--tag`
+  + free-text description, default section Pending), `move --to <S>`
+  (auto-stamps `[since <iso>]` when moving into In progress, strips
+  on exit), `done` (sugar for `move --to "Recently done"`), `rm`.
+  Bootstraps a missing QUEUE.md with the canonical 5-section
+  skeleton. Each mutation emits `queue.entry.*` infra events
+  (`queue.` added to RESERVED_TYPE_PREFIXES.infra).
+  **`artel sweep`** prunes `.artel/.dispatches/<task>.{meta,out,prompt}`
+  triplets older than `--older-than` (default 30d), excluding tasks
+  in active QUEUE sections (For Owner / In progress / Pending /
+  Blocked) and the newest `--keep N` dispatches (default 20).
+  `--dry-run` plans only; `--json` for scripts. Emits a single
+  `cluster.swept` summary event with file count + bytes freed.
+  Rejects malformed `--older-than`. 302 tests green (25 new — 14
+  queue + 9 sweep + 2 cross-checks).
 - **2026-05-04** — Trust audit log + examples/quickstart.
   `engine/util/audit.mjs` exposes `appendInfraEvent(projectDir, type,
   payload)` — wraps SCHEMA_VERSION + envelope baseline (id / at /
