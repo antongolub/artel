@@ -68,12 +68,39 @@ Four ways to invoke a sub-role:
 - **CLI dispatcher** — `artel run <role>` shells a separate driver
   process with the role's pre-approved tool surface.
 - **Spawn wrapper** — `artel spawn <role> <task>` adds task sidecars /
-  branch precreate and a per-dispatch wall-clock timeout (default 30m,
-  override via `--timeout-ms` or `ARTEL_DISPATCH_TIMEOUT_MS`).
+  branch precreate / git context capture / delta accounting / per-dispatch
+  wall-clock timeout (default 30m, override via `--timeout-ms` or
+  `ARTEL_DISPATCH_TIMEOUT_MS`).
 
 Roles live at [`agents/<role>.md`](./agents/) — frontmatter declares
-engine / model / tools / permission-mode; body is the system prompt.
-List with `artel run --list`.
+engine / model / tools / permission-mode + optional `identity:` (git
+author from `.artel/trust/identities.json`) and `requires:` (env-var
+names pulled from the credentials registry). List with
+`artel run --list`. Custom drivers go in `.artel/drivers/<name>.mjs`
+or `~/.artel/drivers/<name>.mjs`.
+
+## Inspecting + recovering
+
+When dispatches misbehave the dispatcher / orchestrator inspect via:
+
+- **`artel status [--watch]`** — single-screen dashboard: FEED · RUNNING
+  · RECENT (per-dispatch duration + tokens + delta `+N/-M`) · ACTIVITY
+  (7d aggregates) · TIMED-OUT · PARKED · QUEUE · TOKENS (with auth
+  health markers).
+- **`artel logs <task>`** — meta + events + prompt + .out for one
+  dispatch in one view.
+- **`artel events`** — tail / filter `events.jsonl`. Filters
+  `--task` / `--trace` / `--kind` / `--type` / `--since`; follow mode
+  `-f` for live multiplexed view.
+- **`artel probe`** — pre-flight check that all engines are reachable
+  and authenticated; `--json` for scripting.
+- **`artel replay <task | dispatch-id>`** — re-run a past dispatch on
+  the same or a different engine; auto-wires `--retry-of` so the
+  retry chain reconstructs from `events.jsonl`.
+
+These are read-only / additive (replay creates a new dispatch with a
+fresh slug; never mutates the original). Use them before escalating
+to the owner.
 
 ## Protocol
 

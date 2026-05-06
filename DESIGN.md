@@ -236,6 +236,34 @@ Engine-specific `codex-model:` / `copilot-model:` overrides bypass the
 filter (legacy keys are by definition engine-targeted). Copilot proxies
 both Anthropic and OpenAI namespaces, so its driver applies no filter.
 
+### 5.1 Driver overlay
+
+A driver is an `.mjs` module exporting at minimum `args(meta,
+promptParts, session)`; optional `id` / `command` / `api_version` /
+`parseUsage(outPath, sessionId)` / `sessionTokens(opts)` /
+`probe()`. Drivers resolve across three layers, project wins:
+
+```
+1. <project>/.artel/drivers/<engine>.mjs    (project — wins)
+2. ~/.artel/drivers/<engine>.mjs            (user-global)
+3. <platform>/engine/drivers/<engine>.mjs   (platform default)
+```
+
+Same precedence shape as skills (§8.3). `engine/util/drivers.mjs`
+exposes `resolveDriverPath` / `loadDriver` / `listDrivers` /
+`discoverDrivers`. `loadDriver` validates the contract (`args` is
+required) and throws on unknown names with a `Visible drivers: ...`
+list — `--engine ../../foo` injection is impossible because lookup is
+by id against the trusted overlay layers.
+
+`artel run --list` and `artel probe` discover all visible drivers
+(including overlays). Probe rows show a `(project)` / `(user)` marker
+when the loaded driver isn't from the platform.
+
+Env overrides for tests / sandboxes:
+- `ARTEL_PROJECT_DIR` — relocate the project layer
+- `ARTEL_USER_DRIVERS_DIR` — relocate the user layer
+
 ## 6. Tracing
 
 ```
@@ -243,6 +271,7 @@ ARTEL_DISPATCH_ID         UUID of this dispatch
 ARTEL_TRACE_ID            UUID of root chain
 ARTEL_PARENT_DISPATCH_ID  UUID of direct parent (null at top level)
 ARTEL_PARENT_ROLE         parent role (for policy check)
+ARTEL_IDENTITY            agent identity name (when frontmatter declares one)
 ```
 
 Env propagated by `run.mjs` to child process. If child itself spawns
@@ -250,6 +279,30 @@ Env propagated by `run.mjs` to child process. If child itself spawns
 uses as `parent_*` for the new dispatch.
 
 Top-level invocation (dispatcher chat): env unset → no parent.
+
+### 6.1 Git context + delta capture
+
+Every dispatch records a structural footprint for offline auditing
+without needing the source tree:
+
+```
+git:
+  commit_sha:  <40-hex, HEAD at dispatch start>
+  branch:      <agent branch the dispatch ran on>
+  repo_name:   <owner/repo, parsed from origin URL; falls back to dir basename>
+
+delta:
+  files_changed:  N
+  lines_added:    N
+  lines_removed:  N
+```
+
+`git` lands on `dispatch.start` events + `.meta` sidecar; `delta`
+lands on `dispatch.end`. Computation: `git rev-parse HEAD` pre-spawn,
+`git diff --shortstat <start_sha>` post-exit (covers committed +
+uncommitted, tracked-only). Both fields are optional — non-git
+directories or `git`-not-on-PATH skip cleanly. `status.mjs` RECENT row
+shows `+N/-M`; `status.mjs` ACTIVITY panel aggregates over 7d.
 
 ## 7. Retries
 
@@ -394,6 +447,26 @@ fresh fork from master, not a reset of in-flight work.
 
 The platform names no specific roles as protected — projects declare
 this per role.
+
+### 8.5 Agent identity + required credentials
+
+```yaml
+identity: bot                       # name from .artel/trust/identities.json
+requires: GITHUB_TOKEN, NPM_TOKEN   # env-var names from credentials.json
+```
+
+`identity:` resolves to a record with `name` / `email` / optional
+`ssh_key`. Lifecycle exports `GIT_AUTHOR_*` / `GIT_COMMITTER_*` /
+`GIT_SSH_COMMAND` (path shell-quoted, `IdentitiesOnly=yes`) into the
+child. CLI `--identity <name>` overrides per-dispatch. `ARTEL_IDENTITY`
+exposed to the child for downstream use.
+
+`requires:` enumerates env-var names; lifecycle resolves each through
+the credentials registry and merges into the spawn env. Strict —
+missing names fail before the child starts. Truststore values
+override operator env on collision (registry is authoritative).
+
+Full truststore schema + storage shape lives in §15.
 
 ## 9. Sub-role self-reporting
 
@@ -556,21 +629,137 @@ control.handoff.requested  { from, to, node_id, claim_id }
 control.handoff.completed  { from, to, node_id, new_claim_id }
 ```
 
-## 13. What's deferred (reserved, not implemented in v1)
+## 13. Truststore
+
+Operational state for agent-as-actor: who an agent commits as, what
+secrets it can read, and how those secrets sit at rest. Lives in
+`.artel/trust/`, **outside** `events.jsonl` — credentials in an
+append-only history would be unrecoverable. Two parallel registries:
+
+```
+.artel/trust/
+├── identities.json            # commit-safe (no secrets, just author info)
+├── credentials.json           # gitignore — opaque secrets
+├── credentials.json.enc       # if encrypted at rest (mutually exclusive)
+└── keys/<identity>            # generated SSH keys (mode 0600)
+└── keys/<identity>.pub
+```
+
+### 13.1 Identities
+
+```json
+{
+  "bot":   { "name": "artel-bot", "email": "bot@cluster.local",
+             "ssh_key": "/.../keys/bot" },
+  "owner": { "name": "Anton Golub", "email": "anton@example.com" }
+}
+```
+
+`identity:` in role frontmatter (or `--identity` CLI override)
+selects an entry. Lifecycle injects:
+```
+GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL
+GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL
+GIT_SSH_COMMAND="ssh -i \"<ssh_key>\" -o IdentitiesOnly=yes"
+ARTEL_IDENTITY=<name>
+```
+
+`IdentitiesOnly=yes` ensures git doesn't accidentally use the
+operator's `ssh-agent` keys. Unknown name fails dispatch with a
+`Known: ...` list before the child starts.
+
+### 13.2 Credentials
+
+```json
+{
+  "GITHUB_TOKEN": "ghp_…",
+  "NPM_TOKEN":    "npm_…"
+}
+```
+
+Keys are env-var names (regex `^[A-Za-z_][A-Za-z0-9_]*$`); values are
+opaque strings. `requires: NAME1, NAME2` in role frontmatter resolves
+via the registry and merges into the spawn env. Strict —
+missing names fail before the child starts. Truststore values
+override operator env on collision (registry is authoritative).
+
+`artel trust list` shows credential **names only** — values never via
+CLI. `set-credential` reads from stdin or `--from-env <VAR>`; never
+`--value` (shell history risk).
+
+### 13.3 Encryption at rest
+
+Optional, opt-in. Mode is detected by file shape:
+
+| on disk | mode |
+|---|---|
+| `credentials.json.enc` | encrypted |
+| `credentials.json` | plaintext |
+| neither | empty |
+
+`artel trust encrypt` flips plaintext → encrypted; `decrypt` reverses.
+Mutators (`set-credential` / `delete-credential`) follow the existing
+mode; reads decrypt transparently.
+
+Cipher: AES-256-GCM, fresh IV per write, schema
+`secret-aes-256-gcm-v1`:
+```json
+{
+  "schema": "secret-aes-256-gcm-v1",
+  "iv":     "<base64, 12 bytes>",
+  "tag":    "<base64, 16 bytes>",
+  "ciphertext": "<base64>"
+}
+```
+
+Auth-tag failure or wrong key throws `decryption failed (wrong key or
+tampered file)` — never silently returns garbage.
+
+### 13.4 Master key
+
+Resolution order (first hit wins):
+1. `ARTEL_MASTER_KEY` env (32 bytes base64-decoded — CI-friendly)
+2. `ARTEL_MASTER_KEY_FILE` env (path)
+3. `~/.config/artel/master.key` (XDG-aware via `$XDG_CONFIG_HOME`)
+
+Format: 32 random bytes, base64-encoded text, mode 0600. Generated by
+`artel trust gen-key`. The key lives **outside** the project tree so
+the repo stays committable; losing the key means losing the encrypted
+credentials (acceptable for local dev — back up to a password manager).
+
+### 13.5 Threat model
+
+Defends against accidental disclosure (screen share, git commit,
+file backup). Does **not** defend against an attacker with read access
+to both the project tree and the key file — encryption only helps when
+the key lives elsewhere (CI secret, separate machine, OS keychain).
+
+### 13.6 What's deferred
+
+- OS keychain integration (macOS Keychain, libsecret, Windows
+  Credential Manager). The `ARTEL_MASTER_KEY` env path covers most CI
+  scenarios without it.
+- Per-cluster vs per-project credential scoping — currently per-project.
+- Audit log: events.jsonl entries when trust mutates. Mutators are
+  silent today.
+
+## 14. What's deferred (reserved, not implemented in v1)
 
 - Real claim/lease implementation (renewal loops, conflict detector).
 - Capability-based work routing engine.
-- Mid-run heartbeats from lifecycle (rely on checkpoint API for now).
 - Network transports beyond `fs`: `git`, `sqlite`, `postgres`, `http`.
 - Auth between clusters (sign+verify events).
 - Federation discovery beyond static manifest.
 - Daemon/file-watcher (lazy reconcile in v1).
-- `engine/replay.mjs` tooling.
 
-V1 commits the **schema and reserved namespaces** so these can land
-without migrations.
+(V8 replay, V9 heartbeats, V10 deltas, V11 truststore, and `artel
+events` / `logs` / `probe` are now implemented — moved out of this
+list as they landed.)
 
-## 14. Not in scope
+V1 commits the **schema and reserved namespaces** so the remaining
+items can land without migrations.
+
+## 15. Not in scope
 
 - Quorum protocols (Paxos/Raft). Eventual consistency suffices for our
   use-case; no global state requiring linearisability.
@@ -581,6 +770,13 @@ without migrations.
 
 ## Revision log
 
+- **2026-05-04** — Doc sync after V6 / V8 / V9 / V10 / V11 + the
+  `probe` / `logs` / `events` / `replay` / `trust` subcommands all
+  landed. New: §5.1 (driver overlay precedence), §6.1 (git context +
+  delta capture), §8.5 (identity / requires frontmatter), §13
+  (truststore — identities, credentials, encryption at rest, master
+  key resolution, threat model). §14 deferred list pruned of items
+  now implemented; §13 → §14, §14 → §15 renumbered.
 - **2026-05-02** — MVP carve confirmed. Architecture stays as written;
   execution scope narrowed in `PLAN.md` under parent-project urgency.
   Repository abstraction, queue-graph, pipelines, federation transports

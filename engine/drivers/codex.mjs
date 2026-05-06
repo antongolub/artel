@@ -165,7 +165,7 @@ export async function roundtrip ({ timeoutMs = 30000 } = {}) {
 
 // parseUsage: find the rollout file matching `sessionId`, read its last
 // `token_count` event for cumulative usage. Cost is null — codex does not
-// expose dollar amounts (provider zone, DESIGN.md §14).
+// expose dollar amounts (provider zone, DESIGN.md §15).
 export function parseUsage (_outPath, sessionId) {
   const path = findSessionFile(sessionId)
   if (!path) return null
