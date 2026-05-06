@@ -1,0 +1,10 @@
+{
+  "name": "artel-quickstart",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal example of a project using @antongolub/artel.",
+  "type": "module",
+  "scripts": {
+    "test": "echo 'no tests yet'"
+  }
+}

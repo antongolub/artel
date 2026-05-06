@@ -79,6 +79,22 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — Trust audit log + examples/quickstart.
+  `engine/util/audit.mjs` exposes `appendInfraEvent(projectDir, type,
+  payload)` — wraps SCHEMA_VERSION + envelope baseline (id / at /
+  cluster_id / instance_id) for one-shot CLIs that aren't dispatch
+  contexts. `trust.` added to `RESERVED_TYPE_PREFIXES.infra`. Each
+  `artel trust` mutator (`set-identity` / `delete-identity` /
+  `set-credential` / `delete-credential` / `gen-ssh` / `gen-key` /
+  `encrypt` / `decrypt`) appends a `trust.*` infra event — values
+  NEVER recorded; only names + length + non-secret metadata. Failed
+  mutations don't emit. `artel events --kind infra` surfaces the
+  audit trail. `examples/quickstart/` ships a copy-and-go template
+  with `package.json` / `.gitignore` (covers credentials and keys) /
+  `.artel/QUEUE.md` skeleton + a README walkthrough of init → probe →
+  spawn → status / events → logs → replay → trust. 277 tests green
+  (10 new e2e for audit). DESIGN §13.6 audit-log entry can flip from
+  deferred → done in a follow-up.
 - **2026-05-04** — V11.4 landed: encryption at rest for credentials.
   Pure-node `crypto.mjs` exposes `encryptJson` / `decryptJson` /
   `generateMasterKey` / `loadMasterKey` / `masterKeyPath` (AES-256-GCM,

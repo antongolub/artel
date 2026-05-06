@@ -1,0 +1,17 @@
+# artel runtime — regenerated per dispatch, not source of truth
+node_modules/
+.artel/cluster.json
+.artel/.dispatches/
+.artel/.sessions/
+.artel/events.jsonl
+.artel/dispatcher_state.json
+.artel/state.md
+
+# truststore — secrets and generated keys never go to git
+.artel/trust/credentials.json
+.artel/trust/credentials.json.enc
+.artel/trust/keys/
+
+# (.artel/QUEUE.md, .artel/JOURNAL.md, .artel/trust/identities.json
+#  are tracked by convention — they're coordination + author-info,
+#  no secrets)

@@ -119,6 +119,10 @@ ARTEL_HOME=$PWD/artel
 node $ARTEL_HOME/engine/cli/artel.mjs init --name my-cluster
 ```
 
+A copy-and-go template lives in [`examples/quickstart/`](./examples/quickstart/)
+— minimal `package.json`, `.gitignore`, `.artel/QUEUE.md` skeleton,
+plus a walkthrough of init → probe → spawn → status → logs → replay.
+
 ### Optional: truststore for agent identity + secrets
 
 Separate agent-made commits from your operator identity. Inject API

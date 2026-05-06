@@ -38,6 +38,7 @@ export const RESERVED_TYPE_PREFIXES = {
     'engine.',
     'model.',
     'policy.',
+    'trust.',
   ],
   signal: [
     'signal.',

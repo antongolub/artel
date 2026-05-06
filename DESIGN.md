@@ -734,14 +734,33 @@ file backup). Does **not** defend against an attacker with read access
 to both the project tree and the key file — encryption only helps when
 the key lives elsewhere (CI secret, separate machine, OS keychain).
 
-### 13.6 What's deferred
+### 13.6 Audit log
+
+Every trust mutator appends an `infra` event to `.artel/events.jsonl`.
+`engine/util/audit.mjs#appendInfraEvent` wraps the envelope; `trust.`
+is reserved in `RESERVED_TYPE_PREFIXES.infra`. Events:
+
+| Mutator | Type | Payload (always sans secrets) |
+|---|---|---|
+| `set-identity` | `trust.identity.set` | `{ name, fields: ['name','email','ssh_key'] }` |
+| `delete-identity` | `trust.identity.deleted` | `{ name }` |
+| `set-credential` | `trust.credential.set` | `{ name, value_length }` |
+| `delete-credential` | `trust.credential.deleted` | `{ name }` |
+| `gen-ssh` | `trust.ssh_key.generated` | `{ identity, path, force }` |
+| `gen-key` | `trust.master_key.generated` | `{ path, force }` |
+| `encrypt` | `trust.credentials.encrypted` | `{ from_mode }` |
+| `decrypt` | `trust.credentials.decrypted` | `{ from_mode }` |
+
+Failed mutations (e.g. `delete-identity` on a missing name) don't
+emit. Surface the trail with `artel events --kind infra --type
+'trust.*'`.
+
+### 13.7 What's deferred
 
 - OS keychain integration (macOS Keychain, libsecret, Windows
   Credential Manager). The `ARTEL_MASTER_KEY` env path covers most CI
   scenarios without it.
 - Per-cluster vs per-project credential scoping — currently per-project.
-- Audit log: events.jsonl entries when trust mutates. Mutators are
-  silent today.
 
 ## 14. What's deferred (reserved, not implemented in v1)
 

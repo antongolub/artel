@@ -38,6 +38,7 @@ import {
   sshKeyPath,
 } from '../util/trust.mjs'
 import { generateMasterKey, loadMasterKey, masterKeyPath } from '../util/crypto.mjs'
+import { appendInfraEvent } from '../util/audit.mjs'
 
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 
@@ -188,6 +189,10 @@ if (sub === 'set-identity') {
     die('set-identity: provide at least one of --author / --ssh-key', 2)
   }
   const merged = setIdentity(PROJECT_DIR, name, patch)
+  appendInfraEvent(PROJECT_DIR, 'trust.identity.set', {
+    name,
+    fields: Object.keys(patch),
+  })
   console.error(`identity '${name}' set: ${merged.name || ''} <${merged.email || ''}>${merged.ssh_key ? ` · ssh ${merged.ssh_key}` : ''}`)
   process.exit(0)
 }
@@ -199,6 +204,7 @@ if (sub === 'delete-identity') {
   if (!name) die('delete-identity: <name> is required', 2)
   const removed = deleteIdentity(PROJECT_DIR, name)
   if (!removed) die(`delete-identity: '${name}' not found`, 1)
+  appendInfraEvent(PROJECT_DIR, 'trust.identity.deleted', { name })
   console.error(`identity '${name}' deleted`)
   process.exit(0)
 }
@@ -233,6 +239,12 @@ if (sub === 'set-credential') {
     value = readFileSync(0, 'utf8').replace(/\n$/, '')
   }
   setCredential(PROJECT_DIR, name, value)
+  // Audit by name + length only — never the value (defence against
+  // accidental disclosure if events.jsonl leaks).
+  appendInfraEvent(PROJECT_DIR, 'trust.credential.set', {
+    name,
+    value_length: value.length,
+  })
   console.error(`credential '${name}' set (${value.length} chars)`)
   process.exit(0)
 }
@@ -244,6 +256,7 @@ if (sub === 'delete-credential') {
   if (!name) die('delete-credential: <name> is required', 2)
   const removed = deleteCredential(PROJECT_DIR, name)
   if (!removed) die(`delete-credential: '${name}' not found`, 1)
+  appendInfraEvent(PROJECT_DIR, 'trust.credential.deleted', { name })
   console.error(`credential '${name}' deleted`)
   process.exit(0)
 }
@@ -294,6 +307,11 @@ if (sub === 'gen-ssh') {
   try { fs.chmodSync(keyPath, 0o600) } catch {}
 
   setIdentity(PROJECT_DIR, identity, { ssh_key: keyPath })
+  appendInfraEvent(PROJECT_DIR, 'trust.ssh_key.generated', {
+    identity,
+    path: keyPath,
+    force: !!values.force,
+  })
   const pub = readFileSync(`${keyPath}.pub`, 'utf8').trim()
   const size = statSync(keyPath).size
   console.error(`${green('✓')} keypair for '${identity}' at ${keyPath} (${size} bytes, mode 0600)`)
@@ -327,6 +345,10 @@ if (sub === 'gen-key') {
   } catch (err) {
     die(err.message, 1)
   }
+  appendInfraEvent(PROJECT_DIR, 'trust.master_key.generated', {
+    path,
+    force: !!values.force,
+  })
   console.error(`${green('✓')} master key written to ${path} (32 bytes, mode 0600)`)
   if (values.print) {
     console.error(`  ${dim('base64 (also acceptable as ARTEL_MASTER_KEY env var):')}`)
@@ -343,12 +365,14 @@ if (sub === 'gen-key') {
 if (sub === 'encrypt') {
   try { loadMasterKey() }
   catch (err) { die(`encrypt: ${err.message}`, 1) }
+  const fromMode = credentialsMode(PROJECT_DIR)
   let result
   try { result = encryptCredentials(PROJECT_DIR) }
   catch (err) { die(`encrypt: ${err.message}`, 1) }
   if (!result.changed) {
     console.error(`${dim('credentials already encrypted at')} ${credentialsEncPath(PROJECT_DIR)}`)
   } else {
+    appendInfraEvent(PROJECT_DIR, 'trust.credentials.encrypted', { from_mode: fromMode })
     console.error(`${green('✓')} credentials encrypted at ${credentialsEncPath(PROJECT_DIR)}`)
     console.error(`  ${dim('plaintext credentials.json removed')}`)
   }
@@ -360,12 +384,14 @@ if (sub === 'encrypt') {
 if (sub === 'decrypt') {
   try { loadMasterKey() }
   catch (err) { die(`decrypt: ${err.message}`, 1) }
+  const fromMode = credentialsMode(PROJECT_DIR)
   let result
   try { result = decryptCredentials(PROJECT_DIR) }
   catch (err) { die(`decrypt: ${err.message}`, 1) }
   if (!result.changed) {
     console.error(`${dim('credentials are not encrypted (mode:')} ${credentialsMode(PROJECT_DIR)}${dim(')')}`)
   } else {
+    appendInfraEvent(PROJECT_DIR, 'trust.credentials.decrypted', { from_mode: fromMode })
     console.error(`${green('✓')} credentials decrypted at ${credentialsPath(PROJECT_DIR)}`)
     console.error(`  ${dim('encrypted .enc file removed')}`)
     console.error(`  ${yellow('!')} ${dim('plaintext credentials.json now in the truststore — gitignore!')}`)
