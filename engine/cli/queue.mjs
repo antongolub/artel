@@ -15,7 +15,16 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { appendInfraEvent } from '../util/audit.mjs'
+import { appendWorkloadEvent } from '../util/audit.mjs'
+import {
+  buildGraph,
+  EDGE_RELATIONS,
+  effectiveStatus,
+  findGatingCycle,
+  incomingEdges,
+  outgoingEdges,
+  readyForDispatch,
+} from '../core/queue_graph.mjs'
 
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const QUEUE_PATH = join(PROJECT_DIR, '.artel', 'QUEUE.md')
@@ -42,8 +51,17 @@ Usage: artel queue <subcommand>
   move <task> --to <section>         relocate between sections
   done <task>                        move to Recently done
   rm <task>                          remove
+  ready [--json]                     nodes ready for dispatch (Pending
+                                       with no unresolved upstream)
+  graph [--json]                     event-sourced graph snapshot
+                                       (queue_node.* + queue_edge.*)
+  link <from> <to> --relation <R>    add a directed edge between nodes
+                                       (rejects cycles for blocks /
+                                        depends_on)
+  unlink <from> <to> --relation <R>  remove an edge
 
-Sections: ${SECTIONS.map((s) => `'${s}'`).join(' | ')}`)
+Sections: ${SECTIONS.map((s) => `'${s}'`).join(' | ')}
+Edge relations: ${[...EDGE_RELATIONS].join(' | ')}`)
   process.exit(code)
 }
 
@@ -220,7 +238,13 @@ if (sub === 'add') {
   const item = `${tag}${task}${desc}`
   sectionByName(queue, sectionName).items.push(item)
   writeQueue(queue)
-  appendInfraEvent(PROJECT_DIR, 'queue.entry.added', { task, section: sectionName, tag: values.tag || null })
+  // Status mirrors the section name 1:1 — see queue_graph#VALID_STATUSES.
+  appendWorkloadEvent(PROJECT_DIR, 'queue_node.created', {
+    node_id: task,
+    status: sectionName,
+    ...(values.tag ? { lane: values.tag } : {}),
+    ...(descParts.length ? { description: descParts.join(' ') } : {}),
+  })
   console.error(`${green('+')} '${task}' added to ${sectionName}`)
   process.exit(0)
 }
@@ -251,8 +275,19 @@ const moveTask = (slug, target, label = 'move') => {
   }
   sectionByName(queue, target).items.push(next)
   writeQueue(queue)
-  appendInfraEvent(PROJECT_DIR, 'queue.entry.moved', {
-    task: slug, from: from.name, to: target,
+  // V2.1 — `move` is `queue_node.updated` with status patch. since_at
+  // tracks the In-progress timestamp; cleared (`null`) when leaving.
+  const fields = { status: target }
+  if (target === 'In progress') {
+    const m = next.match(/\[since ([^\]]+)\]/)
+    if (m) fields.since_at = m[1]
+  } else {
+    fields.since_at = null
+  }
+  appendWorkloadEvent(PROJECT_DIR, 'queue_node.updated', {
+    node_id: slug,
+    fields,
+    from_status: from.name,
   })
   console.error(`${green('→')} '${slug}' moved: ${from.name} → ${target}`)
 }
@@ -297,8 +332,187 @@ if (sub === 'rm') {
   const { section, index } = found
   section.items.splice(index, 1)
   writeQueue(queue)
-  appendInfraEvent(PROJECT_DIR, 'queue.entry.removed', { task, section: section.name })
+  appendWorkloadEvent(PROJECT_DIR, 'queue_node.deleted', {
+    node_id: task,
+    from_status: section.name,
+  })
   console.error(`${yellow('−')} '${task}' removed from ${section.name}`)
+  process.exit(0)
+}
+
+// --- ready (V2.1) ---
+
+if (sub === 'ready') {
+  let values
+  try {
+    ({ values } = parseArgs({
+      args: subRest,
+      options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+
+  const graph = buildGraph(PROJECT_DIR)
+  const ready = readyForDispatch(graph)
+  if (values.json) {
+    console.log(JSON.stringify(ready, null, 2))
+    process.exit(0)
+  }
+  // Compute Pending-but-blocked for the human view — useful context
+  // when the ready list is empty for a non-obvious reason.
+  const pendingBlocked = [...graph.nodes.values()]
+    .filter((n) => n.status === 'Pending' && effectiveStatus(graph, n.slug) === 'Blocked')
+  console.log(`\n${bold('artel queue ready')} ${dim(`— ${ready.length} dispatchable node${ready.length === 1 ? '' : 's'}`)}\n`)
+  if (!ready.length) {
+    console.log(`  ${dim('(none — no Pending nodes' + (pendingBlocked.length ? ' with all upstream resolved' : '') + ')')}`)
+  } else {
+    for (const n of ready) {
+      const lane = n.lane ? `${dim('[')}${n.lane}${dim(']')} ` : ''
+      const desc = n.description ? ` ${dim('—')} ${dim(n.description)}` : ''
+      console.log(`  ${green('•')} ${lane}${cyan(n.slug)}${desc}`)
+    }
+  }
+  if (pendingBlocked.length) {
+    console.log(`\n${bold('Held by upstream')} ${dim(`(${pendingBlocked.length} Pending nodes blocked on gating edges)`)}`)
+    for (const n of pendingBlocked) {
+      const upstream = incomingEdges(graph, n.slug)
+        .filter((e) => e.relation === 'blocks' || e.relation === 'depends_on')
+        .filter((e) => {
+          const src = graph.nodes.get(e.from)
+          return !src || src.status !== 'Recently done'
+        })
+        .map((e) => `${e.from} ${dim('(' + e.relation + ')')}`)
+      console.log(`  ${yellow('!')} ${cyan(n.slug)} ${dim('←')} ${upstream.join(', ')}`)
+    }
+  }
+  console.log()
+  process.exit(0)
+}
+
+// --- graph (V2.1) ---
+
+if (sub === 'graph') {
+  let values
+  try {
+    ({ values } = parseArgs({
+      args: subRest,
+      options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+
+  const graph = buildGraph(PROJECT_DIR)
+  const allNodes = [...graph.nodes.values()].sort((a, b) =>
+    (a.created_at || '').localeCompare(b.created_at || ''))
+  const allEdges = [...graph.edges.values()].sort((a, b) =>
+    (a.added_at || '').localeCompare(b.added_at || ''))
+
+  if (values.json) {
+    // Augment each node with effective status (V2.2 — derives Blocked
+    // from upstream gating edges).
+    const nodes = allNodes.map((n) => ({
+      ...n,
+      effective_status: effectiveStatus(graph, n.slug),
+    }))
+    console.log(JSON.stringify({ nodes, edges: allEdges }, null, 2))
+    process.exit(0)
+  }
+
+  console.log(`\n${bold('artel queue graph')} ${dim(`— ${allNodes.length} node${allNodes.length === 1 ? '' : 's'}, ${allEdges.length} edge${allEdges.length === 1 ? '' : 's'} (event-sourced)`)}\n`)
+  if (!allNodes.length) {
+    console.log(`  ${dim('(no queue_node.* events yet — mutate via `artel queue add` etc.)')}`)
+  } else {
+    console.log(bold('Nodes'))
+    for (const n of allNodes) {
+      const lane = n.lane ? `${dim('[')}${n.lane}${dim(']')} ` : ''
+      const since = n.since_at ? ` ${dim('· since')} ${n.since_at.replace('T', ' ').slice(0, 19)}` : ''
+      const eff = effectiveStatus(graph, n.slug)
+      const statusStr = eff !== n.status
+        ? `${n.status} ${dim('→ effective:')} ${yellow(eff)}`
+        : n.status
+      console.log(`  ${cyan(n.slug.padEnd(28))} ${lane}${dim('status:')} ${statusStr}${since}`)
+    }
+  }
+  if (allEdges.length) {
+    console.log(`\n${bold('Edges')}`)
+    for (const e of allEdges) {
+      console.log(`  ${cyan(e.from)} ${dim('--')} ${e.relation} ${dim('->')} ${cyan(e.to)}`)
+    }
+  }
+  console.log()
+  process.exit(0)
+}
+
+// --- link / unlink (V2.2) ---
+
+const validateLinkArgs = (positionals, values, label) => {
+  const [from, to] = positionals
+  if (!from || !to) die(`${label}: <from> <to> are required`, 2)
+  const relation = values.relation
+  if (!relation) die(`${label}: --relation <R> is required (one of: ${[...EDGE_RELATIONS].join(' | ')})`, 2)
+  if (!EDGE_RELATIONS.has(relation)) {
+    die(`${label}: invalid relation '${relation}' (valid: ${[...EDGE_RELATIONS].join(' | ')})`, 2)
+  }
+  if (from === to) die(`${label}: self-edges not allowed`, 2)
+  return { from, to, relation }
+}
+
+if (sub === 'link') {
+  let values, positionals
+  try {
+    ({ values, positionals } = parseArgs({
+      args: subRest,
+      options: {
+        relation: { type: 'string' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      allowPositionals: true,
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+  const { from, to, relation } = validateLinkArgs(positionals, values, 'link')
+
+  const graph = buildGraph(PROJECT_DIR)
+  if (!graph.nodes.has(from)) die(`link: '${from}' is not a known node — add it first`, 1)
+  if (!graph.nodes.has(to)) die(`link: '${to}' is not a known node — add it first`, 1)
+
+  const cycle = findGatingCycle(graph, from, to, relation)
+  if (cycle) {
+    die(`link: would create a cycle in '${relation}' edges: ${cycle.join(' → ')}`, 1)
+  }
+
+  appendWorkloadEvent(PROJECT_DIR, 'queue_edge.added', {
+    relation, from, to,
+  })
+  console.error(`${green('+')} ${from} ${dim('--')} ${relation} ${dim('->')} ${to}`)
+  process.exit(0)
+}
+
+if (sub === 'unlink') {
+  let values, positionals
+  try {
+    ({ values, positionals } = parseArgs({
+      args: subRest,
+      options: {
+        relation: { type: 'string' },
+        help: { type: 'boolean', short: 'h' },
+      },
+      allowPositionals: true,
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+  const { from, to, relation } = validateLinkArgs(positionals, values, 'unlink')
+
+  const graph = buildGraph(PROJECT_DIR)
+  const has = [...graph.edges.values()].some(
+    (e) => e.from === from && e.to === to && e.relation === relation,
+  )
+  if (!has) die(`unlink: edge '${from} -- ${relation} -> ${to}' not found`, 1)
+
+  appendWorkloadEvent(PROJECT_DIR, 'queue_edge.removed', {
+    relation, from, to,
+  })
+  console.error(`${yellow('−')} ${from} ${dim('--')} ${relation} ${dim('->')} ${to}`)
   process.exit(0)
 }
 

@@ -39,7 +39,6 @@ export const RESERVED_TYPE_PREFIXES = {
     'model.',
     'policy.',
     'trust.',
-    'queue.',
   ],
   signal: [
     'signal.',

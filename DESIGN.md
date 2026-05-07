@@ -491,38 +491,120 @@ dispatcher real-time visibility without consuming your context".
 
 ## 10. Queue as a graph
 
-Queue is a **projection** over events. No separate persistence.
+Queue is a **projection** over events. No separate persistence required —
+`events.jsonl` is canonical, `QUEUE.md` is a human-friendly read-side
+projection, `engine/core/queue_graph.mjs` is the machine-friendly one.
 
-**Nodes:**
+### 10.1 V2.1 — Node graph (landed)
+
+**Events** (workload kind, reserved prefix `queue_node.*`):
+
 ```
-node.id            UUID
-node.title         human-readable
-node.status        derived: pending | running | blocked | paused | completed | superseded
-node.priority      derived from priority edges + pipeline attrs
-node.owner_cluster UUID
-node.attrs         object
+queue_node.created  { node_id, status, lane?, description?, role_hint?, since_at? }
+queue_node.updated  { node_id, fields: {...patch}, from_status? }   # null in fields = clear
+queue_node.deleted  { node_id, from_status? }
 ```
 
-**Edges (typed):**
+**Replay** (`buildGraph(projectDir)`): walks `events.jsonl`, returns
+`{ nodes: Map<slug, NodeState> }` where each `NodeState` carries:
 
-| Type | Meaning | Lifecycle |
+```
+slug                from event.node_id
+status              For Owner | In progress | Pending | Blocked | Recently done
+lane?               free-text tag (impl, spec, infra, ...)
+description?
+since_at?           timestamp; set when status=In progress, cleared on exit
+created_at          first queue_node.created.at
+updated_at          last applied event.at
+created_event_id    UUID (debug)
+updated_event_id    UUID (debug)
+```
+
+`queue_node.updated` for an unknown slug initialises a fresh node — lets
+external producers (e.g. cluster B) sync nodes the local stream hasn't
+seen the create for.
+
+**CLI surface** (`engine/cli/queue.mjs`):
+- `add` / `move` / `done` / `rm` mutate `QUEUE.md` AND emit the
+  matching `queue_node.*` event
+- `ready` lists Pending nodes sorted by created_at — what a dispatcher
+  would pull next
+- `graph` dumps the replayed snapshot (machine-readable via `--json`)
+
+### 10.2 V2.2 — Edges (landed)
+
+Reserved prefix `queue_edge.*`. Edge identity is the tuple
+`(relation, from, to)` — re-emitting the same triple is a no-op. The
+edge's semantic kind lives in the event payload as `relation` (the
+event-level `kind` is always `workload` for queue mutations).
+
+```
+queue_edge.added    { relation, from, to, attrs? }
+queue_edge.removed  { relation, from, to }
+```
+
+Relations:
+
+| `relation` | Meaning | Gating? |
 |---|---|---|
-| `blocks` | dst cannot start until src completed | registered → deregistered (block snat) |
-| `supersedes` | src replaced dst | registered (immutable) |
-| `parent_of` | src decomposed into dst | registered (immutable) |
-| `triggers` | src completion creates dst | registered (immutable) |
-| `same_pipeline_run` | both belong to same run | lifetime = run |
-| `derived_from` | dst created from src processing | registered (immutable) |
+| `blocks` | src must complete before dst can start | yes |
+| `depends_on` | dst needs src's output | yes |
+| `supersedes` | src replaced dst | no — informational |
+| `parent_of` | src decomposed into dst | no — structure |
+| `triggers` | src completion creates dst | no — provenance |
+| `derived_from` | dst created from src processing | no — lineage |
+| `same_pipeline_run` | both belong to same pipeline run | no — grouping |
 
-**Status projection** (computed by `state_gen.mjs`):
+Gating relations participate in dispatch readiness; the rest are
+informational (tracked but don't affect status).
 
-| QUEUE.md section | Predicate |
-|---|---|
-| `For Owner` | inbound `pause_for_owner` edge or `signal.review_required` unhandled |
-| `In progress` | live dispatch with `node_id = this` |
-| `Pending` | no inbound `blocks` unresolved, no live dispatch, not completed |
-| `Blocked` | unresolved inbound `blocks` |
-| `Recently done` | completed within window N |
+**Status derivation** — `effectiveStatus(graph, slug)`:
+
+```
+declared = In progress  →  effective = In progress  (sticky; owner forced through)
+declared = Recently done →  effective = Recently done
+declared = Pending + has unresolved gating inbound  →  effective = Blocked
+otherwise                                          →  effective = declared
+```
+
+"Unresolved" = upstream node's status ≠ `Recently done`.
+
+`readyForDispatch(graph)` returns Pending nodes with no unresolved
+gating inbound, sorted by `created_at` ascending.
+
+**Cycle detection.** `findGatingCycle(graph, from, to, relation)`
+walks outgoing gating edges from `to`; if it reaches `from`, the
+hypothetical edge would close a cycle. Reports the path
+`[from, to, ..., from]` or null. CLI `artel queue link` invokes this
+before emitting the event — cycles never persist to events.jsonl.
+Self-edges (`from === to`) rejected at the same gate.
+
+**CLI:**
+- `artel queue link <from> <to> --relation <R>` — emits `queue_edge.added`
+  after validation (nodes exist, no self-edge, no gating cycle for
+  `blocks` / `depends_on`).
+- `artel queue unlink <from> <to> --relation <R>` — emits
+  `queue_edge.removed`. Errors if the edge isn't present.
+- `artel queue ready` filters by gating; surfaces a `Held by upstream`
+  panel showing which Pending nodes are blocked and by what.
+- `artel queue graph --json` includes `edges` + per-node
+  `effective_status`.
+
+### 10.3 Status projection contract
+
+| QUEUE.md section | Declared status (V2.1) | Effective status (V2.2) |
+|---|---|---|
+| `For Owner` | explicit | declared (V2.3 may derive from edges) |
+| `In progress` | explicit | declared (sticky) |
+| `Pending` | explicit | declared, OR `Blocked` if unresolved gating inbound |
+| `Blocked` | explicit | declared, OR derived from edges |
+| `Recently done` | explicit | declared (sticky) |
+
+V2.2 lands the **derived `Blocked`** path: a Pending node with an
+unresolved gating inbound edge is effectively Blocked regardless of
+its declared status. Owner-facing tools (`artel queue graph`,
+`artel queue ready`) surface both — declared shows what was set,
+effective reflects upstream constraints.
 
 ## 11. Pipelines
 

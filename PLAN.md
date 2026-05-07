@@ -46,7 +46,7 @@ implementations later requires no migration.
 | # | Title | Status | Why deferred |
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
-| V2 | Queue graph model | `[v2]` | Flat sections in `QUEUE.md` cover parent project's flow. |
+| V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
 | V3 | Pipeline registry + engine | `[v2]` | Orchestrator does flow-routing in-LLM today. Formalisation post-MVP. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
@@ -79,6 +79,35 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V2.2 landed: queue graph edges + cycle detection.
+  `queue_edge.*` workload events with seven relations; gating subset
+  (`blocks` / `depends_on`) drives status derivation. `engine/core/
+  queue_graph.mjs` extended with `incomingEdges` / `outgoingEdges` /
+  `hasUnresolvedUpstream` / `effectiveStatus` / `findGatingCycle`
+  pure helpers. CLI gains `artel queue link` / `unlink` (validates
+  src/dst exist, rejects self-edges, rejects gating cycles before
+  emit); `ready` filters on gating with "Held by upstream" hint;
+  `graph --json` includes edges + `effective_status` per node.
+  `events.mjs` formatter renders `<from> --rel-> <to>` for edge
+  events. DESIGN §10.2 marked landed; §10.3 status contract reframed
+  as declared vs effective. 345 tests green (28 new — 18 graph unit
+  + 10 e2e). V2.3 (markdown ↔ events reconciliation; pipelines as
+  graph traversal patterns) remains open.
+- **2026-05-04** — V2.1 landed: queue graph (nodes-only).
+  `engine/core/queue_graph.mjs` replays `queue_node.*` workload events
+  from `events.jsonl` into `Map<slug, NodeState>`. `engine/util/audit.mjs`
+  factored to share envelope code; gains `appendWorkloadEvent` alongside
+  `appendInfraEvent`. `artel queue` mutators (`add` / `move` / `rm`)
+  switch from `queue.entry.*` infra to canonical `queue_node.*`
+  workload events (`queue.` dropped from infra reserved prefixes —
+  was speculative). New subcommands `artel queue ready` (dispatchable
+  Pending nodes, sorted by created_at) and `artel queue graph` (full
+  replay snapshot, `--json` for tooling). `events.mjs` formatter
+  surfaces `node=` / `status=` / `lane=` / `from=` for the new vocab.
+  DESIGN §10 rewritten — §10.1 V2.1 nodes (landed), §10.2 V2.2 edges
+  (reserved prefix `queue_edge.*`, deferred), §10.3 status projection
+  contract showing V2.1 explicit vs V2.2 derived. 317 tests green
+  (15 new — 9 graph unit + 6 e2e).
 - **2026-05-04** — `artel queue` + `artel sweep` (housekeeping pair).
   **`artel queue`** is a programmatic editor for `.artel/QUEUE.md` —
   `list` (`--section` filter, `--json`), `add` (slug + optional `--tag`

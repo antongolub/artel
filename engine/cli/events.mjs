@@ -140,6 +140,14 @@ const formatEvent = (e) => {
   if (e.retry_count) ctx.push(`retry=${e.retry_count}`)
   if (e.delta) ctx.push(`${green('+' + (e.delta.lines_added || 0))}/${red('-' + (e.delta.lines_removed || 0))}`)
   if (e.usage) ctx.push(`tokens=${(e.usage.tokens_in || 0)}/${(e.usage.tokens_out || 0)}`)
+  // queue_node.* (V2.1) — surface node_id + the meaningful patch fields.
+  if (e.node_id) ctx.push(`node=${e.node_id}`)
+  if (e.status) ctx.push(`status=${e.status}`)
+  if (e.lane) ctx.push(`lane=${e.lane}`)
+  if (e.fields?.status) ctx.push(`status=${e.fields.status}`)
+  if (e.from_status) ctx.push(`from=${e.from_status}`)
+  // queue_edge.* (V2.2) — render `<from> --rel-> <to>`.
+  if (e.relation && e.from && e.to) ctx.push(`${e.from} --${e.relation}-> ${e.to}`)
   return `${dim(t)}  ${type} ${roleStr} ${dim(ctx.join(' '))}`
 }
 

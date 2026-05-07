@@ -176,6 +176,7 @@ export const ENGINE_FILES_CORE = [
   'engine/core/parked.mjs',
   'engine/core/schema.mjs',
   'engine/core/cluster.mjs',
+  'engine/core/queue_graph.mjs',
 ]
 export const ENGINE_FILES_UTIL = [
   'engine/util/ids.mjs',
