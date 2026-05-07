@@ -17,6 +17,7 @@ const SUBCOMMANDS = {
   replay: 'replay.mjs',
   trust: 'trust.mjs',
   queue: 'queue.mjs',
+  pipeline: 'pipeline.mjs',
   sweep: 'sweep.mjs',
   checkpoint: 'checkpoint.mjs',
 }
@@ -36,6 +37,7 @@ Usage: artel <${cmds}> [...args]
   replay      re-run a past dispatch (same role + prompt, optionally new engine)
   trust       inspect agent identities under .artel/trust/
   queue       inspect / mutate .artel/QUEUE.md (list / add / move / done / rm)
+  pipeline    register / list / show / run declarative flows
   sweep       prune old .dispatches/ artefacts (keeps active + recent)
   checkpoint  emit a sub-role checkpoint event
 

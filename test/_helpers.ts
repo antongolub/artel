@@ -190,6 +190,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/trust.mjs',
   'engine/util/crypto.mjs',
   'engine/util/audit.mjs',
+  'engine/util/pipelines.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',

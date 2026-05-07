@@ -1,0 +1,300 @@
+// E2E for `artel pipeline` — register / list / show / run (V3.1).
+
+import { afterEach, describe, expect, it } from 'vitest'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  cleanupTempRoots,
+  createTempRepo,
+  ENGINE_FILES_CORE,
+  ENGINE_FILES_DRIVERS,
+  ENGINE_FILES_UTIL,
+  installEngineRuntime,
+  installStub,
+  runNode,
+  snapshotRepo,
+} from '../_helpers.js'
+
+afterEach(cleanupTempRoots)
+
+const installAll = (root: string) =>
+  installEngineRuntime(root, [
+    'engine/cli/pipeline.mjs',
+    'engine/cli/spawn.mjs',
+    'engine/cli/run.mjs',
+    ...ENGINE_FILES_CORE,
+    ...ENGINE_FILES_DRIVERS,
+    ...ENGINE_FILES_UTIL,
+  ])
+
+const minimal = (overrides = {}) => ({
+  id: 'demo',
+  version: 1,
+  description: 'demo flow',
+  entry: 'first',
+  nodes: {
+    first: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'do thing' },
+    done: { type: 'terminal', final_state: 'completed' },
+    fail: { type: 'terminal', final_state: 'failed' },
+  },
+  edges: [
+    { from: 'first', on_disposition: 'success', to: 'done' },
+    { from: 'first', on_disposition: '*', to: 'fail' },
+  ],
+  ...overrides,
+})
+
+const writePipelineFile = (root: string, name: string, body: object) => {
+  const path = join(root, name)
+  writeFileSync(path, JSON.stringify(body, null, 2))
+  return path
+}
+
+const events = (root: string) => {
+  const path = join(root, '.artel', 'events.jsonl')
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : []
+}
+
+describe('artel pipeline register / list / show', () => {
+  it('register copies validated def into .artel/pipelines/ and emits event', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const path = writePipelineFile(root, 'demo.json', minimal())
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register', path])
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', 'pipelines', 'demo.json'))).toBe(true)
+    const evt = events(root).find((e) => e.type === 'pipeline.registered')
+    expect(evt).toMatchObject({
+      kind: 'workload',
+      pipeline_id: 'demo',
+      pipeline_version: 1,
+      node_count: 3,
+      edge_count: 2,
+      fence_token: 0,
+    })
+  })
+
+  it('register fails on validation error', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const broken = minimal()
+    delete (broken.nodes.first as { role?: string }).role
+    const path = writePipelineFile(root, 'broken.json', broken)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register', path])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/requires a role/)
+  })
+
+  it('list shows registered pipelines', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p1.json', minimal())])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p2.json', { ...minimal(), id: 'second-flow' })])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'list'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('demo')
+    expect(r.stdout).toContain('second-flow')
+    expect(r.stdout).toMatch(/3 nodes, 2 edges/)
+  })
+
+  it('list --json emits structured array', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'list', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({ id: 'demo', version: 1, node_count: 3, edge_count: 2 })
+  })
+
+  it('show renders one pipeline', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'demo'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('demo')
+    expect(r.stdout).toContain('first')
+    expect(r.stdout).toContain('on_success')
+    expect(r.stdout).toContain('completed')
+  })
+
+  it('show --json round-trips the def', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'demo', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed.id).toBe('demo')
+    expect(parsed.entry).toBe('first')
+  })
+
+  it('show on missing pipeline → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'ghost'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/'ghost' not registered/)
+  })
+})
+
+describe('artel pipeline run (V3.1 linear)', () => {
+  it('walks success → completed; emits pipeline_run.started + .ended', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'demo'], {
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+    })
+    expect(r.status).toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      kind: 'workload',
+      final_state: 'completed',
+      pipeline_id: 'demo',
+      last_node: 'done',
+      last_disposition: 'success',
+      fence_token: 0,
+    })
+    const started = events(root).find((e) => e.type === 'pipeline_run.started')
+    expect(started.pipeline_run_id).toBe(ended.pipeline_run_id)
+  })
+
+  it('multi-node chain: 3 dispatches → all success → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'three',
+      version: 1,
+      entry: 'a',
+      nodes: {
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'a' },
+        b: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'b' },
+        c: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'c' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'a', on_disposition: 'success', to: 'b' },
+        { from: 'b', on_disposition: 'success', to: 'c' },
+        { from: 'c', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'three', '--task-prefix', 'chain'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // Three dispatches landed under task prefix `chain-<node>`.
+    for (const stem of ['chain-a', 'chain-b', 'chain-c']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+    // Each dispatch's task attrs carry pipeline_run_id + pipeline_node_id —
+    // verifiable via dispatch.start events.
+    const starts = events(root).filter((e) => e.type === 'dispatch.start')
+    expect(starts).toHaveLength(3)
+    const runIds = new Set(starts.map((e) => e.task_attrs?.pipeline_run_id).filter(Boolean))
+    // task_attrs may not surface on dispatch.start in the current schema —
+    // verify via .meta sidecar instead. Fall back to events file taskAttrs key.
+    const taskMeta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'chain-a.meta'), 'utf8'),
+    )
+    expect(taskMeta.taskAttrs?.pipeline_node_id).toBe('a')
+    expect(taskMeta.taskAttrs?.pipeline_run_id).toBeTruthy()
+  })
+
+  it('non-success disposition follows wildcard edge to abort terminal', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    // Stub that exits non-zero, no parked-marker → disposition becomes 'error'.
+    const stub = ['#!/usr/bin/env node', 'console.error("boom"); process.exit(7)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'demo'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0) // pipeline.run exits with !=0 unless completed
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+  })
+
+  it('pipeline with no transition for disposition surfaces "no transition" abort', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const stuck = {
+      id: 'stuck',
+      version: 1,
+      entry: 'a',
+      nodes: {
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        // Only handles success; any other disposition → no transition.
+        { from: 'a', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'stuck.json', stuck)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'process.exit(1)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'stuck'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.abort_reason).toMatch(/no transition for disposition/)
+  })
+
+  it('--attrs JSON merges into each dispatch task attrs', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'demo',
+      '--attrs', '{"brief": "ship the fixture"}',
+      '--task-prefix', 'briefed',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    const meta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'briefed-first.meta'), 'utf8'),
+    )
+    expect(meta.taskAttrs.brief).toBe('ship the fixture')
+    expect(meta.taskAttrs.pipeline_id).toBe('demo')
+  })
+
+  it('run on missing pipeline → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'ghost'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/'ghost' not registered/)
+  })
+})

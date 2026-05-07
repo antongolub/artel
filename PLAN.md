@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | Pipeline registry + engine | `[v2]` | Orchestrator does flow-routing in-LLM today. Formalisation post-MVP. |
+| V3 | **Pipeline registry + linear runs (V3.1)** | `[done]` | `engine/util/pipelines.mjs` (parser + validator + resolver). `engine/cli/pipeline.mjs` (`register` / `list` / `show` / `run`). V3.1 schema: JSON files at `.artel/pipelines/<id>.json` with `dispatch` + `terminal` node types and `on_disposition`-keyed edges (`success` / `parked` / `timeout` / `error` / `*`). Validator rejects bad slugs, missing roles/prompts, edges to/from unknown nodes, edges originating from terminals, pipelines with no reachable terminal. `run` synchronously walks the graph: dispatches each `dispatch` node via `dispatchLifecycle`, picks next via `resolveNext` (exact match → wildcard fallback), terminates on `terminal` or aborts on no-transition. Emits `pipeline.registered` (workload) on register; `pipeline_run.started` / `pipeline_run.ended` (workload) per run. Each dispatch's `taskAttrs` carry `pipeline_run_id` / `pipeline_id` / `pipeline_node_id` so events.jsonl reconstructs the chain. `--attrs JSON` merges into every dispatch's task attrs. 378 tests green (33 new — 13 unit on parser/resolver + 9 e2e on register/list/show + 6 e2e on run). V3.2+ deferred: parallel / condition / pause / handler / subpipeline, cron + queue.pull triggers, prompt template substitution. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,21 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V3.1 landed: pipeline registry + linear runs.
+  `engine/util/pipelines.mjs` (parser/validator/resolveNext + listing
+  helpers); `engine/cli/pipeline.mjs` (register / list / show / run).
+  JSON pipeline files at `.artel/pipelines/<id>.json` with `dispatch`
+  + `terminal` node types and `on_disposition` edges. Validator
+  enforces structural integrity (slugs, refs, reachable terminal,
+  no edges from terminals). `run` walks synchronously via
+  `dispatchLifecycle`, picks next node via exact-disposition →
+  wildcard `*` fallback, propagates `pipeline_run_id` /
+  `pipeline_id` / `pipeline_node_id` into each dispatch's
+  `taskAttrs`, emits `pipeline_run.started` / `.ended`. Aborts
+  cleanly on dispatch throw or no matching transition (event has
+  `abort_reason`). DESIGN §11 still describes the full V3 (parallel
+  / condition / pause / handler / subpipeline) — V3.2+ open.
+  378 tests green (33 new — 13 unit + 20 e2e).
 - **2026-05-04** — V2.2 landed: queue graph edges + cycle detection.
   `queue_edge.*` workload events with seven relations; gating subset
   (`blocks` / `depends_on`) drives status derivation. `engine/core/

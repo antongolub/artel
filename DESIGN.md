@@ -608,19 +608,57 @@ effective reflects upstream constraints.
 
 ## 11. Pipelines
 
-Declarative flow definitions. Stored as `.artel/pipelines/<id>.yaml`.
-Versioned. Lifecycle: `pipeline.registered/.updated/.deregistered`.
+Declarative flow definitions. Stored as JSON at
+`.artel/pipelines/<id>.json` (V3.1; YAML support possible later
+without breaking the events vocabulary). Versioned. Lifecycle:
+`pipeline.registered` / `.updated` / `.deregistered` (workload).
+
+### 11.1 V3.1 — registry + linear runs (landed)
 
 **Node types:**
-- `dispatch` — spawns sub-role
+- `dispatch` — spawns sub-role via `dispatchLifecycle`
+- `terminal` — sink with `final_state: completed | failed | aborted | superseded`
+
+**Edges:** `{ from, on_disposition, to }`. `on_disposition` ∈
+`success | parked | timeout | error | *`. Resolution is
+exact-match-first, wildcard-fallback. No matching edge for the actual
+disposition → run aborts with `abort_reason`.
+
+**Validation** at register time:
+- id matches slug regex
+- version is a positive integer
+- entry references a registered node
+- every node has its required fields (`role` + `prompt` for dispatch,
+  valid `final_state` for terminal)
+- every edge endpoint exists; edges don't originate from terminals
+- at least one terminal is reachable from `entry`
+
+**Run** is synchronous: walk node-by-node, dispatch each `dispatch`
+inline, pick next via `resolveNext`, stop on `terminal` or
+no-transition. `pipeline_run_id` (UUID v7) propagated into each
+dispatch's `taskAttrs` along with `pipeline_id` / `pipeline_node_id`
+so events.jsonl reconstructs the chain.
+
+**Lifecycle events (V3.1):**
+- `pipeline.registered` (workload) — on `register`; payload includes
+  `pipeline_id`, `pipeline_version`, `source_path`, `node_count`,
+  `edge_count`
+- `pipeline_run.started` (workload) — on `run`; payload `pipeline_run_id`,
+  `pipeline_id`, `pipeline_version`, `entry_node`
+- `pipeline_run.ended` (workload) — on terminal or abort; payload
+  `pipeline_run_id`, `final_state`, `last_node`, `last_disposition`,
+  `abort_reason?`
+
+### 11.2 V3.2+ — open
+
+Reserved by the spec; not yet implemented:
 - `parallel` — fan-out + join (`all-complete` / `any-complete` / `k-of-n`)
 - `condition` — pure decision
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition
 
-**Edges:** `on_success`, `on_failure`, `on_parked`, `on_timeout`,
-`on_budget_exhausted`, `on_signal: <type>`, `on_disposition: <wildcard>`.
+**Additional edges:** `on_signal: <type>`, `on_budget_exhausted`.
 Loops bounded by `max_visits` per node.
 
 **Entry triggers:** `queue.pull` / `event.subscribe` / `schedule.cron` /
