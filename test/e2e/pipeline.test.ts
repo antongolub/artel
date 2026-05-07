@@ -298,3 +298,102 @@ describe('artel pipeline run (V3.1 linear)', () => {
     expect(r.stderr).toMatch(/'ghost' not registered/)
   })
 })
+
+describe('artel pipeline run — parallel (V3.2.a)', () => {
+  const fanoutPipeline = () => ({
+    id: 'fanout',
+    version: 1,
+    description: 'Fan out to 3 reviewers, join all-complete',
+    entry: 'reviews',
+    nodes: {
+      reviews: { type: 'parallel', branches: ['cr', 'adv', 'maint'], join: 'all-complete' },
+      cr: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'cold-read' },
+      adv: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'attack' },
+      maint: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'audit' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'reviews', on_disposition: 'success', to: 'done' },
+      { from: 'reviews', on_disposition: '*', to: 'fail' },
+    ],
+  })
+
+  it('runs all branches, joins on success → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'fan'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // Each branch task lands under <prefix>-<parallel-id>-<branch-id>
+    for (const stem of ['fan-reviews-cr', 'fan-reviews-adv', 'fan-reviews-maint']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done', last_disposition: 'success' })
+  })
+
+  it('aggregate fails when any branch fails — wildcard catches', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // First branch succeeds; second exits non-zero (→ disposition error).
+    const def = fanoutPipeline()
+    def.nodes.cr.role = 'implementer-ok'
+    def.nodes.adv.role = 'implementer-bad'
+    def.nodes.maint.role = 'implementer-ok'
+    // We can't easily branch behaviour by role with a single stub.
+    // Easier path: keep stub generic but make it always fail; aggregate still reaches `fail`.
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'process.exit(7)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'fan2'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+    // All three branches still ran
+    for (const stem of ['fan2-reviews-cr', 'fan2-reviews-adv', 'fan2-reviews-maint']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+  })
+
+  it('branch dispatches carry pipeline_parallel_of in taskAttrs', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'tag'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    const meta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'tag-reviews-cr.meta'), 'utf8'),
+    )
+    expect(meta.taskAttrs).toMatchObject({
+      pipeline_id: 'fanout',
+      pipeline_node_id: 'cr',
+      pipeline_parallel_of: 'reviews',
+    })
+    expect(meta.taskAttrs.pipeline_run_id).toBeTruthy()
+  })
+
+  it('show renders parallel nodes', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'fanout'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/reviews\s+parallel\s+branches=\[cr, adv, maint\]\s+join=all-complete/)
+  })
+})

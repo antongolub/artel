@@ -1,9 +1,18 @@
-// Pipeline registry — parser + validator (V3.1).
+// Pipeline registry — parser + validator (V3.1 + V3.2.a).
 //
 // Pipelines live as JSON at `.artel/pipelines/<id>.json`. They define a
-// directed graph of nodes (`dispatch` + `terminal` in V3.1) connected
-// by edges keyed on dispatch disposition. Linear chains today; parallel
-// / condition / signal / handler nodes deferred to V3.2+.
+// directed graph of nodes connected by edges keyed on dispatch
+// disposition.
+//
+// V3.1 node types: `dispatch`, `terminal`.
+// V3.2.a adds `parallel` — fan-out + all-complete join. Branches run
+// sequentially in V3.2.a (the engine's dispatchLifecycle owns the git
+// working tree, so concurrent dispatches would race on branch checkout
+// + working tree state). True concurrency via git-worktree lands in
+// V3.3. The structural primitive is in place now so pipelines can
+// declare fan-out intent today.
+//
+// `condition` / `pause` / `handler` / `subpipeline` deferred to V3.2.b+.
 //
 // V3.1 schema:
 //   {
@@ -46,7 +55,11 @@ export const pipelinePath = (projectDir, id) =>
 
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
-export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal'])
+export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel'])
+
+// V3.2.a: only all-complete join. any-complete + k-of-n deferred —
+// they need cancellation semantics that depend on V3.3 worktrees.
+export const VALID_JOIN_POLICIES = new Set(['all-complete'])
 
 export const VALID_FINAL_STATES = new Set([
   'completed', 'failed', 'aborted', 'superseded',
@@ -101,6 +114,34 @@ export const validatePipeline = (def, source = '<inline>') => {
       if (!VALID_FINAL_STATES.has(node.final_state)) {
         throw new Error(`${source}: terminal node '${nid}' has invalid final_state '${node.final_state}' (valid: ${[...VALID_FINAL_STATES].join(' | ')})`)
       }
+    } else if (node.type === 'parallel') {
+      if (!Array.isArray(node.branches) || node.branches.length === 0) {
+        throw new Error(`${source}: parallel node '${nid}' requires a non-empty branches array`)
+      }
+      const join = node.join || 'all-complete'
+      if (!VALID_JOIN_POLICIES.has(join)) {
+        throw new Error(`${source}: parallel node '${nid}' has invalid join '${join}' (V3.2.a: ${[...VALID_JOIN_POLICIES].join(' | ')})`)
+      }
+      const seen = new Set()
+      for (const branchId of node.branches) {
+        if (typeof branchId !== 'string' || !(branchId in def.nodes)) {
+          throw new Error(`${source}: parallel node '${nid}' references unknown branch '${branchId}'`)
+        }
+        if (branchId === nid) {
+          throw new Error(`${source}: parallel node '${nid}' cannot list itself as a branch`)
+        }
+        if (seen.has(branchId)) {
+          throw new Error(`${source}: parallel node '${nid}' has duplicate branch '${branchId}'`)
+        }
+        seen.add(branchId)
+        // V3.2.a restriction: branches must be dispatch nodes. Nested
+        // parallel / condition / subpipeline land in V3.2.b+ once the
+        // walker is recursive on aggregate dispositions.
+        const branchNode = def.nodes[branchId]
+        if (branchNode.type !== 'dispatch') {
+          throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch node (V3.2.a; nesting deferred to V3.2.b)`)
+        }
+      }
     }
   }
   for (const [i, edge] of def.edges.entries()) {
@@ -125,16 +166,30 @@ export const validatePipeline = (def, source = '<inline>') => {
   // Sanity: at least one reachable terminal. Walk forward from entry,
   // collect reachable nodes, ensure ≥1 terminal among them. Without
   // this a pipeline could only error out on every disposition.
+  // For parallel nodes, branches are reachable via the parallel itself
+  // (not through edges) — include them in the reachable set so a
+  // parallel-only flow doesn't trip the "no terminal reachable" check.
   const reachable = new Set([def.entry])
   let frontier = [def.entry]
   while (frontier.length) {
     const next = []
     for (const id of frontier) {
+      const node = def.nodes[id]
+      // Edge-based successors
       for (const e of def.edges) {
         if (e.from !== id) continue
         if (!reachable.has(e.to)) {
           reachable.add(e.to)
           next.push(e.to)
+        }
+      }
+      // Parallel branches are reachable through the parallel node
+      if (node.type === 'parallel' && Array.isArray(node.branches)) {
+        for (const branchId of node.branches) {
+          if (!reachable.has(branchId)) {
+            reachable.add(branchId)
+            next.push(branchId)
+          }
         }
       }
     }
@@ -147,6 +202,27 @@ export const validatePipeline = (def, source = '<inline>') => {
     throw new Error(`${source}: no terminal node is reachable from entry '${def.entry}'`)
   }
   return def
+}
+
+// Aggregate disposition for a parallel join. V3.2.a only supports
+// `all-complete`. Worst-of-the-children rule:
+//   any error → 'error'
+//   else any timeout → 'timeout'
+//   else any parked → 'parked'
+//   else any unknown → that string (last seen)
+//   else (all success) → 'success'
+// Wildcard `*` edges from the parallel node still match any of these.
+const SEVERITY = ['error', 'timeout', 'parked']
+
+export const aggregateDisposition = (dispositions) => {
+  if (!dispositions.length) return 'success'
+  for (const sev of SEVERITY) {
+    if (dispositions.includes(sev)) return sev
+  }
+  // All success, or all unknowns. Return success when all match,
+  // otherwise the first non-success (covers driver-specific oddities).
+  if (dispositions.every((d) => d === 'success')) return 'success'
+  return dispositions.find((d) => d !== 'success') || 'success'
 }
 
 export const loadPipelineFile = (path) => {

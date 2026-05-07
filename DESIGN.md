@@ -618,6 +618,7 @@ without breaking the events vocabulary). Versioned. Lifecycle:
 **Node types:**
 - `dispatch` — spawns sub-role via `dispatchLifecycle`
 - `terminal` — sink with `final_state: completed | failed | aborted | superseded`
+- `parallel` (V3.2.a) — fan-out + all-complete join (see §11.2)
 
 **Edges:** `{ from, on_disposition, to }`. `on_disposition` ∈
 `success | parked | timeout | error | *`. Resolution is
@@ -649,10 +650,55 @@ so events.jsonl reconstructs the chain.
   `pipeline_run_id`, `final_state`, `last_node`, `last_disposition`,
   `abort_reason?`
 
-### 11.2 V3.2+ — open
+### 11.2 V3.2.a — parallel (landed)
+
+**Definition:**
+```json
+{
+  "type": "parallel",
+  "branches": ["node-a", "node-b", "node-c"],
+  "join": "all-complete"
+}
+```
+
+`branches` must reference existing **dispatch** nodes (V3.2.a
+restriction; nested parallel / condition / subpipeline land in
+V3.2.b once the walker is recursive). `join` defaults to
+`all-complete`. Self-references and duplicate branches rejected at
+register time.
+
+**Aggregate disposition** (`aggregateDisposition`):
+- any branch → `error` ⇒ aggregate `error`
+- else any branch → `timeout` ⇒ aggregate `timeout`
+- else any branch → `parked` ⇒ aggregate `parked`
+- else all `success` ⇒ aggregate `success`
+- else first non-success (covers driver-specific dispositions)
+
+The aggregate matches against the parallel node's outgoing edges
+(`on_disposition: success` / `*` etc.) — same machinery as a regular
+dispatch.
+
+**Concurrency.** V3.2.a runs branches sequentially. The dispatch
+lifecycle owns the git working tree; concurrent dispatches would
+race on branch checkout + working-tree state. The structural
+primitive (parallel + join) lands now so pipelines can declare
+fan-out intent; true concurrency comes with V3.3 git-worktree
+support.
+
+**Branch tagging.** Each branch's dispatch carries
+`pipeline_parallel_of: <parent-node-id>` in `taskAttrs` (alongside
+the standard `pipeline_run_id` / `pipeline_id` / `pipeline_node_id`)
+so external filtering can group parallel siblings.
+
+**Reachability** check follows `node.branches` so a parallel-only
+flow (entry → parallel → terminal) passes validation without
+requiring an explicit edge to each branch.
+
+### 11.3 V3.2.b+ — open
 
 Reserved by the spec; not yet implemented:
-- `parallel` — fan-out + join (`all-complete` / `any-complete` / `k-of-n`)
+- `parallel` extra joins: `any-complete`, `k-of-n` (need cancellation
+  semantics that depend on V3.3 worktrees)
 - `condition` — pure decision
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)

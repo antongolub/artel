@@ -19,6 +19,7 @@ import { dirname, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendWorkloadEvent } from '../util/audit.mjs'
 import {
+  aggregateDisposition,
   listPipelineFiles,
   loadPipelineFile,
   pipelinePath,
@@ -175,6 +176,8 @@ if (sub === 'show') {
       const colour = node.final_state === 'completed' ? green
         : node.final_state === 'aborted' ? yellow : red
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('terminal')} → ${colour(node.final_state)}`)
+    } else if (node.type === 'parallel') {
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
@@ -233,28 +236,18 @@ if (sub === 'run') {
   let finalState = null
   let abortReason = null
 
-  // Synchronous walk: dispatch each `dispatch` node, follow edge by
-  // disposition, end on `terminal`. Failure to find a transition for
-  // a non-success disposition is an explicit "stuck" — surfaced to the
-  // operator rather than silently terminated.
-  while (true) {
-    const node = def.nodes[nodeId]
-    if (node.type === 'terminal') {
-      finalState = node.final_state
-      console.error(`${bold('■')} terminal ${cyan(nodeId)} → ${node.final_state === 'completed' ? green : node.final_state === 'aborted' ? yellow : red}(${node.final_state})`)
-      break
-    }
-    if (node.type !== 'dispatch') {
-      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.1 supports: dispatch | terminal)`
-      finalState = 'failed'
-      break
-    }
-    const taskSlug = `${taskPrefix}-${nodeId}`
-    console.error(`${bold('◆')} ${cyan(nodeId)} ${dim('→')} dispatch role=${node.role}${node.engine ? ` engine=${node.engine}` : ''} task=${dim(taskSlug)}`)
-
-    let result
+  // V3.2.a — extracted dispatch helper used by both the linear walker
+  // and the parallel fan-out path. Wraps dispatchLifecycle with
+  // pipeline-aware taskAttrs + slug generation; propagates throws as
+  // `null` (caller turns that into an abort).
+  const runDispatchNode = async (id, parallelOf = null) => {
+    const taskSlug = parallelOf
+      ? `${taskPrefix}-${parallelOf}-${id}`
+      : `${taskPrefix}-${id}`
+    const node = def.nodes[id]
+    console.error(`${bold('◆')} ${cyan(id)} ${dim('→')} dispatch role=${node.role}${node.engine ? ` engine=${node.engine}` : ''} task=${dim(taskSlug)}`)
     try {
-      result = await dispatchLifecycle({
+      return await dispatchLifecycle({
         role: node.role,
         task: taskSlug,
         prompt: node.prompt,
@@ -268,23 +261,74 @@ if (sub === 'run') {
           ...userAttrs,
           pipeline_run_id: runId,
           pipeline_id: def.id,
-          pipeline_node_id: nodeId,
+          pipeline_node_id: id,
+          ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
         },
       })
     } catch (err) {
-      abortReason = `dispatch threw at node '${nodeId}': ${err?.message || String(err)}`
+      return { __error: err?.message || String(err), node: id }
+    }
+  }
+
+  // Synchronous walk: dispatch each `dispatch` node, fan out + join
+  // each `parallel` node, follow edge by disposition, end on `terminal`.
+  // Failure to find a transition for a non-success disposition is an
+  // explicit "stuck" — surfaced to the operator rather than silently
+  // terminated.
+  while (true) {
+    const node = def.nodes[nodeId]
+    if (node.type === 'terminal') {
+      finalState = node.final_state
+      console.error(`${bold('■')} terminal ${cyan(nodeId)} → ${node.final_state === 'completed' ? green : node.final_state === 'aborted' ? yellow : red}(${node.final_state})`)
+      break
+    }
+
+    let stepDisposition = null
+    if (node.type === 'dispatch') {
+      const result = await runDispatchNode(nodeId)
+      if (result.__error) {
+        abortReason = `dispatch threw at node '${nodeId}': ${result.__error}`
+        finalState = 'failed'
+        break
+      }
+      stepDisposition = result.disposition
+    } else if (node.type === 'parallel') {
+      // V3.2.a: branches run sequentially (logical fan-out, structural
+      // join). Real concurrency over a shared git working tree needs
+      // worktrees — V3.3.
+      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'}`)
+      const dispositions = []
+      let parallelAbort = null
+      for (const branchId of node.branches) {
+        const result = await runDispatchNode(branchId, nodeId)
+        if (result.__error) {
+          parallelAbort = `branch '${branchId}' threw: ${result.__error}`
+          break
+        }
+        dispositions.push(result.disposition)
+        console.error(`  ${dim('branch')} ${cyan(branchId)} ${dim('disposition:')} ${result.disposition}`)
+      }
+      if (parallelAbort) {
+        abortReason = `parallel '${nodeId}': ${parallelAbort}`
+        finalState = 'failed'
+        break
+      }
+      stepDisposition = aggregateDisposition(dispositions)
+      console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + (node.join || 'all-complete') + ' of ' + dispositions.length + ')')}`)
+    } else {
+      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.2.a supports: dispatch | parallel | terminal)`
       finalState = 'failed'
       break
     }
 
-    lastDisposition = result.disposition
-    const next = resolveNext(def, nodeId, result.disposition)
+    lastDisposition = stepDisposition
+    const next = resolveNext(def, nodeId, stepDisposition)
     if (!next) {
-      abortReason = `no transition for disposition '${result.disposition}' from node '${nodeId}'`
+      abortReason = `no transition for disposition '${stepDisposition}' from node '${nodeId}'`
       finalState = 'failed'
       break
     }
-    console.error(`  ${dim('disposition:')} ${result.disposition} ${dim('→')} ${cyan(next)}`)
+    console.error(`  ${dim('disposition:')} ${stepDisposition} ${dim('→')} ${cyan(next)}`)
     nodeId = next
   }
 

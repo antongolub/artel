@@ -61,8 +61,8 @@ describe('validatePipeline', () => {
 
   it('rejects unknown node types', () => {
     const def = minimalPipeline()
-    def.nodes.first = { type: 'parallel' as 'dispatch', role: 'r', prompt: 'p' }
-    expect(() => validatePipeline(def)).toThrow(/invalid type 'parallel'/)
+    def.nodes.first = { type: 'subpipeline' as 'dispatch', role: 'r', prompt: 'p' }
+    expect(() => validatePipeline(def)).toThrow(/invalid type 'subpipeline'/)
   })
 
   it('rejects dispatch nodes missing role / prompt', () => {
@@ -146,6 +146,105 @@ describe('resolveNext', () => {
 
   it('returns null for unknown source', () => {
     expect(resolveNext(def, 'ghost', 'success')).toBeNull()
+  })
+})
+
+describe('parallel node validation (V3.2.a)', () => {
+  const withParallel = (overrides = {}) => ({
+    id: 'fanout',
+    version: 1,
+    entry: 'fan',
+    nodes: {
+      fan: { type: 'parallel', branches: ['a', 'b'], join: 'all-complete' },
+      a: { type: 'dispatch', role: 'cold-reader', prompt: 'review' },
+      b: { type: 'dispatch', role: 'adversary', prompt: 'attack' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'fan', on_disposition: 'success', to: 'done' },
+      { from: 'fan', on_disposition: '*', to: 'fail' },
+    ],
+    ...overrides,
+  })
+
+  it('accepts a well-formed parallel pipeline', () => {
+    expect(() => validatePipeline(withParallel())).not.toThrow()
+  })
+
+  it('rejects parallel without branches', () => {
+    const def = withParallel()
+    def.nodes.fan = { type: 'parallel', branches: [], join: 'all-complete' }
+    expect(() => validatePipeline(def)).toThrow(/non-empty branches array/)
+  })
+
+  it('rejects branch referencing unknown node', () => {
+    const def = withParallel()
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'ghost'], join: 'all-complete' }
+    expect(() => validatePipeline(def)).toThrow(/references unknown branch 'ghost'/)
+  })
+
+  it('rejects duplicate branches', () => {
+    const def = withParallel()
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'a'], join: 'all-complete' }
+    expect(() => validatePipeline(def)).toThrow(/duplicate branch 'a'/)
+  })
+
+  it('rejects parallel listing itself as a branch', () => {
+    const def = withParallel()
+    def.nodes.fan = { type: 'parallel', branches: ['fan'], join: 'all-complete' }
+    expect(() => validatePipeline(def)).toThrow(/cannot list itself as a branch/)
+  })
+
+  it('rejects unknown join policy', () => {
+    const def = withParallel()
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'b'], join: 'k-of-n' }
+    expect(() => validatePipeline(def)).toThrow(/invalid join 'k-of-n'/)
+  })
+
+  it('rejects non-dispatch branches (V3.2.a restriction)', () => {
+    const def = withParallel() as Record<string, unknown> & { nodes: Record<string, unknown> }
+    def.nodes.nested = { type: 'parallel', branches: ['a'], join: 'all-complete' }
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'nested'], join: 'all-complete' }
+    expect(() => validatePipeline(def)).toThrow(/branch 'nested' must be a dispatch node/)
+  })
+
+  it('parallel-only flow: branches reachable through parallel', () => {
+    // a, b only listed as parallel branches, not as edge targets.
+    // Reachability check should still find the terminals.
+    expect(() => validatePipeline(withParallel())).not.toThrow()
+  })
+
+  it('default join is all-complete (omitted accepted)', () => {
+    const def = withParallel() as Record<string, unknown> & { nodes: Record<string, unknown> }
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'b'] } // no join
+    expect(() => validatePipeline(def)).not.toThrow()
+  })
+})
+
+describe('aggregateDisposition (V3.2.a)', () => {
+  const { aggregateDisposition } = pipelinesModule as { aggregateDisposition: (xs: string[]) => string }
+
+  it('all success → success', () => {
+    expect(aggregateDisposition(['success', 'success', 'success'])).toBe('success')
+  })
+
+  it('any error → error (severity wins)', () => {
+    expect(aggregateDisposition(['success', 'error', 'success'])).toBe('error')
+  })
+
+  it('error beats timeout beats parked', () => {
+    expect(aggregateDisposition(['parked', 'timeout', 'error'])).toBe('error')
+    expect(aggregateDisposition(['parked', 'timeout'])).toBe('timeout')
+    expect(aggregateDisposition(['success', 'parked'])).toBe('parked')
+  })
+
+  it('empty list → success (vacuous truth)', () => {
+    expect(aggregateDisposition([])).toBe('success')
+  })
+
+  it('unknown disposition: returns first non-success', () => {
+    expect(aggregateDisposition(['success', 'weirdo', 'success'])).toBe('weirdo')
   })
 })
 
