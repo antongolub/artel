@@ -240,7 +240,10 @@ if (sub === 'run') {
   // and the parallel fan-out path. Wraps dispatchLifecycle with
   // pipeline-aware taskAttrs + slug generation; propagates throws as
   // `null` (caller turns that into an abort).
-  const runDispatchNode = async (id, parallelOf = null) => {
+  // V3.3.a — `useWorktree` plumbed through so parallel branches each
+  // run in their own `.artel/.worktrees/<branch>/` checkout, enabling
+  // true concurrency via Promise.all without working-tree races.
+  const runDispatchNode = async (id, parallelOf = null, opts = {}) => {
     const taskSlug = parallelOf
       ? `${taskPrefix}-${parallelOf}-${id}`
       : `${taskPrefix}-${id}`
@@ -257,6 +260,7 @@ if (sub === 'run') {
         sandbox: node.sandbox || null,
         tools: node.tools || null,
         permissionMode: node['permission-mode'] || null,
+        useWorktree: !!opts.useWorktree,
         taskAttrs: {
           ...userAttrs,
           pipeline_run_id: runId,
@@ -293,25 +297,27 @@ if (sub === 'run') {
       }
       stepDisposition = result.disposition
     } else if (node.type === 'parallel') {
-      // V3.2.a: branches run sequentially (logical fan-out, structural
-      // join). Real concurrency over a shared git working tree needs
-      // worktrees — V3.3.
-      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'}`)
-      const dispositions = []
-      let parallelAbort = null
-      for (const branchId of node.branches) {
-        const result = await runDispatchNode(branchId, nodeId)
-        if (result.__error) {
-          parallelAbort = `branch '${branchId}' threw: ${result.__error}`
-          break
-        }
-        dispositions.push(result.disposition)
-        console.error(`  ${dim('branch')} ${cyan(branchId)} ${dim('disposition:')} ${result.disposition}`)
-      }
-      if (parallelAbort) {
-        abortReason = `parallel '${nodeId}': ${parallelAbort}`
+      // V3.3.a: branches each get their own worktree under
+      // `.artel/.worktrees/<branch>/` so working-tree state doesn't
+      // race across siblings. Promise.all gives true wall-clock
+      // concurrency — N branches finish in roughly max(t_i) instead
+      // of sum(t_i). One branch throwing aborts the parallel block;
+      // the others' settled results are still collected (they ran
+      // in their own worktrees, no rollback semantics).
+      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'} ${dim('(concurrent worktrees)')}`)
+      const settled = await Promise.all(
+        node.branches.map((branchId) =>
+          runDispatchNode(branchId, nodeId, { useWorktree: true })),
+      )
+      const errored = settled.find((r) => r.__error)
+      if (errored) {
+        abortReason = `parallel '${nodeId}': branch '${errored.node}' threw: ${errored.__error}`
         finalState = 'failed'
         break
+      }
+      const dispositions = settled.map((r) => r.disposition)
+      for (let i = 0; i < node.branches.length; i++) {
+        console.error(`  ${dim('branch')} ${cyan(node.branches[i])} ${dim('disposition:')} ${dispositions[i]}`)
       }
       stepDisposition = aggregateDisposition(dispositions)
       console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + (node.join || 'all-complete') + ' of ' + dispositions.length + ')')}`)

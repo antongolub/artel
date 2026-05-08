@@ -20,6 +20,7 @@ import { uuidv7 } from '../util/ids.mjs'
 import { gitContext, gitDelta } from '../util/git.mjs'
 import { listDrivers } from '../util/drivers.mjs'
 import { identityEnv, resolveIdentity, resolveRequires } from '../util/trust.mjs'
+import { createWorktreeForBranch, removeWorktree } from '../util/worktree.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -214,17 +215,28 @@ const preparePersistentSession = ({ role, engineId, persistent, sessionsDir }) =
   return { sessionFlag, sessionId, sessionIdPath, captureCodexSession }
 }
 
-const prepareBranch = ({ role, task, persistent, protectedBranch, gitImpl, log }) => {
-  if (persistent) return null
+// V3.3.a: when `useWorktree` is set, the dispatch runs in its own
+// `.artel/.worktrees/<branch>/` checkout — main working tree is left
+// alone. Returns `{ branch, cwd, worktree }` where `cwd` is what to
+// pass as the child's working directory and `worktree` is the path to
+// remove on success (null when not in worktree mode).
+const prepareBranch = ({ role, task, persistent, protectedBranch, useWorktree, projectDir, gitImpl, log }) => {
+  if (persistent) return { branch: null, cwd: projectDir, worktree: null }
 
   const branch = `${role}/${task}`
-  const dirty = gitText(gitImpl, ['status', '--porcelain']).stdout
-  if (dirty.trim().length > 0) {
-    throw new Error(
-      `spawn: refusing to dispatch — working tree is dirty.\n` +
-        `Commit, stash, or discard changes before dispatching '${branch}':\n` +
-        dirty,
-    )
+  // Dirty-tree guard only applies when we'd `git checkout -B` the main
+  // working tree. With useWorktree the operator's checkout is left
+  // alone — siblings can run concurrently and the operator can keep
+  // editing in main while a dispatch is in flight.
+  if (!useWorktree) {
+    const dirty = gitText(gitImpl, ['status', '--porcelain']).stdout
+    if (dirty.trim().length > 0) {
+      throw new Error(
+        `spawn: refusing to dispatch — working tree is dirty.\n` +
+          `Commit, stash, or discard changes before dispatching '${branch}':\n` +
+          dirty,
+      )
+    }
   }
 
   const branchRef = `refs/heads/${branch}`
@@ -249,13 +261,18 @@ const prepareBranch = ({ role, task, persistent, protectedBranch, gitImpl, log }
     }
   }
 
+  if (useWorktree) {
+    const wtPath = createWorktreeForBranch(projectDir, branch, gitImpl)
+    log(`spawn: branch=${branch} worktree=${wtPath} (${branchExists ? 'reset' : 'created'})`)
+    return { branch, cwd: wtPath, worktree: wtPath }
+  }
+
   const checkout = gitText(gitImpl, ['checkout', '-B', branch])
   if (!gitOk(checkout)) {
     throw new Error(`spawn: git checkout ${branch} failed:\n${checkout.stderr}`)
   }
-
   log(`spawn: branch=${branch} (${branchExists ? 'reset' : 'created'})`)
-  return branch
+  return { branch, cwd: projectDir, worktree: null }
 }
 
 const truthyFlag = (raw) =>
@@ -284,6 +301,8 @@ export async function dispatchLifecycle(
     timeoutMs = null,
     terminationGraceMs = TERMINATION_GRACE_MS,
     identity = null,
+    useWorktree = false,
+    keepWorktreeOnSuccess = false,
     platformDir = DEFAULT_PLATFORM_DIR,
     projectDir = projectDirOf(),
     projectArtelDir = projectArtelDirOf(projectDir),
@@ -319,7 +338,9 @@ export async function dispatchLifecycle(
   const protectedBranch = truthyFlag(roleMeta.protected_branch)
   const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs)
   const effectiveGraceMs = parseTimeoutMs(terminationGraceMs, 'dispatch termination grace')
-  const branch = prepareBranch({ role, task, persistent, protectedBranch, gitImpl, log })
+  const { branch, cwd: dispatchCwd, worktree } = prepareBranch({
+    role, task, persistent, protectedBranch, useWorktree, projectDir, gitImpl, log,
+  })
   const { sessionFlag, sessionId: initialSessionId, sessionIdPath, captureCodexSession } = preparePersistentSession({
     role,
     engineId,
@@ -427,6 +448,11 @@ export async function dispatchLifecycle(
   let child
   try {
     child = spawnProcess('node', [paths.runPath, ...runArgs], {
+      // V3.3.a: when running in a worktree, the child's cwd is the
+      // worktree path so file edits land there instead of the
+      // operator's main checkout. Without a worktree, cwd defaults
+      // to projectDir (existing behaviour).
+      cwd: dispatchCwd,
       stdio: ['ignore', outFd, outFd],
       env: {
         ...process.env,
@@ -436,6 +462,8 @@ export async function dispatchLifecycle(
         ARTEL_ROLE: role,
         ARTEL_DISPATCH_ID: dispatchId,
         ARTEL_TRACE_ID: traceId,
+        ARTEL_PROJECT_DIR: projectDir,           // child resolves .artel from here
+        ...(worktree ? { ARTEL_WORKTREE: worktree } : {}),
         ...(identityName ? { ARTEL_IDENTITY: identityName } : {}),
         ...(taskAttrs ? { ARTEL_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
       },
@@ -446,7 +474,10 @@ export async function dispatchLifecycle(
 
   // V10: capture git context at dispatch start. `gitContext` returns null if
   // the project isn't a git repo or git is unavailable — skip the field then.
-  const git = gitContext(paths.projectDir)
+  // V3.3.a: when in a worktree, capture git context from the worktree's
+  // own checkout — that's where the dispatch's commits + working-tree
+  // changes will land, so deltas should diff against the worktree HEAD.
+  const git = gitContext(dispatchCwd)
   dispatchApi.markRunning({
     pid: child.pid,
     branch,
@@ -555,7 +586,7 @@ export async function dispatchLifecycle(
 
       // V10: compute working-tree delta against the dispatch-start commit.
       // gitDelta tolerates missing git / unreachable sha → null.
-      const delta = git ? gitDelta(paths.projectDir, git.commit_sha) : null
+      const delta = git ? gitDelta(dispatchCwd, git.commit_sha) : null
       dispatchApi.markReleased({
         exitCode,
         exitSignal: signal,
@@ -572,6 +603,26 @@ export async function dispatchLifecycle(
             ? `timeout after ${effectiveTimeoutMs}ms${graceAt ? '; SIGKILL after grace' : '; SIGTERM delivered'}`
             : error?.message || null,
       })
+
+      // V3.3.a — worktree cleanup. Remove on success so happy paths
+      // don't leak `.artel/.worktrees/<branch>/`. Keep on
+      // parked/timeout/error so the operator can `cd` in to debug.
+      // `--keep-worktree-on-success` overrides the success branch when
+      // someone wants to inspect even successful runs.
+      if (worktree) {
+        const keep = keepWorktreeOnSuccess || disposition !== 'success'
+        if (keep) {
+          log(`spawn: worktree kept at ${worktree} (disposition=${disposition})`)
+        } else {
+          const r = removeWorktree(worktree, gitImpl)
+          if (r && r.ok === false) {
+            log(`spawn: worktree cleanup at ${worktree} failed: ${r.stderr.trim()}`)
+          } else {
+            log(`spawn: worktree removed at ${worktree}`)
+          }
+        }
+      }
+
       resolve({ exitCode, exitSignal: signal, disposition, branch, sessionId, timedOut })
     }
 

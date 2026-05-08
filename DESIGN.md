@@ -678,12 +678,11 @@ The aggregate matches against the parallel node's outgoing edges
 (`on_disposition: success` / `*` etc.) — same machinery as a regular
 dispatch.
 
-**Concurrency.** V3.2.a runs branches sequentially. The dispatch
-lifecycle owns the git working tree; concurrent dispatches would
-race on branch checkout + working-tree state. The structural
-primitive (parallel + join) lands now so pipelines can declare
-fan-out intent; true concurrency comes with V3.3 git-worktree
-support.
+**Concurrency (V3.3.a).** Each branch dispatches in its own
+`.artel/.worktrees/<branch>/` checkout via git worktrees, and the
+walker uses `Promise.all` — branches run truly concurrently. The
+operator's main checkout stays on master untouched. See §11.4 for
+the worktree mechanics.
 
 **Branch tagging.** Each branch's dispatch carries
 `pipeline_parallel_of: <parent-node-id>` in `taskAttrs` (alongside
@@ -694,15 +693,83 @@ so external filtering can group parallel siblings.
 flow (entry → parallel → terminal) passes validation without
 requiring an explicit edge to each branch.
 
-### 11.3 V3.2.b+ — open
+### 11.4 V3.3.a — git worktrees (landed)
+
+A dispatch can run in an isolated checkout instead of the operator's
+main working tree. Two motivations:
+1. **Operator isolation** — main checkout stays on master while the
+   agent works in `.artel/.worktrees/<branch>/`. The operator can
+   keep editing, switching branches, etc., while a dispatch is in
+   flight.
+2. **Concurrent siblings** — pipeline `parallel` branches each get
+   their own worktree, so file-state changes don't race across
+   siblings.
+
+**API:**
+
+```js
+dispatchLifecycle({
+  ...,
+  useWorktree: true,                  // opt-in
+  keepWorktreeOnSuccess: false,       // default: remove on success
+})
+```
+
+**CLI:**
+
+```bash
+artel spawn <role> <task> -p "..." --worktree                  # opt-in
+artel spawn <role> <task> -p "..." --worktree --keep-worktree  # keep even on success
+```
+
+`artel pipeline run` enables worktrees automatically for `parallel`
+branches.
+
+**Mechanics** (`engine/util/worktree.mjs`):
+- `createWorktreeForBranch(projectDir, branch, gitImpl)` — `git
+  branch -f <branch> HEAD` + `git worktree add <path> <branch>`.
+  Idempotent; cleans stale worktrees at the same path before adding.
+- `removeWorktree(path, gitImpl)` — `git worktree remove --force`.
+  Idempotent; returns `{ ok, stderr? }` on git failures so caller
+  doesn't break post-processing.
+- `listWorktrees(projectDir)` — `git worktree list --porcelain`,
+  parsed into `[{ path, branch }]`.
+
+**Lifecycle hook** (`dispatch_lifecycle.mjs`):
+1. `prepareBranch` returns `{ branch, cwd, worktree }`. With
+   `useWorktree`, `cwd` is the worktree path; without, it's
+   `projectDir`.
+2. The dirty-tree guard (`git status --porcelain`) is skipped in
+   worktree mode — main checkout is never touched, dirtiness is
+   irrelevant.
+3. The child process is spawned with `cwd: dispatchCwd`, so file
+   edits land in the worktree.
+4. `git rev-parse HEAD` (V10 context capture) and `git diff
+   --shortstat <sha>` (V10 delta capture) both run against the
+   worktree's checkout, so deltas reflect the dispatch's actual diff.
+5. On success, the worktree is removed (unless
+   `keepWorktreeOnSuccess`). On parked / timeout / error, it's kept
+   for forensics; the operator can `cd .artel/.worktrees/<branch>`
+   to inspect.
+
+**Branch state.** The branch lives in the main repo's refs after
+the dispatch — it's a normal git branch, integrable via
+`git merge --squash` / `git cherry-pick` / etc. from the main
+checkout. Removing the worktree doesn't remove the branch.
+
+**Action for consumers.** Add `.artel/.worktrees/` to `.gitignore`.
+
+### 11.5 V3.3.b+ / V3.2.b — open
 
 Reserved by the spec; not yet implemented:
-- `parallel` extra joins: `any-complete`, `k-of-n` (need cancellation
-  semantics that depend on V3.3 worktrees)
+- `parallel` extra joins: `any-complete`, `k-of-n` (now possible
+  with V3.3.a worktrees giving cancellable independent processes,
+  but cancellation semantics still need design)
 - `condition` — pure decision
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition
+- `artel sweep` prune for stale `.artel/.worktrees/` directories
 
 **Additional edges:** `on_signal: <type>`, `on_budget_exhausted`.
 Loops bounded by `max_visits` per node.

@@ -132,7 +132,7 @@ export const createTempRepo = () => {
   )
   writeFileSync(
     join(root, '.gitignore'),
-    ['bin/', '.artel/.dispatches/', '.artel/.sessions/', '.artel/events.jsonl', '.artel/cluster.json'].join('\n') + '\n',
+    ['bin/', '.artel/.dispatches/', '.artel/.sessions/', '.artel/.worktrees/', '.artel/events.jsonl', '.artel/cluster.json'].join('\n') + '\n',
   )
   writeFileSync(join(root, 'agents', 'implementer.md'), roleFixture('implementer'))
   writeFileSync(join(root, 'agents', 'adversary.md'), roleFixture('adversary', ['protected_branch: true']))
@@ -191,6 +191,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/crypto.mjs',
   'engine/util/audit.mjs',
   'engine/util/pipelines.mjs',
+  'engine/util/worktree.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',
