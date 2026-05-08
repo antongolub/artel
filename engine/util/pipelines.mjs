@@ -68,13 +68,84 @@ export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel', 'co
 // is just SIGTERM + worktree remove, no shared-state cleanup.
 export const VALID_JOIN_POLICIES = new Set(['all-complete', 'any-complete', 'k-of-n'])
 
-// V3.2.b condition predicates. Schema:
+// Condition predicates. Two shapes:
+//
+// Atomic (V3.2.b + V3.6 comparisons):
 //   { "attr": "key.path", "equals": <any> }
-//   { "attr": "key.path", "in": [<any>, ...] }
+//   { "attr": "key.path", "ne":     <any> }
+//   { "attr": "key.path", "in":     [<any>, ...] }
 //   { "attr": "key.path", "exists": true|false }
-// More complex predicates (and/or/not, regex, comparisons) deferred —
-// keep the surface small until concrete need.
-export const VALID_PREDICATE_OPS = new Set(['equals', 'in', 'exists'])
+//   { "attr": "key.path", "gt"|"gte"|"lt"|"lte": <number> }
+//
+// Compound (V3.6 — recursive, no `attr`):
+//   { "not": <predicate> }
+//   { "and": [<predicate>, ...] }   # non-empty array
+//   { "or":  [<predicate>, ...] }   # non-empty array
+//
+// Compounds nest atomics or other compounds without bound; the
+// validator recurses. Vocabulary still intentionally narrow — no
+// regex / `where` / `function`-style predicates.
+export const VALID_ATOMIC_OPS = new Set([
+  'equals', 'ne', 'in', 'exists', 'gt', 'gte', 'lt', 'lte',
+])
+export const VALID_COMPOUND_OPS = new Set(['not', 'and', 'or'])
+// Kept for back-compat with any callers that imported the V3.2.b name.
+// The combined set gates "this key is a recognised predicate operator"
+// when the validator distinguishes atomic vs. compound shape.
+export const VALID_PREDICATE_OPS = new Set([
+  ...VALID_ATOMIC_OPS, ...VALID_COMPOUND_OPS,
+])
+
+// V3.6 — recursive predicate validator. `path` is the dotted-from-root
+// label used in error messages (e.g. `.if.and[0].not`).
+const validatePredicateShape = (pred, source, nid, path) => {
+  if (!pred || typeof pred !== 'object' || Array.isArray(pred)) {
+    throw new Error(`${source}: condition node '${nid}' ${path} must be a predicate object`)
+  }
+  const compound = [...VALID_COMPOUND_OPS].filter((op) => op in pred)
+  const atomic = [...VALID_ATOMIC_OPS].filter((op) => op in pred)
+
+  if (compound.length > 0) {
+    if (compound.length > 1) {
+      throw new Error(`${source}: condition node '${nid}' ${path} compound predicate must have exactly one of ${[...VALID_COMPOUND_OPS].join(' | ')} (got: ${compound.join(', ')})`)
+    }
+    if (atomic.length > 0 || 'attr' in pred) {
+      const mixed = [...atomic, ...('attr' in pred ? ['attr'] : [])]
+      throw new Error(`${source}: condition node '${nid}' ${path} compound predicate must not mix with atomic ops or 'attr' (got: ${mixed.join(', ')})`)
+    }
+    const op = compound[0]
+    if (op === 'not') {
+      validatePredicateShape(pred.not, source, nid, `${path}.not`)
+    } else {
+      // and / or
+      if (!Array.isArray(pred[op]) || pred[op].length === 0) {
+        throw new Error(`${source}: condition node '${nid}' ${path}.${op} must be a non-empty array of predicates`)
+      }
+      pred[op].forEach((sub, i) =>
+        validatePredicateShape(sub, source, nid, `${path}.${op}[${i}]`),
+      )
+    }
+    return
+  }
+
+  // Atomic
+  if (typeof pred.attr !== 'string' || !pred.attr) {
+    throw new Error(`${source}: condition node '${nid}' ${path}.attr must be a non-empty string`)
+  }
+  if (atomic.length !== 1) {
+    throw new Error(`${source}: condition node '${nid}' ${path} must specify exactly one of ${[...VALID_ATOMIC_OPS].join(' | ')} | ${[...VALID_COMPOUND_OPS].join(' | ')} (got: ${atomic.join(', ') || '(none)'})`)
+  }
+  const op = atomic[0]
+  if (op === 'in' && !Array.isArray(pred.in)) {
+    throw new Error(`${source}: condition node '${nid}' ${path}.in must be an array`)
+  }
+  if (op === 'exists' && typeof pred.exists !== 'boolean') {
+    throw new Error(`${source}: condition node '${nid}' ${path}.exists must be a boolean`)
+  }
+  if (['gt', 'gte', 'lt', 'lte'].includes(op) && typeof pred[op] !== 'number') {
+    throw new Error(`${source}: condition node '${nid}' ${path}.${op} must be a number`)
+  }
+}
 
 export const VALID_FINAL_STATES = new Set([
   'completed', 'failed', 'aborted', 'superseded',
@@ -139,19 +210,9 @@ export const validatePipeline = (def, source = '<inline>') => {
       if (!node.if || typeof node.if !== 'object') {
         throw new Error(`${source}: condition node '${nid}' requires an .if predicate object`)
       }
-      if (typeof node.if.attr !== 'string' || !node.if.attr) {
-        throw new Error(`${source}: condition node '${nid}' .if.attr must be a non-empty string`)
-      }
-      const ops = Object.keys(node.if).filter((k) => VALID_PREDICATE_OPS.has(k))
-      if (ops.length !== 1) {
-        throw new Error(`${source}: condition node '${nid}' .if must specify exactly one of ${[...VALID_PREDICATE_OPS].join(' | ')} (got: ${ops.join(', ') || '(none)'})`)
-      }
-      if (ops[0] === 'in' && !Array.isArray(node.if.in)) {
-        throw new Error(`${source}: condition node '${nid}' .if.in must be an array`)
-      }
-      if (ops[0] === 'exists' && typeof node.if.exists !== 'boolean') {
-        throw new Error(`${source}: condition node '${nid}' .if.exists must be a boolean`)
-      }
+      // V3.6 — recursive predicate shape check. Atomic + compound
+      // predicates handled uniformly; compounds (not/and/or) recurse.
+      validatePredicateShape(node.if, source, nid, '.if')
     } else if (node.type === 'parallel') {
       if (!Array.isArray(node.branches) || node.branches.length === 0) {
         throw new Error(`${source}: parallel node '${nid}' requires a non-empty branches array`)
@@ -271,18 +332,39 @@ const readPath = (obj, path) => {
   return cur
 }
 
-// V3.2.b — evaluate a condition node's `.if` predicate against the
-// run's task_attrs. The validator already guarantees exactly one of
-// `equals` / `in` / `exists` is set.
+// V3.2.b + V3.6 — evaluate a condition node's `.if` predicate against
+// the run's task_attrs. Validator guarantees the shape is atomic
+// (with exactly one op) or compound (`not`/`and`/`or` recursive).
+//
+// Comparison ops (`gt`/`gte`/`lt`/`lte`) require a numeric attr value;
+// non-numeric / missing → false. This matches the principle of
+// fail-closed routing — a missing or wrong-typed attr does not
+// silently take a comparison branch.
 export const evaluatePredicate = (predicate, attrs) => {
   if (!predicate || typeof predicate !== 'object') return false
+
+  // Compound first — they don't read `attr`.
+  if ('not' in predicate) return !evaluatePredicate(predicate.not, attrs)
+  if ('and' in predicate) {
+    return Array.isArray(predicate.and) && predicate.and.every((p) => evaluatePredicate(p, attrs))
+  }
+  if ('or' in predicate) {
+    return Array.isArray(predicate.or) && predicate.or.some((p) => evaluatePredicate(p, attrs))
+  }
+
+  // Atomic
   const value = readPath(attrs, predicate.attr)
   if ('equals' in predicate) return value === predicate.equals
+  if ('ne' in predicate) return value !== predicate.ne
   if ('in' in predicate) return Array.isArray(predicate.in) && predicate.in.includes(value)
   if ('exists' in predicate) {
     const present = value !== undefined
     return predicate.exists ? present : !present
   }
+  if ('gt' in predicate) return typeof value === 'number' && value > predicate.gt
+  if ('gte' in predicate) return typeof value === 'number' && value >= predicate.gte
+  if ('lt' in predicate) return typeof value === 'number' && value < predicate.lt
+  if ('lte' in predicate) return typeof value === 'number' && value <= predicate.lte
   return false
 }
 

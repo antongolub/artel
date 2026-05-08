@@ -939,3 +939,127 @@ describe('artel pipeline run — prompt template substitution (V3.5)', () => {
       .toBe('just a literal prompt')
   })
 })
+
+describe('artel pipeline run — condition compounds + comparisons (V3.6)', () => {
+  // Verify the richer predicate vocabulary actually routes through
+  // the walker. Branch chosen → only that branch's dispatch
+  // .meta lands; the other branch's stays absent. (Same probe
+  // pattern as the V3.2.b condition tests.)
+  const richCondition = (predicate: object) => ({
+    id: 'gated', version: 1, entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: predicate, then: 'yes', else: 'no' },
+      yes: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'yes' },
+      no: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'no' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'yes', on_disposition: 'success', to: 'done' },
+      { from: 'yes', on_disposition: '*', to: 'done' },
+      { from: 'no', on_disposition: 'success', to: 'done' },
+      { from: 'no', on_disposition: '*', to: 'done' },
+    ],
+  })
+
+  const runWithAttrs = (def: object, attrs: object, prefix: string) => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', JSON.stringify(attrs),
+      '--task-prefix', prefix,
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    return { root, r }
+  }
+
+  it('and: every nested predicate must hold for .then', () => {
+    const def = richCondition({
+      and: [
+        { attr: 'env', equals: 'prod' },
+        { attr: 'approved', equals: true },
+      ],
+    })
+    // both true → yes
+    const a = runWithAttrs(def, { env: 'prod', approved: true }, 'and-yes')
+    expect(a.r.status).toBe(0)
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'and-yes-yes.meta'))).toBe(true)
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'and-yes-no.meta'))).toBe(false)
+
+    // one false → no
+    const b = runWithAttrs(def, { env: 'prod', approved: false }, 'and-no')
+    expect(b.r.status).toBe(0)
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'and-no-no.meta'))).toBe(true)
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'and-no-yes.meta'))).toBe(false)
+  })
+
+  it('or with not: any nested predicate suffices, including negation', () => {
+    const def = richCondition({
+      or: [
+        { attr: 'force', equals: true },
+        { not: { attr: 'env', equals: 'dev' } },
+      ],
+    })
+    // env=prod → not-equals-dev fires → yes
+    const a = runWithAttrs(def, { env: 'prod' }, 'or-prod')
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'or-prod-yes.meta'))).toBe(true)
+
+    // env=dev, no force → both branches false → no
+    const b = runWithAttrs(def, { env: 'dev' }, 'or-dev')
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'or-dev-no.meta'))).toBe(true)
+
+    // env=dev but force=true → first branch fires → yes
+    const c = runWithAttrs(def, { env: 'dev', force: true }, 'or-force')
+    expect(existsSync(join(c.root, '.artel', '.dispatches', 'or-force-yes.meta'))).toBe(true)
+  })
+
+  it('comparison gte routes via numeric attr', () => {
+    const def = richCondition({ attr: 'score', gte: 0.8 })
+    const a = runWithAttrs(def, { score: 0.9 }, 'gte-hi')
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'gte-hi-yes.meta'))).toBe(true)
+
+    const b = runWithAttrs(def, { score: 0.5 }, 'gte-lo')
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'gte-lo-no.meta'))).toBe(true)
+
+    // Missing attr → fail-closed → no.
+    const c = runWithAttrs(def, {}, 'gte-miss')
+    expect(existsSync(join(c.root, '.artel', '.dispatches', 'gte-miss-no.meta'))).toBe(true)
+  })
+
+  it('show renders compound + comparison predicates recursively', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = richCondition({
+      and: [
+        { not: { attr: 'cancelled', exists: true } },
+        { or: [{ attr: 'env', equals: 'prod' }, { attr: 'score', gte: 0.8 }] },
+      ],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'gated'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(
+      /gate\s+condition\s+if\(\(not\(cancelled exists true\) and \(env equals "prod" or score gte 0\.8\)\)\) then=yes else=no/,
+    )
+  })
+
+  it('register surfaces precise paths on bad nested predicate', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const broken = richCondition({
+      and: [
+        { attr: 'env', equals: 'prod' },
+        { attr: 'approved' }, // missing op
+      ],
+    })
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', broken)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/\.if\.and\[1\] must specify exactly one/)
+  })
+})

@@ -699,7 +699,7 @@ so external filtering can group parallel siblings.
 flow (entry → parallel → terminal) passes validation without
 requiring an explicit edge to each branch.
 
-### 11.3 V3.2.b — condition (landed)
+### 11.3 V3.2.b + V3.6 — condition (landed)
 
 Pure routing node. No dispatch — the walker evaluates a predicate
 against the run's `task_attrs` and jumps directly to either `.then`
@@ -709,20 +709,48 @@ or `.else`.
 ```json
 {
   "type": "condition",
-  "if": { "attr": "<dotted.path>", "<op>": <value> },
+  "if": <predicate>,
   "then": "<node-id>",
   "else": "<node-id>"
 }
 ```
 
-**Predicate operators** (`engine/util/pipelines.mjs#evaluatePredicate`):
-- `equals` — strict `===` match
-- `in` — array membership
-- `exists` — boolean presence test (`true` = field is set; `false` = absent)
+**Atomic predicates** (V3.2.b + V3.6 comparisons):
+```json
+{ "attr": "<dotted.path>", "equals": <any> }
+{ "attr": "<dotted.path>", "ne":     <any> }
+{ "attr": "<dotted.path>", "in":     [<any>, ...] }
+{ "attr": "<dotted.path>", "exists": true | false }
+{ "attr": "<dotted.path>", "gt"|"gte"|"lt"|"lte": <number> }
+```
 
-Exactly one operator per predicate. Compound predicates
-(`and`/`or`/`not`, regex, comparisons) deferred — keep the surface
-small until concrete need.
+- `equals` / `ne` — strict `===` / `!==`
+- `in` — array membership
+- `exists` — boolean presence test (`true` = set; `false` = absent)
+- `gt` / `gte` / `lt` / `lte` — numeric comparisons; fail-closed on
+  missing or non-numeric attr (a string in a numeric slot routes
+  through `else`, never silently matches the comparison)
+
+Exactly one operator per atomic predicate.
+
+**Compound predicates** (V3.6 — recursive, no `attr`):
+```json
+{ "not": <predicate> }
+{ "and": [<predicate>, ...] }   // non-empty
+{ "or":  [<predicate>, ...] }   // non-empty
+```
+
+Compounds nest atomics or other compounds without bound. The
+validator recurses; errors include the full dotted path (e.g.
+`.if.and[0].not.attr must be a non-empty string`) so the operator
+can find the broken sub-predicate at register time.
+
+`evaluatePredicate` evaluates compounds with JS short-circuit
+(`every` / `some`) before falling through to the atomic switch.
+
+Vocabulary still intentionally narrow — no regex, no `where`, no
+function-style predicates. Add `not(equals: ...)` for inequality
+or compose `and` / `or` for richer conditions.
 
 **Attr resolution.** `attr` is a dotted path read against the merged
 `task_attrs` blob — pipeline-injected (`pipeline_run_id` /
@@ -985,7 +1013,10 @@ its run attrs only fails when the run reaches that node.
   whole-dispatch timeout)
 - Operator cancel of in-flight pipeline run (`artel pipeline cancel
   <run-id>`)
-- More predicate ops in `condition` (and/or/not, regex, comparisons)
+- Regex / `where` / function-style predicates if a concrete need
+  arises (deliberately not in V3.6 — current `not`/`and`/`or` +
+  comparisons cover most routing without inviting unbounded
+  vocabulary growth)
 
 **Additional edges:** `on_signal: <type>`, `on_budget_exhausted`.
 Loops bounded by `max_visits` per node.

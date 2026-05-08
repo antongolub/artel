@@ -332,6 +332,161 @@ describe('evaluatePredicate (V3.2.b)', () => {
   })
 })
 
+describe('condition predicate vocabulary (V3.6) — compounds + comparisons', () => {
+  const { evaluatePredicate } = pipelinesModule as { evaluatePredicate: (p: object | null, attrs: object) => boolean }
+
+  // Validator coverage — registered through validatePipeline so we
+  // catch shape errors with full context messages.
+  const wrap = (predicate: object) => ({
+    id: 'gated', version: 1, entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: predicate, then: 'done', else: 'done' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [],
+  })
+
+  describe('validator (compounds)', () => {
+    it('accepts not / and / or shapes', () => {
+      expect(() => validatePipeline(wrap({ not: { attr: 'x', equals: 1 } }))).not.toThrow()
+      expect(() => validatePipeline(wrap({
+        and: [{ attr: 'x', equals: 1 }, { attr: 'y', equals: 2 }],
+      }))).not.toThrow()
+      expect(() => validatePipeline(wrap({
+        or: [{ attr: 'x', equals: 1 }, { attr: 'y', exists: true }],
+      }))).not.toThrow()
+    })
+
+    it('rejects empty and/or arrays', () => {
+      expect(() => validatePipeline(wrap({ and: [] }))).toThrow(/\.if\.and must be a non-empty array/)
+      expect(() => validatePipeline(wrap({ or: [] }))).toThrow(/\.if\.or must be a non-empty array/)
+    })
+
+    it('rejects compound mixed with atomic op or attr', () => {
+      expect(() => validatePipeline(wrap({ and: [{ attr: 'x', equals: 1 }], attr: 'y' })))
+        .toThrow(/compound predicate must not mix/)
+      expect(() => validatePipeline(wrap({ not: { attr: 'x', equals: 1 }, equals: 2 })))
+        .toThrow(/compound predicate must not mix/)
+    })
+
+    it('rejects multiple compound ops in one predicate', () => {
+      expect(() => validatePipeline(wrap({
+        and: [{ attr: 'x', equals: 1 }],
+        or: [{ attr: 'y', equals: 2 }],
+      }))).toThrow(/exactly one of not | and | or/)
+    })
+
+    it('rejects non-array body for and/or', () => {
+      expect(() => validatePipeline(wrap({ and: { attr: 'x', equals: 1 } as never })))
+        .toThrow(/must be a non-empty array/)
+    })
+
+    it('recurses into nested compounds', () => {
+      // Deeply nested but well-formed.
+      expect(() => validatePipeline(wrap({
+        and: [
+          { not: { attr: 'a', equals: 1 } },
+          { or: [{ attr: 'b', exists: true }, { attr: 'c', gt: 5 }] },
+        ],
+      }))).not.toThrow()
+
+      // Bad nested predicate (missing op) — error should pinpoint
+      // the path so the operator can find it.
+      expect(() => validatePipeline(wrap({
+        and: [{ attr: 'a', equals: 1 }, { attr: 'b' }],
+      }))).toThrow(/\.if\.and\[1\] must specify exactly one/)
+    })
+
+    it('rejects non-object predicate (string, number, array)', () => {
+      expect(() => validatePipeline(wrap('xx' as never))).toThrow(/predicate object/)
+      expect(() => validatePipeline(wrap([{ attr: 'x', equals: 1 }] as never))).toThrow(/predicate object/)
+    })
+  })
+
+  describe('validator (comparisons)', () => {
+    it('accepts gt / gte / lt / lte with numeric values', () => {
+      for (const op of ['gt', 'gte', 'lt', 'lte']) {
+        expect(() => validatePipeline(wrap({ attr: 'x', [op]: 7 }))).not.toThrow()
+      }
+    })
+
+    it('rejects gt / gte / lt / lte with non-numeric values', () => {
+      for (const op of ['gt', 'gte', 'lt', 'lte']) {
+        expect(() => validatePipeline(wrap({ attr: 'x', [op]: 'seven' })))
+          .toThrow(new RegExp(`\\.if\\.${op} must be a number`))
+      }
+    })
+
+    it('accepts ne with any value', () => {
+      expect(() => validatePipeline(wrap({ attr: 'x', ne: 'staging' }))).not.toThrow()
+      expect(() => validatePipeline(wrap({ attr: 'x', ne: false }))).not.toThrow()
+      expect(() => validatePipeline(wrap({ attr: 'x', ne: null }))).not.toThrow()
+    })
+  })
+
+  describe('evaluator (compounds)', () => {
+    it('not negates the inner predicate', () => {
+      expect(evaluatePredicate({ not: { attr: 'x', equals: 1 } }, { x: 1 })).toBe(false)
+      expect(evaluatePredicate({ not: { attr: 'x', equals: 1 } }, { x: 2 })).toBe(true)
+    })
+
+    it('and is true iff every branch is true (short-circuit)', () => {
+      const p = { and: [{ attr: 'x', equals: 1 }, { attr: 'y', exists: true }] }
+      expect(evaluatePredicate(p, { x: 1, y: 'something' })).toBe(true)
+      expect(evaluatePredicate(p, { x: 1 })).toBe(false)
+      expect(evaluatePredicate(p, { x: 2, y: 'something' })).toBe(false)
+    })
+
+    it('or is true iff any branch is true (short-circuit)', () => {
+      const p = { or: [{ attr: 'x', equals: 1 }, { attr: 'y', exists: true }] }
+      expect(evaluatePredicate(p, { x: 1 })).toBe(true)
+      expect(evaluatePredicate(p, { y: 'something' })).toBe(true)
+      expect(evaluatePredicate(p, {})).toBe(false)
+    })
+
+    it('compounds nest', () => {
+      const p = {
+        and: [
+          { not: { attr: 'cancelled', exists: true } },
+          { or: [{ attr: 'env', equals: 'prod' }, { attr: 'force', equals: true }] },
+        ],
+      }
+      expect(evaluatePredicate(p, { env: 'prod' })).toBe(true)
+      expect(evaluatePredicate(p, { force: true })).toBe(true)
+      expect(evaluatePredicate(p, { env: 'dev' })).toBe(false)
+      expect(evaluatePredicate(p, { env: 'prod', cancelled: true })).toBe(false)
+    })
+  })
+
+  describe('evaluator (comparisons + ne)', () => {
+    it('gt/gte/lt/lte compare numbers', () => {
+      expect(evaluatePredicate({ attr: 'n', gt: 5 }, { n: 6 })).toBe(true)
+      expect(evaluatePredicate({ attr: 'n', gt: 5 }, { n: 5 })).toBe(false)
+      expect(evaluatePredicate({ attr: 'n', gte: 5 }, { n: 5 })).toBe(true)
+      expect(evaluatePredicate({ attr: 'n', lt: 10 }, { n: 9 })).toBe(true)
+      expect(evaluatePredicate({ attr: 'n', lte: 10 }, { n: 10 })).toBe(true)
+    })
+
+    it('comparisons fail-closed on non-numeric / missing attr', () => {
+      // missing
+      expect(evaluatePredicate({ attr: 'n', gt: 5 }, {})).toBe(false)
+      // string in numeric slot
+      expect(evaluatePredicate({ attr: 'n', gt: 5 }, { n: '6' })).toBe(false)
+      // null
+      expect(evaluatePredicate({ attr: 'n', lt: 10 }, { n: null })).toBe(false)
+    })
+
+    it('ne is strict !==', () => {
+      expect(evaluatePredicate({ attr: 'env', ne: 'prod' }, { env: 'staging' })).toBe(true)
+      expect(evaluatePredicate({ attr: 'env', ne: 'prod' }, { env: 'prod' })).toBe(false)
+      // missing → undefined !== 'prod' → true
+      expect(evaluatePredicate({ attr: 'env', ne: 'prod' }, {})).toBe(true)
+      // type-strict — number 1 !== string '1'
+      expect(evaluatePredicate({ attr: 'x', ne: 1 }, { x: '1' })).toBe(true)
+    })
+  })
+})
+
 describe('parallel join (V3.3.c) — any-complete / k-of-n', () => {
   const withJoin = (join: string, extra: object = {}) => ({
     id: 'race',

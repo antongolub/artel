@@ -49,6 +49,23 @@ const red = (s) => c('31', s)
 
 const die = (msg, code = 1) => { console.error(msg); process.exit(code) }
 
+// V3.6 — pretty-print one predicate for `show`. Recurses through
+// compound shapes (not/and/or). Atomic shape covers all of
+// equals/ne/in/exists/gt/gte/lt/lte. Falls back to a `?` marker
+// rather than throwing — `show` should still render even if the
+// predicate slipped through validator changes.
+const renderPredicate = (pred) => {
+  if (!pred || typeof pred !== 'object') return '?'
+  if ('not' in pred) return `not(${renderPredicate(pred.not)})`
+  if ('and' in pred) return `(${pred.and.map(renderPredicate).join(' and ')})`
+  if ('or' in pred) return `(${pred.or.map(renderPredicate).join(' or ')})`
+  const ATOMIC = ['equals', 'ne', 'in', 'exists', 'gt', 'gte', 'lt', 'lte']
+  const op = ATOMIC.find((k) => k in pred)
+  if (!op) return '?'
+  const opVal = op === 'in' ? `[${pred.in.join(', ')}]` : JSON.stringify(pred[op])
+  return `${pred.attr} ${op} ${opVal}`
+}
+
 const usage = (code = 2) => {
   console.error(`\
 Usage: artel pipeline <subcommand>
@@ -192,9 +209,9 @@ if (sub === 'show') {
       const kSuffix = join === 'k-of-n' ? ` k=${node.k}` : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${join}${kSuffix}`)
     } else if (node.type === 'condition') {
-      const op = ['equals', 'in', 'exists'].find((k) => k in node.if)
-      const opVal = op === 'in' ? `[${node.if.in.join(', ')}]` : JSON.stringify(node.if[op])
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${node.if.attr} ${op} ${opVal}) then=${node.then} else=${node.else}`)
+      // V3.6 — recursive renderer covers atomic (equals/ne/in/exists/
+      // gt/gte/lt/lte) and compound (not/and/or) shapes.
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
