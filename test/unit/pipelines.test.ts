@@ -841,6 +841,97 @@ describe('listPipelineRuns / pipelineRunDetail (V3.4.a)', () => {
     const root = createTempRepo()
     expect(pipelineRunDetail(root, 'nope')).toBeNull()
   })
+
+  // V3.7.b — pipelineRunDetail joins handler events alongside
+  // dispatches, tagging each step with `kind`. Handler steps carry
+  // handler_id / handler / cmd / exit_code instead of dispatch_id /
+  // task / role / engine.
+  it('pipelineRunDetail joins handler start/end into steps with kind=handler', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-08T10:00:00.000Z',
+        pipeline_run_id: 'rh', pipeline_id: 'h-flow', pipeline_version: 1, entry_node: 'h' }),
+      baseEvent({ type: 'pipeline_handler.start', at: '2026-05-08T10:00:01.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'rh', pipeline_id: 'h-flow', pipeline_node_id: 'h',
+        cmd: 'npm test', timeout_ms: 60000 }),
+      baseEvent({ type: 'pipeline_handler.end', at: '2026-05-08T10:00:05.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'rh', pipeline_id: 'h-flow', pipeline_node_id: 'h',
+        disposition: 'success', exit_code: 0, signal: null, duration_ms: 4000 }),
+      baseEvent({ type: 'pipeline_run.ended', at: '2026-05-08T10:00:06.000Z',
+        pipeline_run_id: 'rh', pipeline_id: 'h-flow', final_state: 'completed',
+        last_node: 'done', last_disposition: 'success' }),
+    ])
+    const detail = pipelineRunDetail(root, 'rh') as {
+      steps: Array<{ kind: string; node_id: string; handler: string; cmd: string;
+        disposition: string; exit_code: number; duration_ms: number }>
+    }
+    expect(detail.steps).toHaveLength(1)
+    expect(detail.steps[0]).toMatchObject({
+      kind: 'handler',
+      node_id: 'h',
+      handler: 'builtin.exec',
+      cmd: 'npm test',
+      disposition: 'success',
+      exit_code: 0,
+      duration_ms: 4000,
+    })
+  })
+
+  it('pipelineRunDetail interleaves handler + dispatch steps by start time', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-08T10:00:00.000Z',
+        pipeline_run_id: 'mix', pipeline_id: 'mix-flow' }),
+      // handler runs first
+      baseEvent({ type: 'pipeline_handler.start', at: '2026-05-08T10:00:01.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'mix', pipeline_node_id: 'pre', cmd: 'true' }),
+      baseEvent({ type: 'pipeline_handler.end', at: '2026-05-08T10:00:02.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'mix', pipeline_node_id: 'pre',
+        disposition: 'success', exit_code: 0 }),
+      // dispatch runs second
+      baseEvent({ type: 'dispatch.start', at: '2026-05-08T10:00:03.000Z',
+        task: 'mix-impl', dispatch_id: 'd1', owner_role: 'implementer', engine: 'claude',
+        task_attrs: { pipeline_run_id: 'mix', pipeline_node_id: 'impl' } }),
+      baseEvent({ type: 'dispatch.end', at: '2026-05-08T10:00:30.000Z',
+        dispatch_id: 'd1', disposition: 'success',
+        task_attrs: { pipeline_run_id: 'mix', pipeline_node_id: 'impl' } }),
+    ])
+    const detail = pipelineRunDetail(root, 'mix') as {
+      steps: Array<{ kind: string; node_id: string }>
+    }
+    expect(detail.steps).toHaveLength(2)
+    expect(detail.steps.map((s) => [s.kind, s.node_id])).toEqual([
+      ['handler', 'pre'],
+      ['dispatch', 'impl'],
+    ])
+  })
+
+  it('pipelineRunDetail handler step propagates exit_code / signal / error / timeout_ms', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-08T10:00:00.000Z',
+        pipeline_run_id: 'tmo', pipeline_id: 'tmo-flow' }),
+      baseEvent({ type: 'pipeline_handler.start', at: '2026-05-08T10:00:01.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'tmo', pipeline_node_id: 'long',
+        cmd: 'sleep 30', timeout_ms: 100 }),
+      baseEvent({ type: 'pipeline_handler.end', at: '2026-05-08T10:00:02.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'tmo', pipeline_node_id: 'long',
+        disposition: 'timeout', exit_code: null, signal: 'SIGTERM',
+        duration_ms: 100 }),
+    ])
+    const detail = pipelineRunDetail(root, 'tmo') as {
+      steps: Array<{ disposition: string; signal: string; timeout_ms: number; exit_code: null }>
+    }
+    expect(detail.steps[0].disposition).toBe('timeout')
+    expect(detail.steps[0].signal).toBe('SIGTERM')
+    expect(detail.steps[0].timeout_ms).toBe(100)
+  })
 })
 
 describe('renderTemplate (V3.5)', () => {

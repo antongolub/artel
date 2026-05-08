@@ -1160,6 +1160,55 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(r.stdout).toMatch(/h\s+handler\s+builtin\.exec\s+cmd="npm test"\s+timeout_ms=60000/)
   })
 
+  it('emits pipeline_handler.start/.end events; status renders handler step (V3.7.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+
+    // Events: start + end with full payload.
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart).toBeDefined()
+    expect(hEnd).toBeDefined()
+    expect(hStart).toMatchObject({
+      kind: 'workload', handler: 'builtin.exec',
+      pipeline_id: 'h-flow', pipeline_node_id: 'h', cmd: 'true',
+    })
+    expect(hStart.handler_id).toBeTruthy()
+    expect(hEnd).toMatchObject({
+      kind: 'workload', handler_id: hStart.handler_id, handler: 'builtin.exec',
+      pipeline_node_id: 'h', disposition: 'success', exit_code: 0,
+    })
+    expect(typeof hEnd.duration_ms).toBe('number')
+
+    // status --json: handler row alongside any dispatches (none here).
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; node_id: string; handler: string; disposition: string; exit_code: number }>
+    }
+    expect(det.steps).toHaveLength(1)
+    expect(det.steps[0]).toMatchObject({
+      kind: 'handler', node_id: 'h', handler: 'builtin.exec',
+      disposition: 'success', exit_code: 0,
+    })
+
+    // status (text): handler word appears in the row.
+    const st = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id])
+    expect(st.status).toBe(0)
+    expect(st.stdout).toMatch(/h\s+true\s+handler\s+exec\s+success/)
+  })
+
   it('handler chains with dispatch through edges', () => {
     // handler success → dispatch → terminal. Verifies that handler
     // disposition flows through edges to a downstream dispatch the

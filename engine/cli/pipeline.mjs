@@ -445,14 +445,51 @@ if (sub === 'run') {
       // the operator's tty so they see the command's output inline
       // with the walker's progress. Disposition (success / error /
       // timeout) flows through outgoing edges exactly like dispatch.
+      // V3.7.b — emit pipeline_handler.start/.end around the run so
+      // status / runs reconstruct handler steps from events.jsonl
+      // (same join key as dispatches: pipeline_run_id +
+      // pipeline_node_id, plus a fresh handler_id UUID v7).
       const detail = node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` : ''
       console.error(`${bold('●')} ${cyan(nodeId)} ${dim('→')} handler ${node.handler}${detail}`)
+      const handlerId = uuidv7()
+      appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
+        handler_id: handlerId,
+        handler: node.handler,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: nodeId,
+        ...(node.handler === 'builtin.exec' ? {
+          cmd: node.cmd,
+          ...(node.timeout_ms != null ? { timeout_ms: node.timeout_ms } : {}),
+        } : {}),
+      })
       try {
         const result = await runHandler(node, { projectDir: PROJECT_DIR })
         const ec = result.exitCode == null ? '?' : result.exitCode
         console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(exit=${ec}, ${result.durationMs}ms)`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
+        appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
+          handler_id: handlerId,
+          handler: node.handler,
+          pipeline_run_id: runId,
+          pipeline_id: def.id,
+          pipeline_node_id: nodeId,
+          disposition: result.disposition,
+          exit_code: result.exitCode ?? null,
+          signal: result.signal ?? null,
+          duration_ms: result.durationMs,
+          ...(result.error ? { error: result.error } : {}),
+        })
         stepDisposition = result.disposition
       } catch (err) {
+        appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
+          handler_id: handlerId,
+          handler: node.handler,
+          pipeline_run_id: runId,
+          pipeline_id: def.id,
+          pipeline_node_id: nodeId,
+          disposition: 'error',
+          error: err.message,
+        })
         abortReason = `handler '${nodeId}' threw: ${err.message}`
         finalState = 'failed'
         break
@@ -600,7 +637,7 @@ if (sub === 'status') {
 
   console.log(`\n  ${bold('Steps')} ${dim(`(${detail.steps.length})`)}`)
   if (!detail.steps.length) {
-    console.log(`    ${dim('(no dispatches recorded yet)')}`)
+    console.log(`    ${dim('(no steps recorded yet)')}`)
   } else {
     for (const s of detail.steps) {
       const dispoColour =
@@ -609,8 +646,16 @@ if (sub === 'status') {
         : s.disposition === 'timeout' || s.disposition === 'error' ? red
         : dim
       const dispo = s.disposition ? dispoColour(s.disposition) : dim('in-flight')
-      const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
-      console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
+      if (s.kind === 'handler') {
+        // V3.7.b — handler row. Mirrors dispatch column layout but
+        // role/engine slots become handler / cmd-fragment so the
+        // alignment stays. cmd is truncated to keep the row scannable.
+        const cmdFrag = s.cmd ? (s.cmd.length > 26 ? s.cmd.slice(0, 25) + '…' : s.cmd) : ''
+        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim((cmdFrag || '').padEnd(28))} ${dim('handler'.padEnd(12))} ${dim((s.handler || '').replace(/^builtin\./, '').padEnd(8))} ${dispo}`)
+      } else {
+        const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
+        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
+      }
     }
   }
   console.log(`\n  ${dim(`drilldown: artel logs <task>`)}\n`)

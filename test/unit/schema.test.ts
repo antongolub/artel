@@ -19,7 +19,13 @@ describe('VALID_KINDS', () => {
 
 describe('validateEventType', () => {
   it('accepts known workload types', () => {
-    for (const t of ['dispatch.start', 'dispatch.end', 'checkpoint', 'parked', 'queue_node.registered']) {
+    for (const t of [
+      'dispatch.start', 'dispatch.end', 'checkpoint', 'parked',
+      'queue_node.registered',
+      // V3.4.a + V3.7.b — pipeline lifecycle / handler events
+      'pipeline.registered', 'pipeline_run.started', 'pipeline_run.ended',
+      'pipeline_handler.start', 'pipeline_handler.end',
+    ]) {
       expect(() => validateEventType('workload', t)).not.toThrow()
     }
   })

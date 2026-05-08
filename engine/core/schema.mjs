@@ -28,6 +28,7 @@ export const RESERVED_TYPE_PREFIXES = {
     'queue_edge.',
     'pipeline.',
     'pipeline_run.',
+    'pipeline_handler.',
     // legacy (one cycle)
     'claim',
     'release',

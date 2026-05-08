@@ -177,6 +177,7 @@ Pipeline:
 ```
 pipeline.registered/updated/deregistered      (definition catalog)
 pipeline_run.started/advanced/paused/resumed/completed/failed/aborted
+pipeline_handler.start/end                    (V3.7.b — handler step lifecycle)
 ```
 
 ### 4.6 Signal kind
@@ -1044,10 +1045,6 @@ catches malformed handler nodes at register time.
   V3.2.a rule (branches must be dispatch) is preserved; lifting it
   needs handler cancellation that joins V3.3.c's `AbortController`
   machinery — deferred.
-- Handler steps don't yet emit `pipeline_handler.start/.end`
-  events, so they don't appear in `artel pipeline status` step
-  timelines. Operators see their progress only in walker stderr.
-  Deferred to V3.7.b.
 
 **Validator shape checks:**
 
@@ -1055,10 +1052,28 @@ catches malformed handler nodes at register time.
 - `builtin.exec`: `.cmd` is a non-empty string; `.timeout_ms` (if
   set) is a positive finite number
 
+**Observability (V3.7.b — landed):**
+
+The walker emits two workload events around `runHandler`:
+
+- `pipeline_handler.start` — `{ handler_id, handler, pipeline_run_id,
+  pipeline_id, pipeline_node_id, cmd?, timeout_ms? }`. `handler_id`
+  is a fresh UUIDv7 per step.
+- `pipeline_handler.end` — same identifying fields plus
+  `{ disposition, exit_code, signal, duration_ms, error? }`. The
+  catch branch around `runHandler` also emits an `end` event so a
+  thrown handler leaves a record.
+
+`pipelineRunDetail` reshapes its accumulator: each step now has
+`kind: 'dispatch' | 'handler'` and the per-kind fields
+(handler steps carry handler / cmd / exit_code / signal /
+duration_ms / timeout_ms / error). Steps interleave by
+`started_at`. `artel pipeline status` renders handler rows with
+the cmd in the task slot and builtin name in the role/engine
+slots so the column alignment with dispatches is preserved.
+
 ### 11.9 Open
 
-- Handler observability: `pipeline_handler.start` / `.end` events,
-  `artel pipeline status` rendering (V3.7.b)
 - More handler builtins: `builtin.assert`, `builtin.set_attr`,
   `builtin.git_squash`, `builtin.git_merge` (V3.7.c+)
 - Handler nodes inside `parallel` branches (needs abort plumbing)

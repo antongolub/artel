@@ -583,18 +583,21 @@ export const listPipelineRuns = (projectDir, { limit = null, pipelineId = null }
 }
 
 // Detail view for one run: the run summary + per-node timeline
-// reconstructed from the dispatches tagged with this `pipeline_run_id`
-// in their `task_attrs`. Each step:
-//   { node_id, dispatch_id?, task?, role?, engine?, started_at?,
-//     completed_at?, disposition?, parallel_of? }
+// reconstructed from the dispatches AND handlers tagged with this
+// `pipeline_run_id`. Each step has a `kind` ('dispatch' | 'handler')
+// so renderers can adjust columns. Common fields:
+//   { kind, node_id, started_at?, completed_at?, disposition? }
+// Dispatch-only: dispatch_id, task, role, engine, parallel_of.
+// Handler-only:  handler_id, handler (builtin name), exit_code,
+//                signal, duration_ms, cmd?, error?.
 export const pipelineRunDetail = (projectDir, runId) => {
   const events = replayEvents(projectDir)
   const summary = {}
-  // Per-dispatch_id, accumulate start/end pair for steps tagged with
-  // this pipeline_run_id. Match via `task_attrs.pipeline_run_id` —
-  // that field flows through dispatch_lifecycle into both events and
-  // .meta sidecars.
-  const stepsByDispatch = new Map()
+  // Match via `task_attrs.pipeline_run_id` for dispatches (that field
+  // flows through dispatch_lifecycle into events + .meta sidecars)
+  // and via top-level `pipeline_run_id` for handler events
+  // (V3.7.b emits them direct, no .meta sidecar).
+  const stepsByKey = new Map()
   for (const e of events) {
     if (e.kind !== 'workload' || typeof e.type !== 'string') continue
     // pipeline_run lifecycle for the summary panel
@@ -620,30 +623,61 @@ export const pipelineRunDetail = (projectDir, runId) => {
       }
       continue
     }
-    // dispatch.start / dispatch.end events tagged with this run
-    if (e.type !== 'dispatch.start' && e.type !== 'dispatch.end') continue
-    const attrs = e.task_attrs || {}
-    if (attrs.pipeline_run_id !== runId) continue
-    const did = e.dispatch_id
-    if (!did) continue
-    let step = stepsByDispatch.get(did)
-    if (!step) {
-      step = { dispatch_id: did }
-      stepsByDispatch.set(did, step)
+    // Dispatch start/end — keyed by dispatch_id
+    if (e.type === 'dispatch.start' || e.type === 'dispatch.end') {
+      const attrs = e.task_attrs || {}
+      if (attrs.pipeline_run_id !== runId) continue
+      const did = e.dispatch_id
+      if (!did) continue
+      const key = `dispatch:${did}`
+      let step = stepsByKey.get(key)
+      if (!step) {
+        step = { kind: 'dispatch', dispatch_id: did }
+        stepsByKey.set(key, step)
+      }
+      if (e.type === 'dispatch.start') {
+        step.task = e.task
+        step.role = e.owner_role
+        step.engine = e.engine
+        step.started_at = e.at
+        step.node_id = attrs.pipeline_node_id || null
+        if (attrs.pipeline_parallel_of) step.parallel_of = attrs.pipeline_parallel_of
+      } else {
+        step.completed_at = e.at
+        step.disposition = e.disposition
+      }
+      continue
     }
-    if (e.type === 'dispatch.start') {
-      step.task = e.task
-      step.role = e.owner_role
-      step.engine = e.engine
-      step.started_at = e.at
-      step.node_id = attrs.pipeline_node_id || null
-      if (attrs.pipeline_parallel_of) step.parallel_of = attrs.pipeline_parallel_of
-    } else {
-      step.completed_at = e.at
-      step.disposition = e.disposition
+    // V3.7.b — handler start/end. Keyed by handler_id, top-level
+    // pipeline_run_id (no task_attrs indirection — handlers don't go
+    // through dispatch_api).
+    if (e.type === 'pipeline_handler.start' || e.type === 'pipeline_handler.end') {
+      if (e.pipeline_run_id !== runId) continue
+      const hid = e.handler_id
+      if (!hid) continue
+      const key = `handler:${hid}`
+      let step = stepsByKey.get(key)
+      if (!step) {
+        step = { kind: 'handler', handler_id: hid }
+        stepsByKey.set(key, step)
+      }
+      if (e.type === 'pipeline_handler.start') {
+        step.handler = e.handler
+        step.node_id = e.pipeline_node_id || null
+        step.started_at = e.at
+        if (e.cmd != null) step.cmd = e.cmd
+        if (e.timeout_ms != null) step.timeout_ms = e.timeout_ms
+      } else {
+        step.completed_at = e.at
+        step.disposition = e.disposition
+        if (e.exit_code != null) step.exit_code = e.exit_code
+        if (e.signal != null) step.signal = e.signal
+        if (e.duration_ms != null) step.duration_ms = e.duration_ms
+        if (e.error != null) step.error = e.error
+      }
     }
   }
-  const steps = [...stepsByDispatch.values()].sort(
+  const steps = [...stepsByKey.values()].sort(
     (a, b) => (a.started_at || '').localeCompare(b.started_at || ''),
   )
   return Object.keys(summary).length ? { ...summary, steps } : null
