@@ -1317,6 +1317,131 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(r.stdout).toMatch(/h\s+handler\s+builtin\.assert\s+if\(env equals "prod"\)\s+message="must be prod"/)
   })
 
+  it('builtin.set_attr mutates run attrs visible to downstream nodes (V3.7.d)', () => {
+    // set_attr writes attrs that flow into:
+    //   1. downstream dispatch task_attrs (via .meta sidecar)
+    //   2. downstream condition predicates
+    //   3. downstream prompt template substitution
+    // We exercise (1) and (3): set_attr → dispatch with templated
+    // prompt + .meta inspection.
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          set: { phase: 'reviewed', label: 'run-{{ pipeline_run_id }}' },
+        },
+        impl: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'phase={{ phase }} label={{ label }}',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mut', '--task-prefix', 'mu'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    // 1. dispatch's task_attrs reflect the mutation
+    const meta = JSON.parse(readFileSync(
+      join(root, '.artel', '.dispatches', 'mu-impl.meta'), 'utf8',
+    ))
+    expect(meta.taskAttrs.phase).toBe('reviewed')
+    expect(meta.taskAttrs.label).toMatch(/^run-[0-9a-f-]{36}$/)
+
+    // 3. dispatch prompt rendered with the mutated attrs
+    const renderedPrompt = readFileSync(
+      join(root, '.artel', '.dispatches', 'mu-impl.prompt'), 'utf8',
+    )
+    expect(renderedPrompt).toMatch(/^phase=reviewed label=run-[0-9a-f-]{36}$/)
+  })
+
+  it('builtin.set_attr emits set + set_resolved in events (V3.7.d)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'reviewed', count: 3 },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart.set).toEqual({ phase: 'reviewed', count: 3 })
+    expect(hEnd.set_resolved).toEqual({ phase: 'reviewed', count: 3 })
+    expect(hEnd.disposition).toBe('success')
+  })
+
+  it('builtin.set_attr render error aborts run; userAttrs unchanged downstream', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut-fail', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          set: { phase: 'reviewed-{{ ghost }}' },  // ghost missing
+        },
+        // Never reached — but if we did, original `phase` should
+        // remain whatever the user passed (or absent).
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mut-fail'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.last_node).toBe('fail')
+    const hEnd = events(root).find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toMatch(/render of \.set\['phase'\] failed:.*ghost/)
+  })
+
+  it('show renders builtin.set_attr with set spec', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'reviewed', count: 7 },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"phase":"reviewed","count":7\}/)
+  })
+
   it('handler chains with dispatch through edges', () => {
     // handler success → dispatch → terminal. Verifies that handler
     // disposition flows through edges to a downstream dispatch the

@@ -592,6 +592,60 @@ describe('handler node validation (V3.7.a)', () => {
     }))).toThrow(/\.message must be a string/)
   })
 
+  it('accepts a well-formed builtin.set_attr handler', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'reviewed', count: 7, paused: false, last_error: null },
+    }))).not.toThrow()
+  })
+
+  it('rejects builtin.set_attr without .set', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+    }))).toThrow(/requires \.set as an object/)
+  })
+
+  it('rejects builtin.set_attr with empty .set', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr', set: {},
+    }))).toThrow(/\.set must be non-empty/)
+  })
+
+  it('rejects builtin.set_attr with array .set', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: [{ k: 'v' }],
+    }))).toThrow(/requires \.set as an object/)
+  })
+
+  it('rejects builtin.set_attr with object value', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { nested: { foo: 'bar' } },
+    }))).toThrow(/\.set\['nested'\] must be a scalar.*got: object/)
+  })
+
+  it('rejects builtin.set_attr with array value', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { tags: ['a', 'b'] },
+    }))).toThrow(/\.set\['tags'\] must be a scalar.*got: array/)
+  })
+
+  it('rejects builtin.set_attr overriding pipeline-injected keys', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { pipeline_run_id: 'spoof' },
+    }))).toThrow(/cannot override pipeline-injected key 'pipeline_run_id'/)
+  })
+
+  it('rejects builtin.set_attr with dotted-path key (deferred)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { 'flags.deployed': true },
+    }))).toThrow(/key 'flags\.deployed' must be top-level/)
+  })
+
   it('handler nodes are still rejected as parallel branches', () => {
     // V3.7.a keeps the parallel-branches-must-be-dispatch rule —
     // handlers in branches need cancellation work that lands later.

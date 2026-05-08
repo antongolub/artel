@@ -222,6 +222,8 @@ if (sub === 'show') {
           ? ` cmd=${JSON.stringify(node.cmd)}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`
         : node.handler === 'builtin.assert'
           ? ` if(${renderPredicate(node.if)})${node.message ? ` message=${JSON.stringify(node.message)}` : ''}`
+        : node.handler === 'builtin.set_attr'
+          ? ` set=${JSON.stringify(node.set)}`
         : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     }
@@ -465,6 +467,7 @@ if (sub === 'run') {
       const detail =
         node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
         node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
+        node.handler === 'builtin.set_attr' ? ` ${dim('set=')}${JSON.stringify(node.set)}` :
         ''
       console.error(`${bold('●')} ${cyan(nodeId)} ${dim('→')} handler ${node.handler}${detail}`)
       const handlerId = uuidv7()
@@ -485,13 +488,20 @@ if (sub === 'run') {
           predicate: node.if,
           ...(node.message ? { message_template: node.message } : {}),
         } : {}),
+        ...(node.handler === 'builtin.set_attr' ? {
+          // Snapshot the set spec verbatim — string values are still
+          // template strings here, not yet rendered. The end event
+          // carries the resolved (post-template) map.
+          set: node.set,
+        } : {}),
       })
       try {
         const result = await runHandler(node, { projectDir: PROJECT_DIR, attrs: handlerAttrs })
         const ec = result.exitCode == null ? '?' : result.exitCode
-        const durLabel = node.handler === 'builtin.assert'
-          ? `${result.durationMs}ms`
-          : `exit=${ec}, ${result.durationMs}ms`
+        const durLabel =
+          node.handler === 'builtin.assert' || node.handler === 'builtin.set_attr'
+            ? `${result.durationMs}ms`
+            : `exit=${ec}, ${result.durationMs}ms`
         console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
         appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
           handler_id: handlerId,
@@ -504,7 +514,15 @@ if (sub === 'run') {
           signal: result.signal ?? null,
           duration_ms: result.durationMs,
           ...(result.error ? { error: result.error } : {}),
+          ...(result.set_resolved ? { set_resolved: result.set_resolved } : {}),
         })
+        // V3.7.d — apply mutation. `result.attrs` is set by builtins
+        // that ask to mutate run state; walker shallow-merges over
+        // userAttrs so subsequent steps see the change. Only on
+        // success — error paths leave userAttrs alone (atomic).
+        if (result.disposition === 'success' && result.attrs) {
+          Object.assign(userAttrs, result.attrs)
+        }
         stepDisposition = result.disposition
       } catch (err) {
         appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {

@@ -186,3 +186,69 @@ describe('builtin.assert (V3.7.c)', () => {
     expect(r.disposition).toBe('error')
   })
 })
+
+describe('builtin.set_attr (V3.7.d)', () => {
+  it('returns success with attrs payload for the walker to merge', async () => {
+    const r = await runHandler(
+      { handler: 'builtin.set_attr', set: { phase: 'reviewed', count: 7 } },
+      { attrs: {} },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.attrs).toEqual({ phase: 'reviewed', count: 7 })
+    expect(r.set_resolved).toEqual({ phase: 'reviewed', count: 7 })
+  })
+
+  it('passes through scalar values (number / boolean / null)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: { count: 42, ready: true, blocked: false, last_error: null },
+      },
+      { attrs: {} },
+    )
+    expect(r.attrs).toEqual({ count: 42, ready: true, blocked: false, last_error: null })
+  })
+
+  it('renders string values via V3.5 templates against ctx.attrs', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: {
+          tag: 'reviewed-{{ pipeline_run_id }}',
+          target: '{{ env }}-deploy',
+        },
+      },
+      { attrs: { pipeline_run_id: 'abc123', env: 'prod' } },
+    )
+    expect(r.attrs).toEqual({ tag: 'reviewed-abc123', target: 'prod-deploy' })
+  })
+
+  it('errors atomically when any string template fails (no partial mutation)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: {
+          good: 'computed-{{ env }}',
+          bad: 'needs-{{ ghost }}',     // ghost missing → throw
+          also_good: 42,
+        },
+      },
+      { attrs: { env: 'prod' } },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/set_attr: render of \.set\['bad'\] failed:.*missing attribute 'ghost'/)
+    // No attrs returned — atomic, walker leaves userAttrs untouched.
+    expect(r.attrs).toBeUndefined()
+  })
+
+  it('does not recursively re-render the resolved value', async () => {
+    // The resolved value contains template syntax literally; that's
+    // by design (V3.5 contract). A subsequent set_attr or template
+    // render would catch it, but the immediate result is verbatim.
+    const r = await runHandler(
+      { handler: 'builtin.set_attr', set: { x: '{{ y }}' } },
+      { attrs: { y: '{{ z }}', z: 'hello' } },
+    )
+    expect(r.attrs.x).toBe('{{ z }}')
+  })
+})

@@ -76,7 +76,23 @@ export const VALID_NODE_TYPES = new Set([
 // run attrs; success on true, error on false. Optional template-
 // rendered `node.message` lands in the `pipeline_handler.end`
 // event's `error` field for forensics.
-export const VALID_HANDLERS = new Set(['builtin.exec', 'builtin.assert'])
+//
+// V3.7.d adds `builtin.set_attr` — mutates run attrs in place.
+// `node.set` is a flat object of `{ key: scalar }` pairs; string
+// values are V3.5 template-rendered against the current attrs scope
+// before merge. Walker shallow-merges the returned attrs back into
+// `userAttrs` so subsequent steps see the mutation. Pipeline-injected
+// ids (`pipeline_run_id`, `pipeline_id`, `pipeline_node_id`,
+// `pipeline_parallel_of`) are respread per step, so user `set`
+// overriding them is benign — but rejecting at validator level keeps
+// intent clear.
+export const VALID_HANDLERS = new Set([
+  'builtin.exec', 'builtin.assert', 'builtin.set_attr',
+])
+
+const RESERVED_ATTR_KEYS = new Set([
+  'pipeline_run_id', 'pipeline_id', 'pipeline_node_id', 'pipeline_parallel_of',
+])
 
 // V3.3.c — three join policies. all-complete waits for every branch;
 // any-complete returns as soon as one succeeds (cancels the rest);
@@ -299,6 +315,35 @@ export const validatePipeline = (def, source = '<inline>') => {
         validatePredicateShape(node.if, source, nid, '.if')
         if (node.message != null && typeof node.message !== 'string') {
           throw new Error(`${source}: handler node '${nid}' .message must be a string (got: ${typeof node.message})`)
+        }
+      }
+      // V3.7.d — builtin.set_attr: requires .set (non-empty object).
+      // Top-level keys only (no dotted paths in V3.7.d — walker has
+      // no writePath helper). Values must be scalar (string | number
+      // | boolean) or null; objects / arrays rejected (no obvious
+      // merge semantics, and templates only apply to strings).
+      // Reserved pipeline-injected keys rejected for clarity (they
+      // can't actually be overridden — walker respreads them per
+      // step — but accepting them invites confusion).
+      if (node.handler === 'builtin.set_attr') {
+        if (!node.set || typeof node.set !== 'object' || Array.isArray(node.set)) {
+          throw new Error(`${source}: handler node '${nid}' (builtin.set_attr) requires .set as an object`)
+        }
+        const keys = Object.keys(node.set)
+        if (keys.length === 0) {
+          throw new Error(`${source}: handler node '${nid}' .set must be non-empty`)
+        }
+        for (const key of keys) {
+          if (RESERVED_ATTR_KEYS.has(key)) {
+            throw new Error(`${source}: handler node '${nid}' .set cannot override pipeline-injected key '${key}' (reserved: ${[...RESERVED_ATTR_KEYS].join(', ')})`)
+          }
+          if (key.includes('.')) {
+            throw new Error(`${source}: handler node '${nid}' .set key '${key}' must be top-level (dotted-path keys deferred to V3.7.d+)`)
+          }
+          const v = node.set[key]
+          const t = typeof v
+          if (v === null || t === 'string' || t === 'number' || t === 'boolean') continue
+          throw new Error(`${source}: handler node '${nid}' .set['${key}'] must be a scalar (string | number | boolean) or null (got: ${Array.isArray(v) ? 'array' : t})`)
         }
       }
     }

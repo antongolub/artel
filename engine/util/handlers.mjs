@@ -1,4 +1,4 @@
-// Pipeline handler builtins (V3.7.a + V3.7.c).
+// Pipeline handler builtins (V3.7.a + V3.7.c + V3.7.d).
 //
 // Handlers are pipeline nodes that perform a platform action without
 // dispatching an LLM. They share the same edge-routing machinery as
@@ -18,9 +18,17 @@
 // for dispatches (user `--attrs` + pipeline-injected ids). Builtins
 // that read from the run state use it; `builtin.exec` ignores it.
 //
-// V3.7.a shipped `builtin.exec`. V3.7.c adds `builtin.assert`.
-// `builtin.set_attr`, `builtin.git_squash`, `builtin.git_merge`
-// deferred.
+// V3.7.a shipped `builtin.exec`. V3.7.c added `builtin.assert`.
+// V3.7.d adds `builtin.set_attr`. `builtin.git_squash`,
+// `builtin.git_merge` deferred.
+//
+// Mutation contract (V3.7.d): a builtin returns `{ ..., attrs: {…} }`
+// to ask the walker to merge new attrs into the run state.
+// Walker shallow-merges over `userAttrs` so subsequent dispatches /
+// conditions / asserts see the change. Pipeline-injected ids
+// (pipeline_run_id, pipeline_id, pipeline_node_id) are respread per
+// step regardless, so a builtin can't actually override them — but
+// the validator rejects reserved keys for clarity.
 
 import { spawn } from 'node:child_process'
 import { evaluatePredicate, renderTemplate } from './pipelines.mjs'
@@ -114,9 +122,47 @@ const assertBuiltin = async (node, ctx) => {
   }
 }
 
+// builtin.set_attr (V3.7.d): mutate run attrs that flow downstream.
+// `node.set` is a flat object of { key: scalar | null }; string
+// values get V3.5 template-rendered against `ctx.attrs` before
+// merge. Validator already enforced the shape (top-level keys,
+// scalar/null values, no reserved-key overrides).
+//
+// Atomic: all values are computed first, then returned together.
+// If any string value's template render throws (missing attr,
+// non-scalar value), disposition flips to error and no partial
+// mutation reaches the walker.
+const setAttrBuiltin = async (node, ctx) => {
+  const start = Date.now()
+  const attrs = ctx.attrs || {}
+  const resolved = {}
+  for (const [key, raw] of Object.entries(node.set)) {
+    if (typeof raw === 'string') {
+      try {
+        resolved[key] = renderTemplate(raw, attrs)
+      } catch (err) {
+        return {
+          disposition: 'error',
+          durationMs: Date.now() - start,
+          error: `set_attr: render of .set['${key}'] failed: ${err.message}`,
+        }
+      }
+    } else {
+      resolved[key] = raw
+    }
+  }
+  return {
+    disposition: 'success',
+    durationMs: Date.now() - start,
+    attrs: resolved,    // walker merges over userAttrs
+    set_resolved: resolved, // for the end-event payload
+  }
+}
+
 const BUILTINS = {
   'builtin.exec': execBuiltin,
   'builtin.assert': assertBuiltin,
+  'builtin.set_attr': setAttrBuiltin,
 }
 
 // Run a handler node. `ctx.projectDir` is the project root —

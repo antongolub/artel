@@ -1042,11 +1042,37 @@ ci_check:
   `pipeline_handler.end` event's `error` field on failure.
   Bad templates render as `[message render failed: ...]` rather
   than crashing the walker. Pure function — no spawn, no I/O.
+- `builtin.set_attr` (V3.7.d) — mutate run attrs that flow
+  downstream. `node.set` is a flat `{ key: scalar | null }` map;
+  string values are V3.5 template-rendered against `ctx.attrs`
+  first. Returns `{ attrs }` so the walker shallow-merges into
+  `userAttrs`. Atomic: if any string template throws, no partial
+  mutation reaches the walker. Subsequent dispatches / conditions
+  / asserts see the new attrs. Reserved pipeline-injected keys
+  (`pipeline_run_id` etc.) rejected at register; dotted-path
+  keys deferred. Pure function — no spawn, no I/O.
 
 Adding a new builtin = registering its name in
 `VALID_HANDLERS` (`engine/util/pipelines.mjs`) + its implementation
 in the `BUILTINS` map (`engine/util/handlers.mjs`). Validator
 catches malformed handler nodes at register time.
+
+**Mutation contract (V3.7.d):**
+
+A builtin returns `{ ..., attrs: {…} }` to ask the walker to merge
+new attrs into the run state:
+
+```js
+return { disposition: 'success', attrs: { phase: 'reviewed' } }
+```
+
+Walker shallow-merges over `userAttrs` only on `disposition: 'success'`
+— error paths leave the run state alone (atomic). Pipeline-injected
+ids are respread per step, so a builtin can't actually override
+them; the validator rejects reserved keys for clarity.
+
+Builtins that don't mutate (`builtin.exec`, `builtin.assert`)
+omit `attrs` from their return shape — back-compat preserved.
 
 **Handler ctx shape:**
 
@@ -1076,6 +1102,10 @@ it; `builtin.exec` ignores it.
 - `builtin.assert`: `.if` is a valid predicate (recursive shape
   check via `validatePredicateShape`); `.message` (if set) is a
   string
+- `builtin.set_attr`: `.set` is a non-empty flat object; values
+  are scalar (string | number | boolean) or null; keys are
+  top-level (no dots) and exclude reserved pipeline-injected
+  names
 
 **Observability (V3.7.b — landed):**
 
@@ -1099,9 +1129,12 @@ slots so the column alignment with dispatches is preserved.
 
 ### 11.9 Open
 
-- More handler builtins: `builtin.set_attr` (mutate run attrs that
-  flow downstream), `builtin.git_squash`, `builtin.git_merge`
-  (V3.7.d+)
+- More handler builtins: `builtin.git_squash`, `builtin.git_merge`
+  (V3.7.e+)
+- Dotted-path keys in `builtin.set_attr` (would need a writePath
+  helper for nested mutation)
+- `builtin.set_attr` deletion semantics (currently null sets to
+  null; an `unset` field could remove keys)
 - Handler nodes inside `parallel` branches (needs abort plumbing)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
