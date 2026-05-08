@@ -5,14 +5,17 @@
 // disposition.
 //
 // V3.1 node types: `dispatch`, `terminal`.
-// V3.2.a adds `parallel` — fan-out + all-complete join. Branches run
-// sequentially in V3.2.a (the engine's dispatchLifecycle owns the git
-// working tree, so concurrent dispatches would race on branch checkout
-// + working tree state). True concurrency via git-worktree lands in
-// V3.3. The structural primitive is in place now so pipelines can
-// declare fan-out intent today.
+// V3.2.a adds `parallel` — fan-out + all-complete join. V3.3.a wires
+// branches to git worktrees + Promise.all, so they run truly
+// concurrently while the operator's main checkout stays put.
 //
-// `condition` / `pause` / `handler` / `subpipeline` deferred to V3.2.b+.
+// V3.2.b adds `condition` — a pure routing node. It evaluates a
+// predicate against the run's `task_attrs` (carrying both
+// user-supplied `--attrs` JSON and pipeline-injected ids) and jumps
+// to `then` or `else` without dispatching. Use case: gate impl on
+// `attrs.skip_tests`, branch on `attrs.target = staging|prod`, etc.
+//
+// `pause` / `handler` / `subpipeline` deferred to V3.2.c+.
 //
 // V3.1 schema:
 //   {
@@ -55,11 +58,19 @@ export const pipelinePath = (projectDir, id) =>
 
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
-export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel'])
+export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel', 'condition'])
 
 // V3.2.a: only all-complete join. any-complete + k-of-n deferred —
 // they need cancellation semantics that depend on V3.3 worktrees.
 export const VALID_JOIN_POLICIES = new Set(['all-complete'])
+
+// V3.2.b condition predicates. Schema:
+//   { "attr": "key.path", "equals": <any> }
+//   { "attr": "key.path", "in": [<any>, ...] }
+//   { "attr": "key.path", "exists": true|false }
+// More complex predicates (and/or/not, regex, comparisons) deferred —
+// keep the surface small until concrete need.
+export const VALID_PREDICATE_OPS = new Set(['equals', 'in', 'exists'])
 
 export const VALID_FINAL_STATES = new Set([
   'completed', 'failed', 'aborted', 'superseded',
@@ -113,6 +124,29 @@ export const validatePipeline = (def, source = '<inline>') => {
     } else if (node.type === 'terminal') {
       if (!VALID_FINAL_STATES.has(node.final_state)) {
         throw new Error(`${source}: terminal node '${nid}' has invalid final_state '${node.final_state}' (valid: ${[...VALID_FINAL_STATES].join(' | ')})`)
+      }
+    } else if (node.type === 'condition') {
+      if (typeof node.then !== 'string' || !(node.then in def.nodes)) {
+        throw new Error(`${source}: condition node '${nid}' .then '${node.then}' is not a registered node`)
+      }
+      if (typeof node.else !== 'string' || !(node.else in def.nodes)) {
+        throw new Error(`${source}: condition node '${nid}' .else '${node.else}' is not a registered node`)
+      }
+      if (!node.if || typeof node.if !== 'object') {
+        throw new Error(`${source}: condition node '${nid}' requires an .if predicate object`)
+      }
+      if (typeof node.if.attr !== 'string' || !node.if.attr) {
+        throw new Error(`${source}: condition node '${nid}' .if.attr must be a non-empty string`)
+      }
+      const ops = Object.keys(node.if).filter((k) => VALID_PREDICATE_OPS.has(k))
+      if (ops.length !== 1) {
+        throw new Error(`${source}: condition node '${nid}' .if must specify exactly one of ${[...VALID_PREDICATE_OPS].join(' | ')} (got: ${ops.join(', ') || '(none)'})`)
+      }
+      if (ops[0] === 'in' && !Array.isArray(node.if.in)) {
+        throw new Error(`${source}: condition node '${nid}' .if.in must be an array`)
+      }
+      if (ops[0] === 'exists' && typeof node.if.exists !== 'boolean') {
+        throw new Error(`${source}: condition node '${nid}' .if.exists must be a boolean`)
       }
     } else if (node.type === 'parallel') {
       if (!Array.isArray(node.branches) || node.branches.length === 0) {
@@ -192,6 +226,15 @@ export const validatePipeline = (def, source = '<inline>') => {
           }
         }
       }
+      // Condition routes to .then / .else without going through edges
+      if (node.type === 'condition') {
+        for (const target of [node.then, node.else]) {
+          if (target && !reachable.has(target)) {
+            reachable.add(target)
+            next.push(target)
+          }
+        }
+      }
     }
     frontier = next
   }
@@ -202,6 +245,35 @@ export const validatePipeline = (def, source = '<inline>') => {
     throw new Error(`${source}: no terminal node is reachable from entry '${def.entry}'`)
   }
   return def
+}
+
+// V3.2.b — read a dotted path out of a nested object. Supports
+// `pipeline_id`, `attrs.target`, `attrs.flags.skip_tests`, etc.
+// Returns undefined when any segment is missing.
+const readPath = (obj, path) => {
+  if (!obj) return undefined
+  const segments = path.split('.')
+  let cur = obj
+  for (const seg of segments) {
+    if (cur == null || typeof cur !== 'object') return undefined
+    cur = cur[seg]
+  }
+  return cur
+}
+
+// V3.2.b — evaluate a condition node's `.if` predicate against the
+// run's task_attrs. The validator already guarantees exactly one of
+// `equals` / `in` / `exists` is set.
+export const evaluatePredicate = (predicate, attrs) => {
+  if (!predicate || typeof predicate !== 'object') return false
+  const value = readPath(attrs, predicate.attr)
+  if ('equals' in predicate) return value === predicate.equals
+  if ('in' in predicate) return Array.isArray(predicate.in) && predicate.in.includes(value)
+  if ('exists' in predicate) {
+    const present = value !== undefined
+    return predicate.exists ? present : !present
+  }
+  return false
 }
 
 // Aggregate disposition for a parallel join. V3.2.a only supports

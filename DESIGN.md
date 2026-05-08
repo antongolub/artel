@@ -619,6 +619,7 @@ without breaking the events vocabulary). Versioned. Lifecycle:
 - `dispatch` — spawns sub-role via `dispatchLifecycle`
 - `terminal` — sink with `final_state: completed | failed | aborted | superseded`
 - `parallel` (V3.2.a) — fan-out + all-complete join (see §11.2)
+- `condition` (V3.2.b) — pure routing on `task_attrs` predicate (see §11.3)
 
 **Edges:** `{ from, on_disposition, to }`. `on_disposition` ∈
 `success | parked | timeout | error | *`. Resolution is
@@ -693,6 +694,43 @@ so external filtering can group parallel siblings.
 flow (entry → parallel → terminal) passes validation without
 requiring an explicit edge to each branch.
 
+### 11.3 V3.2.b — condition (landed)
+
+Pure routing node. No dispatch — the walker evaluates a predicate
+against the run's `task_attrs` and jumps directly to either `.then`
+or `.else`.
+
+**Definition:**
+```json
+{
+  "type": "condition",
+  "if": { "attr": "<dotted.path>", "<op>": <value> },
+  "then": "<node-id>",
+  "else": "<node-id>"
+}
+```
+
+**Predicate operators** (`engine/util/pipelines.mjs#evaluatePredicate`):
+- `equals` — strict `===` match
+- `in` — array membership
+- `exists` — boolean presence test (`true` = field is set; `false` = absent)
+
+Exactly one operator per predicate. Compound predicates
+(`and`/`or`/`not`, regex, comparisons) deferred — keep the surface
+small until concrete need.
+
+**Attr resolution.** `attr` is a dotted path read against the merged
+`task_attrs` blob — pipeline-injected (`pipeline_run_id` /
+`pipeline_id` / `pipeline_node_id`) plus user `--attrs` JSON.
+Missing segments resolve to `undefined`.
+
+**No transition events.** The route is observable through the next
+dispatch's `pipeline_node_id` in events.jsonl — no separate
+`pipeline_condition_taken` event needed.
+
+**Reachability** check follows `node.then` and `node.else` so a
+condition-only flow validates without explicit edges.
+
 ### 11.4 V3.3.a — git worktrees (landed)
 
 A dispatch can run in an isolated checkout instead of the operator's
@@ -759,17 +797,39 @@ checkout. Removing the worktree doesn't remove the branch.
 
 **Action for consumers.** Add `.artel/.worktrees/` to `.gitignore`.
 
-### 11.5 V3.3.b+ / V3.2.b — open
+### 11.5 V3.3.b — sweep prune for worktrees (landed)
 
-Reserved by the spec; not yet implemented:
-- `parallel` extra joins: `any-complete`, `k-of-n` (now possible
-  with V3.3.a worktrees giving cancellable independent processes,
-  but cancellation semantics still need design)
-- `condition` — pure decision
+`artel sweep` now prunes orphaned `.artel/.worktrees/<branch>/`
+directories alongside the existing `.artel/.dispatches/` cleanup.
+
+**Eligibility:**
+1. The directory matches a path in `git worktree list --porcelain`
+   (cross-check prevents fs-rm on directories git doesn't track,
+   which would corrupt the worktree registry).
+2. Branch is not in any active QUEUE.md section
+   (`For Owner` / `In progress` / `Pending` / `Blocked`). Match by
+   full branch (`implementer/foo`) OR by trailing task slug
+   (queue tracks slugs, not full branches).
+3. Directory mtime is older than `--older-than` (default 30d).
+
+Sweep happens via `git worktree remove --force <path>` so locally
+dirty files don't block cleanup. The single `cluster.swept` event
+gains `worktrees_removed` count alongside the existing `dispatches_*`
+fields. JSON output includes `worktrees_swept` array.
+
+Successful dispatches already remove their worktree on settle (see
+§11.4) — sweep catches the leftovers from parked / timeout /
+errored runs that were kept for forensics.
+
+### 11.6 Open
+
+- `parallel` extra joins: `any-complete`, `k-of-n` — now feasible
+  with V3.3.a process isolation, needs cancellation design
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition
-- `artel sweep` prune for stale `.artel/.worktrees/` directories
+- Prompt template substitution
+- More predicate ops in `condition` (and/or/not, regex, comparisons)
 
 **Additional edges:** `on_signal: <type>`, `on_budget_exhausted`.
 Loops bounded by `max_visits` per node.

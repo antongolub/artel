@@ -20,6 +20,7 @@ import { parseArgs } from 'node:util'
 import { appendWorkloadEvent } from '../util/audit.mjs'
 import {
   aggregateDisposition,
+  evaluatePredicate,
   listPipelineFiles,
   loadPipelineFile,
   pipelinePath,
@@ -178,6 +179,10 @@ if (sub === 'show') {
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('terminal')} → ${colour(node.final_state)}`)
     } else if (node.type === 'parallel') {
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'}`)
+    } else if (node.type === 'condition') {
+      const op = ['equals', 'in', 'exists'].find((k) => k in node.if)
+      const opVal = op === 'in' ? `[${node.if.in.join(', ')}]` : JSON.stringify(node.if[op])
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${node.if.attr} ${op} ${opVal}) then=${node.then} else=${node.else}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
@@ -321,8 +326,25 @@ if (sub === 'run') {
       }
       stepDisposition = aggregateDisposition(dispositions)
       console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + (node.join || 'all-complete') + ' of ' + dispositions.length + ')')}`)
+    } else if (node.type === 'condition') {
+      // V3.2.b — pure routing. Predicate evaluated against the run's
+      // task attrs (user-supplied + pipeline-injected ids). No
+      // dispatch, no edges — direct jump to .then or .else.
+      const attrs = {
+        ...userAttrs,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: nodeId,
+      }
+      const matched = evaluatePredicate(node.if, attrs)
+      const branchTaken = matched ? node.then : node.else
+      console.error(`${bold('?')} ${cyan(nodeId)} ${dim('→')} condition ${dim('attr=')}${node.if.attr} ${dim('→')} ${matched ? green('then') : yellow('else')} ${dim('→')} ${cyan(branchTaken)}`)
+      // Conditions don't generate a step disposition — short-circuit
+      // straight to the chosen target.
+      nodeId = branchTaken
+      continue
     } else {
-      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.2.a supports: dispatch | parallel | terminal)`
+      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.2.b supports: dispatch | parallel | condition | terminal)`
       finalState = 'failed'
       break
     }

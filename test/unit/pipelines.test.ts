@@ -222,6 +222,116 @@ describe('parallel node validation (V3.2.a)', () => {
   })
 })
 
+describe('condition node validation (V3.2.b)', () => {
+  const withCondition = (overrides = {}) => ({
+    id: 'gated',
+    version: 1,
+    entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: { attr: 'attrs.skip_tests', equals: true }, then: 'done', else: 'test' },
+      test: { type: 'dispatch', role: 'implementer', prompt: 'run tests' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'test', on_disposition: 'success', to: 'done' },
+      { from: 'test', on_disposition: '*', to: 'done' },
+    ],
+    ...overrides,
+  })
+
+  it('accepts a well-formed condition pipeline', () => {
+    expect(() => validatePipeline(withCondition())).not.toThrow()
+  })
+
+  it('rejects condition without then / else', () => {
+    const def = withCondition()
+    delete (def.nodes.gate as { then?: string }).then
+    expect(() => validatePipeline(def)).toThrow(/\.then '.*' is not a registered node/)
+  })
+
+  it('rejects condition referencing unknown then/else', () => {
+    const def = withCondition()
+    def.nodes.gate.then = 'ghost'
+    expect(() => validatePipeline(def)).toThrow(/\.then 'ghost' is not a registered node/)
+  })
+
+  it('rejects condition without .if', () => {
+    const def = withCondition()
+    delete (def.nodes.gate as { if?: object }).if
+    expect(() => validatePipeline(def)).toThrow(/requires an \.if predicate/)
+  })
+
+  it('rejects condition with bad attr', () => {
+    const def = withCondition()
+    def.nodes.gate.if = { equals: true } as never
+    expect(() => validatePipeline(def)).toThrow(/\.if\.attr must be a non-empty string/)
+  })
+
+  it('rejects condition with multiple ops', () => {
+    const def = withCondition()
+    def.nodes.gate.if = { attr: 'x', equals: 1, in: [1, 2] } as never
+    expect(() => validatePipeline(def)).toThrow(/must specify exactly one of/)
+  })
+
+  it('rejects condition with no op', () => {
+    const def = withCondition()
+    def.nodes.gate.if = { attr: 'x' } as never
+    expect(() => validatePipeline(def)).toThrow(/must specify exactly one of/)
+  })
+
+  it('rejects in op with non-array value', () => {
+    const def = withCondition()
+    def.nodes.gate.if = { attr: 'x', in: 'not-an-array' } as never
+    expect(() => validatePipeline(def)).toThrow(/\.if\.in must be an array/)
+  })
+
+  it('rejects exists op with non-boolean', () => {
+    const def = withCondition()
+    def.nodes.gate.if = { attr: 'x', exists: 'maybe' } as never
+    expect(() => validatePipeline(def)).toThrow(/\.if\.exists must be a boolean/)
+  })
+
+  it('reachability follows .then and .else', () => {
+    // condition is the only path to `done` and `test`; without
+    // following condition's then/else, reachability would fail.
+    expect(() => validatePipeline(withCondition())).not.toThrow()
+  })
+})
+
+describe('evaluatePredicate (V3.2.b)', () => {
+  const { evaluatePredicate } = pipelinesModule as { evaluatePredicate: (p: object | null, attrs: object) => boolean }
+
+  it('equals matches exact value', () => {
+    expect(evaluatePredicate({ attr: 'x', equals: 1 }, { x: 1 })).toBe(true)
+    expect(evaluatePredicate({ attr: 'x', equals: 1 }, { x: 2 })).toBe(false)
+    expect(evaluatePredicate({ attr: 'x', equals: 'foo' }, { x: 'foo' })).toBe(true)
+    expect(evaluatePredicate({ attr: 'x', equals: true }, { x: true })).toBe(true)
+  })
+
+  it('reads dotted paths', () => {
+    expect(evaluatePredicate({ attr: 'a.b.c', equals: 7 }, { a: { b: { c: 7 } } })).toBe(true)
+    expect(evaluatePredicate({ attr: 'a.b.c', equals: 7 }, { a: { b: {} } })).toBe(false)
+    expect(evaluatePredicate({ attr: 'a.b', equals: undefined }, { a: {} })).toBe(true)
+  })
+
+  it('in matches array membership', () => {
+    expect(evaluatePredicate({ attr: 'env', in: ['staging', 'prod'] }, { env: 'staging' })).toBe(true)
+    expect(evaluatePredicate({ attr: 'env', in: ['staging', 'prod'] }, { env: 'dev' })).toBe(false)
+  })
+
+  it('exists checks presence', () => {
+    expect(evaluatePredicate({ attr: 'x', exists: true }, { x: 0 })).toBe(true)
+    expect(evaluatePredicate({ attr: 'x', exists: true }, { x: '' })).toBe(true)
+    expect(evaluatePredicate({ attr: 'x', exists: true }, {})).toBe(false)
+    expect(evaluatePredicate({ attr: 'x', exists: false }, {})).toBe(true)
+    expect(evaluatePredicate({ attr: 'x', exists: false }, { x: 1 })).toBe(false)
+  })
+
+  it('returns false on null / non-object predicate', () => {
+    expect(evaluatePredicate(null, { x: 1 })).toBe(false)
+  })
+})
+
 describe('aggregateDisposition (V3.2.a)', () => {
   const { aggregateDisposition } = pipelinesModule as { aggregateDisposition: (xs: string[]) => string }
 

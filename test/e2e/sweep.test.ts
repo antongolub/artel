@@ -2,8 +2,9 @@
 // entries and --keep N. Emits `cluster.swept` infra event.
 
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import {
   cleanupTempRoots,
   createTempRepo,
@@ -12,6 +13,7 @@ import {
   ENGINE_FILES_UTIL,
   installEngineRuntime,
   runNode,
+  snapshotRepo,
 } from '../_helpers.js'
 
 afterEach(cleanupTempRoots)
@@ -141,5 +143,103 @@ describe('artel sweep', () => {
     expect(r.status).toBe(0)
     expect(r.stdout).toMatch(/nothing to sweep/)
     expect(events(root).filter((e) => e.type === 'cluster.swept')).toEqual([])
+  })
+})
+
+describe('artel sweep — worktrees (V3.3.b)', () => {
+  // We exercise the worktree pruning via real `git worktree add` since
+  // the helper checks `git worktree list`. If `git` isn't on PATH the
+  // test silently no-ops (matches install-stub policy elsewhere).
+  const gitAvailable = () => spawnSync('git', ['--version'], { stdio: 'ignore' }).status !== null
+
+  it('prunes orphaned .artel/.worktrees/<branch>/ older than threshold', () => {
+    if (!gitAvailable()) return
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+
+    // Use the worktree util directly to set up two worktrees.
+    spawnSync('git', ['branch', '-f', 'implementer/old-task', 'HEAD'],
+      { cwd: root, stdio: 'ignore' })
+    spawnSync('git', ['worktree', 'add',
+      join(root, '.artel', '.worktrees', 'implementer', 'old-task'),
+      'implementer/old-task'],
+      { cwd: root, stdio: 'ignore' })
+    spawnSync('git', ['branch', '-f', 'implementer/fresh-task', 'HEAD'],
+      { cwd: root, stdio: 'ignore' })
+    spawnSync('git', ['worktree', 'add',
+      join(root, '.artel', '.worktrees', 'implementer', 'fresh-task'),
+      'implementer/fresh-task'],
+      { cwd: root, stdio: 'ignore' })
+
+    // Backdate the old worktree's mtime ~60 days
+    const oldPath = join(root, '.artel', '.worktrees', 'implementer', 'old-task')
+    const oldTime = new Date(Date.now() - 60 * 86400000)
+    utimesSync(oldPath, oldTime, oldTime)
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0'])
+    expect(r.status).toBe(0)
+    expect(existsSync(oldPath)).toBe(false)
+    expect(existsSync(join(root, '.artel', '.worktrees', 'implementer', 'fresh-task'))).toBe(true)
+
+    const evt = events(root).find((e) => e.type === 'cluster.swept')
+    expect(evt.worktrees_removed).toBe(1)
+  })
+
+  it('skips worktrees for tasks active in QUEUE.md', () => {
+    if (!gitAvailable()) return
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+
+    spawnSync('git', ['branch', '-f', 'implementer/active-task', 'HEAD'],
+      { cwd: root, stdio: 'ignore' })
+    const wtPath = join(root, '.artel', '.worktrees', 'implementer', 'active-task')
+    spawnSync('git', ['worktree', 'add', wtPath, 'implementer/active-task'],
+      { cwd: root, stdio: 'ignore' })
+    // Backdate so age threshold would otherwise mark for removal.
+    utimesSync(wtPath,
+      new Date(Date.now() - 60 * 86400000),
+      new Date(Date.now() - 60 * 86400000))
+
+    // QUEUE.md mentions the task slug as active
+    writeFileSync(join(root, '.artel', 'QUEUE.md'),
+      [
+        '# Q', '',
+        '## For Owner', '- (none)', '',
+        '## In progress', '- [impl] active-task', '',
+        '## Pending', '- (none)', '',
+        '## Blocked', '- (none)', '',
+        '## Recently done', '- (none)', '',
+      ].join('\n'))
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0'])
+    expect(r.status).toBe(0)
+    expect(existsSync(wtPath)).toBe(true) // active = held
+  })
+
+  it('--json output includes worktrees_swept array', () => {
+    if (!gitAvailable()) return
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+
+    spawnSync('git', ['branch', '-f', 'implementer/json-task', 'HEAD'],
+      { cwd: root, stdio: 'ignore' })
+    const wtPath = join(root, '.artel', '.worktrees', 'implementer', 'json-task')
+    spawnSync('git', ['worktree', 'add', wtPath, 'implementer/json-task'],
+      { cwd: root, stdio: 'ignore' })
+    utimesSync(wtPath,
+      new Date(Date.now() - 60 * 86400000),
+      new Date(Date.now() - 60 * 86400000))
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0', '--dry-run', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed.worktrees_swept).toHaveLength(1)
+    expect(parsed.worktrees_swept[0].branch).toBe('implementer/json-task')
+    expect(parsed.dry_run).toBe(true)
+    // dry-run preserves the worktree
+    expect(existsSync(wtPath)).toBe(true)
   })
 })

@@ -397,3 +397,99 @@ describe('artel pipeline run — parallel (V3.2.a)', () => {
     expect(r.stdout).toMatch(/reviews\s+parallel\s+branches=\[cr, adv, maint\]\s+join=all-complete/)
   })
 })
+
+describe('artel pipeline run — condition (V3.2.b)', () => {
+  const conditionPipeline = (overrides = {}) => ({
+    id: 'gated',
+    version: 1,
+    description: 'Skip impl when attrs.skip says so',
+    entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: { attr: 'skip', equals: true }, then: 'done', else: 'impl' },
+      impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'do the thing' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'impl', on_disposition: 'success', to: 'done' },
+      { from: 'impl', on_disposition: '*', to: 'done' },
+    ],
+    ...overrides,
+  })
+
+  it("condition with --attrs '{\"skip\": true}' jumps to .then, skipping the dispatch", () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"skip": true}',
+      '--task-prefix', 'skipped',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // The dispatch was bypassed → no impl .meta exists
+    expect(existsSync(join(root, '.artel', '.dispatches', 'skipped-impl.meta'))).toBe(false)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('condition with .else branch dispatches the gated node', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"skip": false}',
+      '--task-prefix', 'tested',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', '.dispatches', 'tested-impl.meta'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('condition routes via dotted attrs path', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = conditionPipeline({
+      nodes: {
+        gate: { type: 'condition', if: { attr: 'env.target', in: ['staging', 'prod'] }, then: 'impl', else: 'done' },
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'deploy' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"env": {"target": "prod"}}',
+      '--task-prefix', 'deploy',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // env.target = prod is in [staging, prod] → went to .then = impl
+    expect(existsSync(join(root, '.artel', '.dispatches', 'deploy-impl.meta'))).toBe(true)
+  })
+
+  it('show renders condition rows', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'gated'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/gate\s+condition\s+if\(skip equals true\) then=done else=impl/)
+  })
+})

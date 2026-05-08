@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// `artel sweep` — housekeeping for `.artel/.dispatches/`.
+// `artel sweep` — housekeeping for `.artel/.dispatches/` and (V3.3.b)
+// `.artel/.worktrees/`.
 //
-// Removes `<task>.meta`, `<task>.out`, `<task>.prompt` triplets older
-// than the threshold, **except**:
+// Dispatches: removes `<task>.meta`, `<task>.out`, `<task>.prompt`
+// triplets older than the threshold, **except**:
 //   - tasks still listed under For Owner / In progress / Pending /
 //     Blocked in QUEUE.md (active work — never sweep)
 //   - the `--keep N` newest dispatches regardless of age (so `artel
@@ -10,18 +11,27 @@
 //   - dispatches without a `completedAt` (never finished — keep for
 //     debugging)
 //
-// Emits a single `infra` event `cluster.swept` with file count + bytes
-// freed. Per-file events would be noisy in events.jsonl; one summary
-// per sweep is enough for audit.
+// Worktrees (V3.3.b): removes orphaned `.artel/.worktrees/<branch>/`
+// directories. A worktree is "orphan" when:
+//   - its branch is NOT one of For Owner / In progress / Pending /
+//     Blocked in QUEUE.md
+//   - its mtime is older than the threshold
+// Successful dispatches already remove their worktree on settle; this
+// catches the leftovers from parked / timeout / errored runs (kept for
+// forensics) once the operator no longer needs them.
+//
+// Emits a single `infra` event `cluster.swept` with totals.
 
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendInfraEvent } from '../util/audit.mjs'
+import { defaultGit, listWorktrees, removeWorktree } from '../util/worktree.mjs'
 
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
+const WORKTREES_DIR = join(PROJECT_ARTEL, '.worktrees')
 const QUEUE_PATH = join(PROJECT_ARTEL, 'QUEUE.md')
 
 const tty = process.stdout.isTTY
@@ -166,7 +176,64 @@ const fmtBytes = (n) => {
   return `${(n / 1024 / 1024).toFixed(1)}MB`
 }
 
-// --- execute or dry-run ---
+// --- worktrees (V3.3.b) ---
+
+// Collect worktree paths under .artel/.worktrees/ that are eligible
+// for pruning: branch not in active QUEUE sections AND mtime older
+// than threshold. Cross-check `git worktree list` so we don't blindly
+// rm directories git doesn't know about (those need different
+// handling — fs-only rm would corrupt git's worktree registry).
+
+const collectWorktrees = () => {
+  const remove = []
+  const skipped = []
+  if (!existsSync(WORKTREES_DIR)) return { remove, skipped }
+  const gitImpl = defaultGit(PROJECT_DIR)
+  const knownPaths = new Set()
+  for (const w of listWorktrees(PROJECT_DIR, gitImpl)) {
+    knownPaths.add(w.path)
+    try { knownPaths.add(realpathSync(w.path)) } catch {}
+  }
+  const walk = (dir) => {
+    const out = []
+    if (!existsSync(dir)) return out
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name)
+      let stat
+      try { stat = statSync(path) } catch { continue }
+      if (!stat.isDirectory()) continue
+      let real = path
+      try { real = realpathSync(path) } catch {}
+      if (knownPaths.has(path) || knownPaths.has(real)) {
+        out.push({ path, mtimeMs: stat.mtimeMs })
+      } else {
+        out.push(...walk(path))
+      }
+    }
+    return out
+  }
+  for (const wt of walk(WORKTREES_DIR)) {
+    // Branch name = path under WORKTREES_DIR (`implementer/some-task`).
+    const branch = wt.path.slice(WORKTREES_DIR.length + 1)
+    // Check both the full branch ("implementer/foo") and the trailing
+    // task slug ("foo") — QUEUE.md tracks slugs, not full branches.
+    const taskSlug = branch.includes('/') ? branch.split('/').slice(1).join('/') : branch
+    if (active.has(branch) || active.has(taskSlug)) {
+      skipped.push({ ...wt, branch, reason: 'active' })
+      continue
+    }
+    if (wt.mtimeMs > cutoffMs) {
+      skipped.push({ ...wt, branch, reason: 'fresh' })
+      continue
+    }
+    remove.push({ ...wt, branch })
+  }
+  return { remove, skipped }
+}
+
+const { remove: worktreesToRemove, skipped: worktreesSkipped } = collectWorktrees()
+
+// --- render ---
 
 if (values.json) {
   console.log(JSON.stringify({
@@ -179,21 +246,35 @@ if (values.json) {
     fresh_held: skipped.filter((s) => s.reason === 'fresh').length,
     swept: toRemove.map((d) => ({ task: d.task, completedAt: d.completedAt, bytes: d.bytes })),
     bytes_freed: totalBytes,
+    worktrees_swept: worktreesToRemove.map((w) => ({
+      branch: w.branch, path: w.path, mtime_iso: new Date(w.mtimeMs).toISOString(),
+    })),
+    worktrees_held: worktreesSkipped.length,
   }, null, 2))
 } else {
   console.log(`\n${bold('artel sweep')} ${dim(`— older than ${values['older-than'] || '30d'}, keep newest ${keepN}`)}\n`)
-  if (!toRemove.length) {
-    console.log(`  ${dim('nothing to sweep — all dispatches are fresh, active, or within --keep')}`)
-  } else {
+  if (!toRemove.length && !worktreesToRemove.length) {
+    console.log(`  ${dim('nothing to sweep — all dispatches/worktrees are fresh, active, or within --keep')}`)
+  }
+  if (toRemove.length) {
+    console.log(`  ${bold('dispatches')}`)
     for (const d of toRemove) {
       console.log(`  ${yellow('×')} ${d.task.padEnd(36)} ${dim(d.completedAt.replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(fmtBytes(d.bytes).padStart(7))}`)
     }
-    console.log(`\n  ${dim(`total: ${toRemove.length} dispatches · ${fmtBytes(totalBytes)}`)}`)
+    console.log(`  ${dim(`subtotal: ${toRemove.length} dispatches · ${fmtBytes(totalBytes)}`)}`)
   }
-  if (skipped.length) {
-    const counts = skipped.reduce((acc, s) => ((acc[s.reason] = (acc[s.reason] || 0) + 1), acc), {})
+  if (worktreesToRemove.length) {
+    console.log(`\n  ${bold('worktrees')}`)
+    for (const wt of worktreesToRemove) {
+      console.log(`  ${yellow('×')} ${wt.branch.padEnd(36)} ${dim(new Date(wt.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(wt.path)}`)
+    }
+    console.log(`  ${dim(`subtotal: ${worktreesToRemove.length} worktrees`)}`)
+  }
+  const allSkipped = [...skipped, ...worktreesSkipped]
+  if (allSkipped.length) {
+    const counts = allSkipped.reduce((acc, s) => ((acc[s.reason] = (acc[s.reason] || 0) + 1), acc), {})
     const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ')
-    console.log(`  ${dim(`held: ${parts}`)}`)
+    console.log(`\n  ${dim(`held: ${parts}`)}`)
   }
   console.log()
 }
@@ -207,15 +288,26 @@ for (const d of toRemove) {
   }
 }
 
-if (toRemove.length) {
+let worktreesRemovedOk = 0
+const gitImpl = defaultGit(PROJECT_DIR)
+for (const wt of worktreesToRemove) {
+  const r = removeWorktree(wt.path, gitImpl)
+  if (!r || r.ok) worktreesRemovedOk++
+}
+
+if (toRemove.length || worktreesToRemove.length) {
   appendInfraEvent(PROJECT_DIR, 'cluster.swept', {
     older_than_ms: olderThanMs,
     keep: keepN,
     dispatches_removed: toRemove.length,
     files_removed: removed,
     bytes_freed: totalBytes,
+    worktrees_removed: worktreesRemovedOk,
   })
   if (!values.json) {
-    console.log(`${green('✓')} swept ${toRemove.length} dispatches (${removed} files, ${fmtBytes(totalBytes)})\n`)
+    const parts = []
+    if (toRemove.length) parts.push(`${toRemove.length} dispatches (${removed} files, ${fmtBytes(totalBytes)})`)
+    if (worktreesRemovedOk) parts.push(`${worktreesRemovedOk} worktrees`)
+    if (parts.length) console.log(`${green('✓')} swept ${parts.join(', ')}\n`)
   }
 }
