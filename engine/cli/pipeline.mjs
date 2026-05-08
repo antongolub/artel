@@ -335,6 +335,113 @@ if (sub === 'run') {
     }
   }
 
+  // V3.7.e — handler walker logic extracted from the inline block so
+  // parallel branches can call it via runBranchNode. Returns the same
+  // shape as runDispatchNode: `{ disposition, ... }` on settle or
+  // `{ __error, node }` on a thrown handler. Mutation
+  // (`result.attrs`) is applied here only when this is a top-level
+  // step (parallelOf == null). For parallel branches, set_attr is
+  // disallowed at the validator level, so result.attrs would never
+  // appear there anyway — the guard is belt-and-suspenders.
+  const runHandlerNode = async (id, parallelOf = null, opts = {}) => {
+    const node = def.nodes[id]
+    const handlerAttrs = {
+      ...userAttrs,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+    }
+    const detail =
+      node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
+      node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
+      node.handler === 'builtin.set_attr' ? ` ${dim('set=')}${JSON.stringify(node.set)}` :
+      ''
+    console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${detail}`)
+    const handlerId = uuidv7()
+    appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
+      handler_id: handlerId,
+      handler: node.handler,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+      ...(node.handler === 'builtin.exec' ? {
+        cmd: node.cmd,
+        ...(node.timeout_ms != null ? { timeout_ms: node.timeout_ms } : {}),
+      } : {}),
+      ...(node.handler === 'builtin.assert' ? {
+        predicate: node.if,
+        ...(node.message ? { message_template: node.message } : {}),
+      } : {}),
+      ...(node.handler === 'builtin.set_attr' ? {
+        set: node.set,
+      } : {}),
+    })
+    try {
+      const result = await runHandler(node, {
+        projectDir: PROJECT_DIR,
+        attrs: handlerAttrs,
+        abortSignal: opts.signal || null,
+      })
+      const ec = result.exitCode == null ? '?' : result.exitCode
+      const durLabel =
+        node.handler === 'builtin.assert' || node.handler === 'builtin.set_attr'
+          ? `${result.durationMs}ms`
+          : `exit=${ec}, ${result.durationMs}ms`
+      console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
+      appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
+        handler_id: handlerId,
+        handler: node.handler,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: id,
+        ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+        disposition: result.disposition,
+        exit_code: result.exitCode ?? null,
+        signal: result.signal ?? null,
+        duration_ms: result.durationMs,
+        ...(result.error ? { error: result.error } : {}),
+        ...(result.set_resolved ? { set_resolved: result.set_resolved } : {}),
+      })
+      // Apply mutation only at top level — parallel branches don't
+      // run set_attr (validator rejects it). Defensive guard preserves
+      // the rule even if the validator ever changes.
+      if (parallelOf == null && result.disposition === 'success' && result.attrs) {
+        Object.assign(userAttrs, result.attrs)
+      }
+      return result
+    } catch (err) {
+      appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
+        handler_id: handlerId,
+        handler: node.handler,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: id,
+        ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+        disposition: 'error',
+        error: err.message,
+      })
+      return { __error: err.message, node: id }
+    }
+  }
+
+  // V3.7.e — branch dispatcher used by the parallel walker. Routes
+  // by node type so parallel can mix dispatch + handler branches.
+  // Other types (parallel / condition / terminal) aren't legal
+  // branches; the validator rejects them at register time, so this
+  // dispatcher just trusts the def shape.
+  const runBranchNode = async (id, parentId, opts) => {
+    const node = def.nodes[id]
+    if (node.type === 'dispatch') {
+      return runDispatchNode(id, parentId, { useWorktree: true, signal: opts.signal })
+    }
+    if (node.type === 'handler') {
+      return runHandlerNode(id, parentId, { signal: opts.signal })
+    }
+    return { __error: `branch '${id}' has unsupported type '${node.type}'`, node: id }
+  }
+
   // Synchronous walk: dispatch each `dispatch` node, fan out + join
   // each `parallel` node, follow edge by disposition, end on `terminal`.
   // Failure to find a transition for a non-success disposition is an
@@ -374,7 +481,10 @@ if (sub === 'run') {
 
       const aborts = node.branches.map(() => new AbortController())
       const promises = node.branches.map((branchId, i) =>
-        runDispatchNode(branchId, nodeId, { useWorktree: true, signal: aborts[i].signal })
+        // V3.7.e — runBranchNode dispatches by node type so dispatch
+        // and handler branches can coexist. Each gets its own
+        // AbortController for V3.3.c quorum-met cancellation.
+        runBranchNode(branchId, nodeId, { signal: aborts[i].signal })
           .then((result) => ({ index: i, branchId, result })),
       )
       const settledByIndex = new Array(node.branches.length).fill(null)
@@ -446,98 +556,16 @@ if (sub === 'run') {
       nodeId = branchTaken
       continue
     } else if (node.type === 'handler') {
-      // V3.7.a — built-in platform action. No LLM, no role, no
-      // worktree. Runs in PROJECT_DIR; stdout/stderr go straight to
-      // the operator's tty so they see the command's output inline
-      // with the walker's progress. Disposition (success / error /
-      // timeout) flows through outgoing edges exactly like dispatch.
-      // V3.7.b — emit pipeline_handler.start/.end around the run so
-      // status / runs reconstruct handler steps from events.jsonl
-      // (same join key as dispatches: pipeline_run_id +
-      // pipeline_node_id, plus a fresh handler_id UUID v7).
-      // V3.7.c — pass merged attrs into runHandler ctx so
-      // builtin.assert (and future read-from-state builtins) can
-      // see user --attrs + pipeline-injected ids.
-      const handlerAttrs = {
-        ...userAttrs,
-        pipeline_run_id: runId,
-        pipeline_id: def.id,
-        pipeline_node_id: nodeId,
-      }
-      const detail =
-        node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
-        node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
-        node.handler === 'builtin.set_attr' ? ` ${dim('set=')}${JSON.stringify(node.set)}` :
-        ''
-      console.error(`${bold('●')} ${cyan(nodeId)} ${dim('→')} handler ${node.handler}${detail}`)
-      const handlerId = uuidv7()
-      appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
-        handler_id: handlerId,
-        handler: node.handler,
-        pipeline_run_id: runId,
-        pipeline_id: def.id,
-        pipeline_node_id: nodeId,
-        ...(node.handler === 'builtin.exec' ? {
-          cmd: node.cmd,
-          ...(node.timeout_ms != null ? { timeout_ms: node.timeout_ms } : {}),
-        } : {}),
-        ...(node.handler === 'builtin.assert' ? {
-          // Snapshot the predicate for forensics — operators can read
-          // back what gate fired without cross-referencing the
-          // pipeline definition.
-          predicate: node.if,
-          ...(node.message ? { message_template: node.message } : {}),
-        } : {}),
-        ...(node.handler === 'builtin.set_attr' ? {
-          // Snapshot the set spec verbatim — string values are still
-          // template strings here, not yet rendered. The end event
-          // carries the resolved (post-template) map.
-          set: node.set,
-        } : {}),
-      })
-      try {
-        const result = await runHandler(node, { projectDir: PROJECT_DIR, attrs: handlerAttrs })
-        const ec = result.exitCode == null ? '?' : result.exitCode
-        const durLabel =
-          node.handler === 'builtin.assert' || node.handler === 'builtin.set_attr'
-            ? `${result.durationMs}ms`
-            : `exit=${ec}, ${result.durationMs}ms`
-        console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
-        appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
-          handler_id: handlerId,
-          handler: node.handler,
-          pipeline_run_id: runId,
-          pipeline_id: def.id,
-          pipeline_node_id: nodeId,
-          disposition: result.disposition,
-          exit_code: result.exitCode ?? null,
-          signal: result.signal ?? null,
-          duration_ms: result.durationMs,
-          ...(result.error ? { error: result.error } : {}),
-          ...(result.set_resolved ? { set_resolved: result.set_resolved } : {}),
-        })
-        // V3.7.d — apply mutation. `result.attrs` is set by builtins
-        // that ask to mutate run state; walker shallow-merges over
-        // userAttrs so subsequent steps see the change. Only on
-        // success — error paths leave userAttrs alone (atomic).
-        if (result.disposition === 'success' && result.attrs) {
-          Object.assign(userAttrs, result.attrs)
-        }
-        stepDisposition = result.disposition
-      } catch (err) {
-        appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
-          handler_id: handlerId,
-          handler: node.handler,
-          pipeline_run_id: runId,
-          pipeline_id: def.id,
-          pipeline_node_id: nodeId,
-          disposition: 'error',
-          error: err.message,
-        })
-        abortReason = `handler '${nodeId}' threw: ${err.message}`
+      // V3.7.a-d inline; V3.7.e extracted into runHandlerNode so the
+      // parallel walker can call it for handler branches via
+      // runBranchNode.
+      const result = await runHandlerNode(nodeId)
+      if (result.__error) {
+        abortReason = `handler '${nodeId}' threw: ${result.__error}`
         finalState = 'failed'
         break
       }
+      stepDisposition = result.disposition
     } else {
       abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.7.a supports: dispatch | parallel | condition | handler | terminal)`
       finalState = 'failed'

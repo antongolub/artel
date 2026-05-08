@@ -273,12 +273,25 @@ export const validatePipeline = (def, source = '<inline>') => {
           throw new Error(`${source}: parallel node '${nid}' has duplicate branch '${branchId}'`)
         }
         seen.add(branchId)
-        // V3.2.a restriction: branches must be dispatch nodes. Nested
-        // parallel / condition / subpipeline / handler land in V3.2.b+
-        // once the walker is recursive on aggregate dispositions.
+        // V3.2.a → V3.7.e: branches must be a dispatch or handler
+        // node. Nested parallel / condition / subpipeline still
+        // deferred (walker isn't recursive on aggregate
+        // dispositions). For handlers in branches, set_attr is
+        // explicitly rejected — its mutation lands in shared
+        // userAttrs, and concurrent siblings would race on writes
+        // (validator wins is fine in linear flows; parallel needs
+        // either a merge contract or no mutation). assert + exec are
+        // fine: assert is read-only, exec mutates only the
+        // filesystem (which the operator's pipeline shape governs).
         const branchNode = def.nodes[branchId]
-        if (branchNode.type !== 'dispatch') {
-          throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch node (V3.2.a; nesting deferred to V3.2.b)`)
+        if (branchNode.type === 'dispatch') {
+          // ok
+        } else if (branchNode.type === 'handler') {
+          if (branchNode.handler === 'builtin.set_attr') {
+            throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' is a builtin.set_attr handler — disallowed in parallel branches (concurrent set_attr writes would race on userAttrs; use a sequential set_attr after the parallel join)`)
+          }
+        } else {
+          throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch or handler node (got: ${branchNode.type})`)
         }
       }
     } else if (node.type === 'handler') {

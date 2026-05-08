@@ -91,6 +91,44 @@ describe('builtin.exec', () => {
     expect(r.disposition).toBe('error')
     expect(r.exitCode).not.toBe(0)
   })
+
+  it('returns cancelled when ctx.abortSignal fires (V3.7.e)', async () => {
+    const ac = new AbortController()
+    // Long-running cmd that handles SIGTERM cleanly to surface the
+    // cancel path. Abort fires before the cmd's own exit timer.
+    setTimeout(() => ac.abort(), 50)
+    const r = await runHandler(
+      {
+        handler: 'builtin.exec',
+        cmd: 'sleep 10',
+      },
+      { projectDir: mktmp(), abortSignal: ac.signal },
+    )
+    expect(r.disposition).toBe('cancelled')
+  })
+
+  it('returns cancelled when signal already aborted at entry', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const r = await runHandler(
+      { handler: 'builtin.exec', cmd: 'sleep 5' },
+      { projectDir: mktmp(), abortSignal: ac.signal },
+    )
+    expect(r.disposition).toBe('cancelled')
+  })
+
+  it('cancel takes precedence over timeout when both fire close together', async () => {
+    // timeout_ms set, but abort fires first — disposition should be
+    // `cancelled`, not `timeout`. Race tolerance: we abort 20ms in,
+    // timeout would fire at 5000ms.
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 20)
+    const r = await runHandler(
+      { handler: 'builtin.exec', cmd: 'sleep 10', timeout_ms: 5000 },
+      { projectDir: mktmp(), abortSignal: ac.signal },
+    )
+    expect(r.disposition).toBe('cancelled')
+  })
 })
 
 describe('builtin.assert (V3.7.c)', () => {

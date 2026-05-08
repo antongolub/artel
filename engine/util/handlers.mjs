@@ -35,14 +35,21 @@ import { evaluatePredicate, renderTemplate } from './pipelines.mjs'
 
 // builtin.exec: run a shell command via `bash -c`. Disposition is
 // `success` on exit 0, `error` on non-zero, `timeout` if
-// `node.timeout_ms` elapses (SIGTERM the child). stdout/stderr go
-// straight to the parent's tty — operator sees the command output
-// inline with the walker's progress.
+// `node.timeout_ms` elapses, `cancelled` if `ctx.abortSignal` fires
+// (V3.7.e — for handlers in parallel branches that lose a race).
+// stdout/stderr go straight to the parent's tty — operator sees the
+// command output inline with the walker's progress.
 //
 // `bash -c` so quoting / piping / && in the cmd just works the way
 // operators expect. The trade-off: no shell-injection guard. Handler
 // cmds come from the pipeline definition file, which the operator
 // authored — same trust model as a Makefile or package.json script.
+//
+// Cancel mechanics: SIGTERM immediately, then SIGKILL after
+// `cancelGraceMs` (default 5000) if the child hasn't exited.
+// Matches V3.3.c dispatch cancel semantics.
+const EXEC_CANCEL_GRACE_MS = 5000
+
 const execBuiltin = (node, ctx) => new Promise((resolve) => {
   const start = Date.now()
   const child = spawn('bash', ['-c', node.cmd], {
@@ -52,7 +59,19 @@ const execBuiltin = (node, ctx) => new Promise((resolve) => {
   })
 
   let timedOut = false
+  let cancelled = false
   let timeoutHandle = null
+  let killHandle = null
+  let abortHandler = null
+
+  const cleanup = () => {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+    if (killHandle) clearTimeout(killHandle)
+    if (ctx.abortSignal && abortHandler) {
+      ctx.abortSignal.removeEventListener('abort', abortHandler)
+    }
+  }
+
   if (node.timeout_ms) {
     timeoutHandle = setTimeout(() => {
       timedOut = true
@@ -60,8 +79,26 @@ const execBuiltin = (node, ctx) => new Promise((resolve) => {
     }, node.timeout_ms)
   }
 
+  if (ctx.abortSignal) {
+    const triggerAbort = () => {
+      if (cancelled) return
+      cancelled = true
+      try { child.kill('SIGTERM') } catch {}
+      // SIGKILL backstop if the child ignores SIGTERM.
+      killHandle = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch {}
+      }, EXEC_CANCEL_GRACE_MS)
+    }
+    if (ctx.abortSignal.aborted) {
+      triggerAbort()
+    } else {
+      abortHandler = triggerAbort
+      ctx.abortSignal.addEventListener('abort', abortHandler, { once: true })
+    }
+  }
+
   child.on('error', (err) => {
-    if (timeoutHandle) clearTimeout(timeoutHandle)
+    cleanup()
     resolve({
       disposition: 'error',
       exitCode: null,
@@ -72,8 +109,15 @@ const execBuiltin = (node, ctx) => new Promise((resolve) => {
   })
 
   child.on('exit', (code, signal) => {
-    if (timeoutHandle) clearTimeout(timeoutHandle)
+    cleanup()
     const durationMs = Date.now() - start
+    // Cancel takes precedence over timeout if both fire — a race
+    // where the abort beats the timeout still resolves to
+    // `cancelled` (it's the explicit-intent disposition).
+    if (cancelled) {
+      resolve({ disposition: 'cancelled', exitCode: code, signal, durationMs })
+      return
+    }
     if (timedOut) {
       resolve({ disposition: 'timeout', exitCode: code, signal, durationMs })
       return

@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.7.d)** | `[done]` | Cumulative through V3.7.d: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with atomic predicates (V3.2.b), git-worktree isolation + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation (V3.3.c), `artel pipeline runs` / `status` observability over `events.jsonl` (V3.4.a), `{{ dotted.path }}` prompt template substitution (V3.5), recursive predicate vocabulary — `not`/`and`/`or` compounds + `gt`/`gte`/`lt`/`lte`/`ne` comparisons (V3.6), `handler` node type with `builtin.exec` (V3.7.a), `pipeline_handler.start/.end` events + `status` integration (V3.7.b), `builtin.assert` predicate-guard with template-rendered messages (V3.7.c), `builtin.set_attr` mutates run attrs visible to downstream nodes (V3.7.d). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` / `pipeline_handler.start` / `pipeline_handler.end` (workload). CLI: `register` / `list` / `show` / `run` / `runs` / `status`. Walker honours sticky `In progress` / `Recently done` semantics. Reachability follows parallel branches + condition then/else. `cancelled` disposition excluded from worst-of-children aggregate. Templates / predicates / set_attr all share the merged attrs blob (user `--attrs` + pipeline-injected ids); set_attr is atomic — string templates render first, all-or-nothing. Comparison ops + comparison templates fail-closed / fail-fast on missing or non-scalar values. Handlers run in PROJECT_DIR (no worktree, no role). 569 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, handlers in parallel branches, branch-level timeout budgets, operator cancel of full pipeline run. |
+| V3 | **Pipelines (V3.1–V3.7.e)** | `[done]` | Cumulative through V3.7.e: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with atomic predicates (V3.2.b), git-worktree isolation + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation (V3.3.c), `artel pipeline runs` / `status` observability over `events.jsonl` (V3.4.a), `{{ dotted.path }}` prompt template substitution (V3.5), recursive predicate vocabulary — `not`/`and`/`or` compounds + `gt`/`gte`/`lt`/`lte`/`ne` comparisons (V3.6), `handler` node type with `builtin.exec` (V3.7.a), `pipeline_handler.start/.end` events + `status` integration (V3.7.b), `builtin.assert` predicate-guard (V3.7.c), `builtin.set_attr` mutates run attrs (V3.7.d), handler nodes lifted into parallel branches with `builtin.exec` AbortSignal cancellation (V3.7.e). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. Parallel branches accept dispatch + handler (exec / assert); set_attr explicitly rejected to avoid concurrent userAttrs writes racing. `builtin.exec` honours `AbortSignal` with SIGTERM → 5s grace → SIGKILL, returning disposition `cancelled` distinct from `timeout` / `error`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` / `pipeline_handler.start` / `pipeline_handler.end` (workload). Handler events in parallel branches carry `pipeline_parallel_of`. CLI: `register` / `list` / `show` / `run` / `runs` / `status`. Templates / predicates / set_attr all share the merged attrs blob; set_attr is atomic. Comparison ops fail-closed on missing / non-scalar. Handlers run in PROJECT_DIR (no worktree). 576 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, branch-level timeout budgets, operator cancel of full pipeline run. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,37 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-08** — V3.7.e — handlers in parallel branches.
+  Lifts the V3.2.a restriction where `parallel.branches` had to
+  reference dispatch nodes. Now accepts dispatch OR handler
+  (`builtin.exec` / `builtin.assert`); `builtin.set_attr`
+  explicitly rejected at register because concurrent siblings
+  writing to shared `userAttrs` would race. Validator error
+  messages updated to mention "dispatch or handler" in the
+  rejection. `engine/cli/pipeline.mjs` extracts
+  `runHandlerNode(id, parallelOf, opts)` (mirroring
+  `runDispatchNode`) and adds `runBranchNode(id, parentId, opts)`
+  dispatcher that switches by node type. Parallel walker swaps
+  its inner call from `runDispatchNode` to `runBranchNode`. Handler
+  events emitted from a parallel branch include
+  `pipeline_parallel_of` field for join-key parity with dispatch
+  branches. Mutation guard: `runHandlerNode` only applies
+  `result.attrs` to `userAttrs` when `parallelOf == null` —
+  belt-and-suspenders alongside the validator rejection.
+  `engine/util/handlers.mjs#execBuiltin` learned to honour
+  `ctx.abortSignal`: on abort, SIGTERM the child immediately,
+  then SIGKILL after a 5s grace window. New disposition
+  `cancelled` distinct from `timeout`/`error`. Cancel takes
+  precedence over timeout if both fire (intentional teardown
+  beats budget exhaustion). `builtin.assert` and
+  `builtin.set_attr` ignore the signal — synchronous, complete
+  in microseconds, no cancel surface. 576 tests green (7 new — 4
+  unit on validator-allows-handler-branches + reject-set_attr +
+  exec-cancel-signal + cancel-precedence-over-timeout, 3 e2e on
+  mixed dispatch+handler.exec+handler.assert parallel run + race
+  with slow exec cancelled + register rejects set_attr in
+  branch). 2 existing tests updated to reflect lifted
+  restriction.
 - **2026-05-08** — V3.7.d — `builtin.set_attr` mutates run attrs.
   Completes the handler data-flow story (V3.7.c assert reads;
   V3.7.d set_attr writes). `node.set` is a flat object of

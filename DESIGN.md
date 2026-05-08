@@ -663,12 +663,14 @@ so events.jsonl reconstructs the chain.
 }
 ```
 
-`branches` must reference existing **dispatch** nodes (V3.2.a
-restriction; nested parallel / condition / subpipeline land in
-V3.2.b once the walker is recursive). `join` defaults to
-`all-complete`; V3.3.c adds `any-complete` and `k-of-n` (see
-§11.6). Self-references and duplicate branches rejected at register
-time.
+`branches` must reference existing **dispatch** or **handler**
+nodes (V3.2.a → V3.7.e; nested parallel / condition / subpipeline
+still deferred). For handler branches: `builtin.exec` and
+`builtin.assert` are allowed; `builtin.set_attr` is explicitly
+rejected because concurrent siblings writing to shared run state
+would race. `join` defaults to `all-complete`; V3.3.c adds
+`any-complete` and `k-of-n` (see §11.6). Self-references and
+duplicate branches rejected at register time.
 
 **Aggregate disposition** (`aggregateDisposition`):
 - `cancelled` branches filtered out first (V3.3.c — see §11.6)
@@ -1080,6 +1082,9 @@ omit `attrs` from their return shape — back-compat preserved.
 {
   projectDir,    // path to project root (handlers run here, not in worktrees)
   attrs,         // merged blob: user --attrs + pipeline-injected ids
+                 // (includes pipeline_parallel_of when in a parallel branch)
+  abortSignal,   // V3.7.e — set when handler runs in a parallel branch;
+                 // builtin.exec listens to it for V3.3.c cancellation
 }
 ```
 
@@ -1087,12 +1092,18 @@ omit `attrs` from their return shape — back-compat preserved.
 and condition predicates. Read-from-state builtins (assert) use
 it; `builtin.exec` ignores it.
 
-**Restrictions (V3.7.a):**
+**Restrictions:**
 
-- Handler nodes **cannot appear inside parallel branches**. The
-  V3.2.a rule (branches must be dispatch) is preserved; lifting it
-  needs handler cancellation that joins V3.3.c's `AbortController`
-  machinery — deferred.
+- Handlers in `parallel` branches (V3.7.e — landed): `builtin.exec`
+  and `builtin.assert` allowed; `builtin.set_attr` rejected at
+  register (concurrent writes to shared `userAttrs` would race).
+  `builtin.exec` honours the walker's per-branch `AbortController`
+  for V3.3.c quorum-met cancellation: SIGTERM → 5s grace →
+  SIGKILL, returning disposition `cancelled` (distinct from
+  `timeout`/`error`). Cancel takes precedence over timeout if both
+  fire — intentional teardown beats budget exhaustion.
+  `builtin.assert` ignores the signal (synchronous, completes in
+  microseconds, no cancel surface).
 
 **Validator shape checks:**
 
@@ -1130,12 +1141,14 @@ slots so the column alignment with dispatches is preserved.
 ### 11.9 Open
 
 - More handler builtins: `builtin.git_squash`, `builtin.git_merge`
-  (V3.7.e+)
+  (V3.7.f+)
 - Dotted-path keys in `builtin.set_attr` (would need a writePath
   helper for nested mutation)
 - `builtin.set_attr` deletion semantics (currently null sets to
   null; an `unset` field could remove keys)
-- Handler nodes inside `parallel` branches (needs abort plumbing)
+- `builtin.set_attr` in parallel branches with explicit merge
+  contract (e.g. last-write-wins ordered by branch index, or
+  per-branch namespacing)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
 - Branch-level timeout budgets (cap each branch independently of

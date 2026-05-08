@@ -202,11 +202,11 @@ describe('parallel node validation (V3.2.a)', () => {
     expect(() => validatePipeline(def)).toThrow(/invalid join 'frob-of-n'/)
   })
 
-  it('rejects non-dispatch branches (V3.2.a restriction)', () => {
+  it('rejects nested parallel as branch (V3.2.a → V3.7.e: only dispatch / handler allowed)', () => {
     const def = withParallel() as Record<string, unknown> & { nodes: Record<string, unknown> }
     def.nodes.nested = { type: 'parallel', branches: ['a'], join: 'all-complete' }
     def.nodes.fan = { type: 'parallel', branches: ['a', 'nested'], join: 'all-complete' }
-    expect(() => validatePipeline(def)).toThrow(/branch 'nested' must be a dispatch node/)
+    expect(() => validatePipeline(def)).toThrow(/branch 'nested' must be a dispatch or handler node \(got: parallel\)/)
   })
 
   it('parallel-only flow: branches reachable through parallel', () => {
@@ -646,14 +646,13 @@ describe('handler node validation (V3.7.a)', () => {
     }))).toThrow(/key 'flags\.deployed' must be top-level/)
   })
 
-  it('handler nodes are still rejected as parallel branches', () => {
-    // V3.7.a keeps the parallel-branches-must-be-dispatch rule —
-    // handlers in branches need cancellation work that lands later.
+  it('handler.exec + handler.assert allowed as parallel branches (V3.7.e)', () => {
     const def = {
       id: 'mix', version: 1, entry: 'fan',
       nodes: {
-        fan: { type: 'parallel', branches: ['h', 'd'], join: 'all-complete' },
-        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        fan: { type: 'parallel', branches: ['h_exec', 'h_assert', 'd'], join: 'all-complete' },
+        h_exec: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        h_assert: { type: 'handler', handler: 'builtin.assert', if: { attr: 'env', equals: 'prod' } },
         d: { type: 'dispatch', role: 'implementer', prompt: 'go' },
         done: { type: 'terminal', final_state: 'completed' },
       },
@@ -662,7 +661,23 @@ describe('handler node validation (V3.7.a)', () => {
         { from: 'fan', on_disposition: '*', to: 'done' },
       ],
     }
-    expect(() => validatePipeline(def)).toThrow(/branch 'h' must be a dispatch node/)
+    expect(() => validatePipeline(def)).not.toThrow()
+  })
+
+  it('builtin.set_attr still rejected as a parallel branch (V3.7.e — race on shared userAttrs)', () => {
+    const def = {
+      id: 'racy', version: 1, entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['h_set'], join: 'all-complete' },
+        h_set: { type: 'handler', handler: 'builtin.set_attr', set: { phase: 'reviewed' } },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'done' },
+      ],
+    }
+    expect(() => validatePipeline(def)).toThrow(/builtin\.set_attr handler — disallowed in parallel branches/)
   })
 })
 

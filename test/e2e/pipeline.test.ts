@@ -1442,6 +1442,127 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"phase":"reviewed","count":7\}/)
   })
 
+  it('parallel branches: handler.exec + handler.assert + dispatch (V3.7.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mix-fan', version: 1, entry: 'fan',
+      nodes: {
+        fan: {
+          type: 'parallel',
+          branches: ['h_check', 'h_gate', 'd'],
+          join: 'all-complete',
+        },
+        h_check: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        h_gate: {
+          type: 'handler', handler: 'builtin.assert',
+          if: { attr: 'env', equals: 'prod' },
+        },
+        d: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'mix-fan', '--task-prefix', 'mix',
+      '--attrs', '{"env":"prod"}',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    // Both handler events present, both with pipeline_parallel_of='fan'.
+    const handlerEnds = evts.filter((e) => e.type === 'pipeline_handler.end')
+    expect(handlerEnds).toHaveLength(2)
+    for (const e of handlerEnds) {
+      expect(e.pipeline_parallel_of).toBe('fan')
+      expect(e.disposition).toBe('success')
+    }
+    // Dispatch ran in worktree — meta lands at the parallel-prefixed slug.
+    expect(existsSync(join(root, '.artel', '.dispatches', 'mix-fan-d.meta'))).toBe(true)
+
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('any-complete with handler branches: fast handler wins, slow exec cancelled (V3.7.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'race-h', version: 1, entry: 'fan',
+      nodes: {
+        fan: {
+          type: 'parallel',
+          branches: ['fast', 'slow'],
+          join: 'any-complete',
+        },
+        // assert that's always true → succeeds immediately
+        fast: { type: 'handler', handler: 'builtin.assert', if: { attr: 'env', exists: true } },
+        // exec that hangs — should be cancelled when fast wins
+        slow: {
+          type: 'handler', handler: 'builtin.exec',
+          // SIGTERM-handling sleep so the cancel path settles cleanly.
+          cmd: 'trap "exit 143" TERM; sleep 30',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'race-h',
+      '--attrs', '{"env":"prod"}',
+    ])
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    const ends = evts.filter((e) => e.type === 'pipeline_handler.end')
+    const dispoBy = Object.fromEntries(ends.map((e) => [e.pipeline_node_id, e.disposition]))
+    expect(dispoBy.fast).toBe('success')
+    // slow either cancelled (SIGTERM caught) or error (race) — both
+    // acceptable; what matters is the run completed and the slow
+    // path didn't run to its 30s sleep.
+    expect(['cancelled', 'error']).toContain(dispoBy.slow)
+
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('parallel rejects builtin.set_attr at register (V3.7.e — race on userAttrs)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'racy', version: 1, entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['s'], join: 'all-complete' },
+        s: { type: 'handler', handler: 'builtin.set_attr', set: { phase: 'x' } },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'fan', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'racy.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/builtin\.set_attr handler — disallowed in parallel branches/)
+  })
+
   it('handler chains with dispatch through edges', () => {
     // handler success → dispatch → terminal. Verifies that handler
     // disposition flows through edges to a downstream dispatch the
