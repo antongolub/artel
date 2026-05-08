@@ -79,6 +79,25 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-04** — V3.4.a — pipeline run observability.
+  Two read-side helpers in `engine/util/pipelines.mjs`:
+  `listPipelineRuns(projectDir, { limit, pipelineId })` joins
+  `pipeline_run.started`/`.ended` from events.jsonl into
+  newest-first run summaries (run_id, pipeline_id, pipeline_version,
+  started_at, ended_at, final_state, last_node, last_disposition,
+  duration_ms, abort_reason). `pipelineRunDetail(projectDir, runId)`
+  reconstructs the per-node timeline by joining `dispatch.start`/`.end`
+  events tagged with the run_id via `task_attrs.pipeline_run_id` —
+  surfaces parallel_of for fan-out branches. New CLI subcommands
+  `artel pipeline runs [--limit N] [--pipeline <id>] [--json]` (one
+  row per run with state badge + duration + last node) and
+  `artel pipeline status <run-id-or-fragment> [--json]` (summary
+  block + Steps panel; trailing-fragment match for ergonomics).
+  In-flight runs (started, not yet ended) appear in `runs` without
+  a final_state. Pure read-side — events.jsonl is the source of
+  truth, no extra state. 453 tests green (18 new — 10 unit on
+  listPipelineRuns + pipelineRunDetail + 8 e2e on runs/status CLI
+  with full + fragment matching, --json shape, empty-state hint).
 - **2026-05-04** — V3.2.b + V3.3.b — closing V3 polish.
   **Condition node (V3.2.b)**: pure routing without dispatch.
   Predicate vocabulary: `equals` / `in` / `exists` over dotted-path

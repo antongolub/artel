@@ -334,3 +334,135 @@ export const listPipelineFiles = (projectDir) => {
     .map((f) => ({ id: f.replace(/\.json$/, ''), path: join(dir, f) }))
     .sort((a, b) => a.id.localeCompare(b.id))
 }
+
+// V3.4.a — pipeline run observability. Reads events.jsonl, joins
+// `pipeline_run.started` with `pipeline_run.ended` by `pipeline_run_id`
+// to materialise past runs. (`readFileSync` is already imported above.)
+
+const eventsPathFor = (projectDir) => join(projectDir, '.artel', 'events.jsonl')
+
+const replayEvents = (projectDir) => {
+  const path = eventsPathFor(projectDir)
+  if (!existsSync(path)) return []
+  const out = []
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    if (!line) continue
+    try { out.push(JSON.parse(line)) } catch {}
+  }
+  return out
+}
+
+// Returns past pipeline runs newest-first. Each entry:
+//   { run_id, pipeline_id, pipeline_version, started_at, ended_at?,
+//     final_state?, last_node?, last_disposition?, duration_ms?,
+//     abort_reason? }
+//
+// In-flight runs (started but not yet ended) appear without an
+// `ended_at`; final_state stays null. Pipeline definitions that exist
+// only as `pipeline.registered` events without ever running don't show
+// up — this lists *runs*, not registrations.
+export const listPipelineRuns = (projectDir, { limit = null, pipelineId = null } = {}) => {
+  const events = replayEvents(projectDir)
+  const byRun = new Map()
+  for (const e of events) {
+    if (e.kind !== 'workload' || typeof e.type !== 'string') continue
+    if (!e.type.startsWith('pipeline_run.')) continue
+    if (!e.pipeline_run_id) continue
+    if (pipelineId && e.pipeline_id !== pipelineId) continue
+    let cur = byRun.get(e.pipeline_run_id)
+    if (!cur) {
+      cur = { run_id: e.pipeline_run_id }
+      byRun.set(e.pipeline_run_id, cur)
+    }
+    if (e.type === 'pipeline_run.started') {
+      cur.pipeline_id = e.pipeline_id
+      cur.pipeline_version = e.pipeline_version
+      cur.entry_node = e.entry_node
+      cur.started_at = e.at
+    } else if (e.type === 'pipeline_run.ended') {
+      cur.ended_at = e.at
+      cur.final_state = e.final_state
+      cur.last_node = e.last_node
+      cur.last_disposition = e.last_disposition
+      if (e.abort_reason) cur.abort_reason = e.abort_reason
+      if (cur.started_at && cur.ended_at) {
+        const ms = Date.parse(cur.ended_at) - Date.parse(cur.started_at)
+        if (Number.isFinite(ms) && ms >= 0) cur.duration_ms = ms
+      }
+    }
+  }
+  const runs = [...byRun.values()]
+    .filter((r) => r.started_at) // skip orphan ended-without-started
+    .sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''))
+  // Negative or null/undefined limit → return everything. Positive
+  // limit → cap. Zero → empty list.
+  if (limit == null || limit < 0) return runs
+  return runs.slice(0, limit)
+}
+
+// Detail view for one run: the run summary + per-node timeline
+// reconstructed from the dispatches tagged with this `pipeline_run_id`
+// in their `task_attrs`. Each step:
+//   { node_id, dispatch_id?, task?, role?, engine?, started_at?,
+//     completed_at?, disposition?, parallel_of? }
+export const pipelineRunDetail = (projectDir, runId) => {
+  const events = replayEvents(projectDir)
+  const summary = {}
+  // Per-dispatch_id, accumulate start/end pair for steps tagged with
+  // this pipeline_run_id. Match via `task_attrs.pipeline_run_id` —
+  // that field flows through dispatch_lifecycle into both events and
+  // .meta sidecars.
+  const stepsByDispatch = new Map()
+  for (const e of events) {
+    if (e.kind !== 'workload' || typeof e.type !== 'string') continue
+    // pipeline_run lifecycle for the summary panel
+    if (e.type === 'pipeline_run.started' && e.pipeline_run_id === runId) {
+      Object.assign(summary, {
+        run_id: runId,
+        pipeline_id: e.pipeline_id,
+        pipeline_version: e.pipeline_version,
+        entry_node: e.entry_node,
+        started_at: e.at,
+      })
+      continue
+    }
+    if (e.type === 'pipeline_run.ended' && e.pipeline_run_id === runId) {
+      summary.ended_at = e.at
+      summary.final_state = e.final_state
+      summary.last_node = e.last_node
+      summary.last_disposition = e.last_disposition
+      if (e.abort_reason) summary.abort_reason = e.abort_reason
+      if (summary.started_at && summary.ended_at) {
+        const ms = Date.parse(summary.ended_at) - Date.parse(summary.started_at)
+        if (Number.isFinite(ms) && ms >= 0) summary.duration_ms = ms
+      }
+      continue
+    }
+    // dispatch.start / dispatch.end events tagged with this run
+    if (e.type !== 'dispatch.start' && e.type !== 'dispatch.end') continue
+    const attrs = e.task_attrs || {}
+    if (attrs.pipeline_run_id !== runId) continue
+    const did = e.dispatch_id
+    if (!did) continue
+    let step = stepsByDispatch.get(did)
+    if (!step) {
+      step = { dispatch_id: did }
+      stepsByDispatch.set(did, step)
+    }
+    if (e.type === 'dispatch.start') {
+      step.task = e.task
+      step.role = e.owner_role
+      step.engine = e.engine
+      step.started_at = e.at
+      step.node_id = attrs.pipeline_node_id || null
+      if (attrs.pipeline_parallel_of) step.parallel_of = attrs.pipeline_parallel_of
+    } else {
+      step.completed_at = e.at
+      step.disposition = e.disposition
+    }
+  }
+  const steps = [...stepsByDispatch.values()].sort(
+    (a, b) => (a.started_at || '').localeCompare(b.started_at || ''),
+  )
+  return Object.keys(summary).length ? { ...summary, steps } : null
+}

@@ -493,3 +493,133 @@ describe('artel pipeline run — condition (V3.2.b)', () => {
     expect(r.stdout).toMatch(/gate\s+condition\s+if\(skip equals true\) then=done else=impl/)
   })
 })
+
+describe('artel pipeline runs / status (V3.4.a)', () => {
+  const linearPipeline = () => ({
+    id: 'observable',
+    version: 1,
+    entry: 'a',
+    nodes: {
+      a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'a' },
+      b: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'b' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'a', on_disposition: 'success', to: 'b' },
+      { from: 'b', on_disposition: 'success', to: 'done' },
+    ],
+  })
+
+  const setUpRun = (root: string) => {
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', linearPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    return runNode(root, ['engine/cli/pipeline.mjs', 'run', 'observable', '--task-prefix', 'obs'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+  }
+
+  it('runs lists past completed runs', () => {
+    const root = createTempRepo()
+    const runResult = setUpRun(root)
+    expect(runResult.status).toBe(0)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+    expect(r.stdout).toMatch(/completed/)
+  })
+
+  it('runs --json emits structured array sorted newest first', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout) as Array<{ pipeline_id: string; final_state: string; duration_ms: number }>
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({ pipeline_id: 'observable', final_state: 'completed' })
+    expect(parsed[0].duration_ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('runs --pipeline filters to one pipeline id', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const empty = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--pipeline', 'other-flow', '--json'])
+    expect(empty.status).toBe(0)
+    expect(JSON.parse(empty.stdout)).toEqual([])
+
+    const matched = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--pipeline', 'observable', '--json'])
+    expect(JSON.parse(matched.stdout)).toHaveLength(1)
+  })
+
+  it('runs --limit caps the count', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    setUpRun(createTempRepo()) // separate run, separate root, but our root has only 1
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--limit', '0', '--json'])
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout)).toEqual([])
+  })
+
+  it('status surfaces per-node steps with disposition', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    // Pull the run id from runs --json
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const runId = list[0].run_id
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', runId])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+    expect(r.stdout).toContain('completed')
+    expect(r.stdout).toContain('Steps')
+    // Both dispatch nodes show as steps
+    expect(r.stdout).toMatch(/\ba\s+/)
+    expect(r.stdout).toMatch(/\bb\s+/)
+  })
+
+  it('status accepts a trailing fragment of run_id', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const runId = list[0].run_id
+    const fragment = runId.slice(-12)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', fragment])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+  })
+
+  it('status --json emits run summary + steps', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', list[0].run_id, '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout) as {
+      run_id: string; pipeline_id: string; final_state: string;
+      steps: Array<{ node_id: string; disposition: string }>;
+    }
+    expect(parsed.pipeline_id).toBe('observable')
+    expect(parsed.final_state).toBe('completed')
+    expect(parsed.steps).toHaveLength(2)
+    expect(parsed.steps.map((s) => s.node_id)).toEqual(['a', 'b'])
+  })
+
+  it('status on missing run id → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', 'no-such-run'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/no run matches/)
+  })
+
+  it('runs on empty events.jsonl shows hint', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/no runs yet/)
+  })
+})

@@ -358,6 +358,152 @@ describe('aggregateDisposition (V3.2.a)', () => {
   })
 })
 
+describe('listPipelineRuns / pipelineRunDetail (V3.4.a)', () => {
+  const { listPipelineRuns, pipelineRunDetail } = pipelinesModule as {
+    listPipelineRuns: (projectDir: string, opts?: { limit?: number; pipelineId?: string }) => unknown[]
+    pipelineRunDetail: (projectDir: string, runId: string) => unknown | null
+  }
+
+  const writeEvents = (root: string, events: object[]) => {
+    mkdirSync(join(root, '.artel'), { recursive: true })
+    writeFileSync(
+      join(root, '.artel', 'events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    )
+  }
+
+  const baseEvent = (overrides: object) => ({
+    schema: 'v1',
+    kind: 'workload',
+    id: '01934f00-aaaa-7bbb-8ccc-' + Math.random().toString(16).slice(2, 14).padStart(12, '0'),
+    cluster_id: '01934f00-aaaa-7bbb-8ccc-cccccccccccc',
+    instance_id: '01934f00-aaaa-7bbb-8ccc-iiiiiiiiiiii',
+    fence_token: 0,
+    ...overrides,
+  })
+
+  it('returns [] when no events.jsonl', () => {
+    const root = createTempRepo()
+    expect(listPipelineRuns(root)).toEqual([])
+  })
+
+  it('joins pipeline_run.started + .ended into one entry per run_id', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'r1', pipeline_id: 'flow', pipeline_version: 1, entry_node: 'a' }),
+      baseEvent({ type: 'pipeline_run.ended', at: '2026-05-04T10:01:30.000Z',
+        pipeline_run_id: 'r1', pipeline_id: 'flow', final_state: 'completed',
+        last_node: 'done', last_disposition: 'success' }),
+    ])
+    const runs = listPipelineRuns(root) as Array<{ run_id: string; final_state: string; duration_ms: number }>
+    expect(runs).toHaveLength(1)
+    expect(runs[0].run_id).toBe('r1')
+    expect(runs[0].final_state).toBe('completed')
+    expect(runs[0].duration_ms).toBe(90000)
+  })
+
+  it('in-flight runs (started, not ended) appear without final_state', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'r-flying', pipeline_id: 'flow', pipeline_version: 1 }),
+    ])
+    const runs = listPipelineRuns(root) as Array<{ run_id: string; final_state?: string }>
+    expect(runs).toHaveLength(1)
+    expect(runs[0].final_state).toBeUndefined()
+  })
+
+  it('sorts newest-first', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T09:00:00.000Z',
+        pipeline_run_id: 'old', pipeline_id: 'flow' }),
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T11:00:00.000Z',
+        pipeline_run_id: 'new', pipeline_id: 'flow' }),
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'mid', pipeline_id: 'flow' }),
+    ])
+    const runs = listPipelineRuns(root) as Array<{ run_id: string }>
+    expect(runs.map((r) => r.run_id)).toEqual(['new', 'mid', 'old'])
+  })
+
+  it('filters by --pipeline id', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'r-a', pipeline_id: 'flow-a' }),
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T11:00:00.000Z',
+        pipeline_run_id: 'r-b', pipeline_id: 'flow-b' }),
+    ])
+    const runs = listPipelineRuns(root, { pipelineId: 'flow-a' }) as Array<{ run_id: string }>
+    expect(runs).toHaveLength(1)
+    expect(runs[0].run_id).toBe('r-a')
+  })
+
+  it('respects --limit', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z', pipeline_run_id: '1', pipeline_id: 'flow' }),
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:01:00.000Z', pipeline_run_id: '2', pipeline_id: 'flow' }),
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:02:00.000Z', pipeline_run_id: '3', pipeline_id: 'flow' }),
+    ])
+    const runs = listPipelineRuns(root, { limit: 2 }) as unknown[]
+    expect(runs).toHaveLength(2)
+  })
+
+  it('pipelineRunDetail joins dispatch.start/.end via task_attrs.pipeline_run_id', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'r1', pipeline_id: 'flow', pipeline_version: 1, entry_node: 'a' }),
+      baseEvent({ type: 'dispatch.start', at: '2026-05-04T10:00:01.000Z',
+        task: 'r1-a', dispatch_id: 'd1', owner_role: 'implementer', engine: 'codex',
+        task_attrs: { pipeline_run_id: 'r1', pipeline_id: 'flow', pipeline_node_id: 'a' } }),
+      baseEvent({ type: 'dispatch.end', at: '2026-05-04T10:00:30.000Z',
+        dispatch_id: 'd1', disposition: 'success',
+        task_attrs: { pipeline_run_id: 'r1', pipeline_id: 'flow', pipeline_node_id: 'a' } }),
+      baseEvent({ type: 'pipeline_run.ended', at: '2026-05-04T10:01:00.000Z',
+        pipeline_run_id: 'r1', pipeline_id: 'flow', final_state: 'completed',
+        last_node: 'done', last_disposition: 'success' }),
+    ])
+    const detail = pipelineRunDetail(root, 'r1') as {
+      run_id: string
+      final_state: string
+      steps: Array<{ node_id: string; disposition: string; role: string }>
+    }
+    expect(detail.run_id).toBe('r1')
+    expect(detail.final_state).toBe('completed')
+    expect(detail.steps).toHaveLength(1)
+    expect(detail.steps[0]).toMatchObject({
+      node_id: 'a', disposition: 'success', role: 'implementer',
+    })
+  })
+
+  it('pipelineRunDetail surfaces parallel_of for branch dispatches', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-04T10:00:00.000Z',
+        pipeline_run_id: 'r1', pipeline_id: 'flow' }),
+      baseEvent({ type: 'dispatch.start', at: '2026-05-04T10:00:01.000Z',
+        task: 'r1-rev-cr', dispatch_id: 'd1', owner_role: 'cold-reader',
+        task_attrs: { pipeline_run_id: 'r1', pipeline_node_id: 'cr', pipeline_parallel_of: 'reviews' } }),
+      baseEvent({ type: 'dispatch.end', at: '2026-05-04T10:00:30.000Z',
+        dispatch_id: 'd1', disposition: 'success',
+        task_attrs: { pipeline_run_id: 'r1', pipeline_node_id: 'cr', pipeline_parallel_of: 'reviews' } }),
+    ])
+    const detail = pipelineRunDetail(root, 'r1') as {
+      steps: Array<{ parallel_of?: string }>
+    }
+    expect(detail.steps[0].parallel_of).toBe('reviews')
+  })
+
+  it('pipelineRunDetail returns null for unknown run id', () => {
+    const root = createTempRepo()
+    expect(pipelineRunDetail(root, 'nope')).toBeNull()
+  })
+})
+
 describe('loadPipelineFile / listPipelineFiles', () => {
   it('loadPipelineFile parses + validates from disk', () => {
     const root = createTempRepo()

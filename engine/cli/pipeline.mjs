@@ -22,9 +22,11 @@ import {
   aggregateDisposition,
   evaluatePredicate,
   listPipelineFiles,
+  listPipelineRuns,
   loadPipelineFile,
   pipelinePath,
   pipelinesDir,
+  pipelineRunDetail,
   resolveNext,
   validatePipeline,
 } from '../util/pipelines.mjs'
@@ -54,7 +56,12 @@ Usage: artel pipeline <subcommand>
   run <id> [--attrs <json>]   walk the pipeline, dispatch each node, follow
                                 edges on disposition; emits pipeline_run.*
                                 events; returns when a terminal is reached
-                                or no transition matches`)
+                                or no transition matches
+  runs [--limit N] [--pipeline <id>] [--json]
+                              past pipeline runs from events.jsonl, newest
+                                first
+  status <run-id> [--json]    drilldown for one run (summary + per-node
+                                timeline)`)
   process.exit(code)
 }
 
@@ -375,6 +382,132 @@ if (sub === 'run') {
     console.error(`${green('✓')} pipeline run ${dim(runId.slice(-12))} ${green(finalState)}`)
   }
   process.exit(finalState === 'completed' ? 0 : 1)
+}
+
+// --- runs (V3.4.a — observability) ---
+
+if (sub === 'runs') {
+  let values
+  try {
+    ({ values } = parseArgs({
+      args: subRest,
+      options: {
+        limit: { type: 'string' },
+        pipeline: { type: 'string' },
+        json: { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
+      },
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+
+  const limit = values.limit !== undefined ? Number(values.limit) : 20
+  if (Number.isNaN(limit) || limit < 0) die(`runs: --limit must be a non-negative integer (got: ${values.limit})`, 2)
+  const runs = listPipelineRuns(PROJECT_DIR, {
+    limit,
+    pipelineId: values.pipeline || null,
+  })
+
+  if (values.json) {
+    console.log(JSON.stringify(runs, null, 2))
+    process.exit(0)
+  }
+
+  console.log(`\n${bold('artel pipeline runs')} ${dim(`— ${runs.length} ${values.pipeline ? `for ${values.pipeline}` : 'most recent'}`)}\n`)
+  if (!runs.length) {
+    console.log(`  ${dim('(no runs yet — try: artel pipeline run <id>)')}`)
+    console.log()
+    process.exit(0)
+  }
+  const fmtDur = (ms) => {
+    if (ms == null) return dim('—')
+    if (ms < 1000) return `${ms}ms`
+    if (ms < 60000) return `${Math.round(ms / 1000)}s`
+    if (ms < 3600000) return `${Math.round(ms / 60000)}m`
+    return `${(ms / 3600000).toFixed(1)}h`
+  }
+  for (const r of runs) {
+    const stateColour =
+      r.final_state === 'completed' ? green
+      : r.final_state === 'aborted' ? yellow
+      : r.final_state ? red
+      : dim
+    const state = r.final_state ? stateColour(r.final_state) : dim('in-flight')
+    const when = (r.started_at || '').replace('T', ' ').slice(0, 19) + 'Z'
+    const tail = r.run_id.slice(-8)
+    console.log(`  ${dim(when)}  ${cyan(tail)}  ${cyan(r.pipeline_id?.padEnd(20) || '?'.padEnd(20))} ${state.padEnd(20)} ${dim(fmtDur(r.duration_ms).padStart(6))} ${r.last_node ? dim(`→ ${r.last_node}`) : ''}`)
+  }
+  console.log()
+  process.exit(0)
+}
+
+// --- status (V3.4.a — drilldown) ---
+
+if (sub === 'status') {
+  let values, positionals
+  try {
+    ({ values, positionals } = parseArgs({
+      args: subRest,
+      options: { json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+      allowPositionals: true,
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+  const [runIdArg] = positionals
+  if (!runIdArg) die('status: <run-id> is required (full UUID or trailing fragment)', 2)
+
+  // Allow short fragments — match against last 12 chars of any
+  // known run_id. If multiple match, error out asking for more chars.
+  // (Pass null limit so listPipelineRuns returns the full set; -1
+  //  would trigger Array.prototype.slice's drop-last semantics.)
+  const allRuns = listPipelineRuns(PROJECT_DIR, { limit: null })
+  const matched = allRuns.filter((r) => r.run_id === runIdArg || r.run_id.endsWith(runIdArg))
+  if (!matched.length) die(`status: no run matches '${runIdArg}'`, 1)
+  if (matched.length > 1 && !matched.some((r) => r.run_id === runIdArg)) {
+    die(`status: '${runIdArg}' matches ${matched.length} runs — use a longer fragment or full UUID`, 1)
+  }
+  const fullRunId = matched.length === 1 ? matched[0].run_id : runIdArg
+  const detail = pipelineRunDetail(PROJECT_DIR, fullRunId)
+  if (!detail) die(`status: no events found for run '${fullRunId}'`, 1)
+
+  if (values.json) {
+    console.log(JSON.stringify(detail, null, 2))
+    process.exit(0)
+  }
+
+  console.log(`\n${bold('artel pipeline status')} ${cyan(detail.run_id)}\n`)
+  console.log(`  ${dim('pipeline:'.padEnd(14))} ${cyan(detail.pipeline_id)} ${dim('v' + detail.pipeline_version)}`)
+  console.log(`  ${dim('entry:'.padEnd(14))}    ${cyan(detail.entry_node)}`)
+  console.log(`  ${dim('started:'.padEnd(14))}  ${detail.started_at?.replace('T', ' ').slice(0, 19) || '?'} UTC`)
+  if (detail.ended_at) {
+    const colour =
+      detail.final_state === 'completed' ? green
+      : detail.final_state === 'aborted' ? yellow : red
+    console.log(`  ${dim('ended:'.padEnd(14))}    ${detail.ended_at.replace('T', ' ').slice(0, 19)} UTC ${dim(`(duration ${detail.duration_ms ?? '?'}ms)`)}`)
+    console.log(`  ${dim('final state:'.padEnd(14))} ${colour(detail.final_state || '?')}`)
+    if (detail.last_node) console.log(`  ${dim('last node:'.padEnd(14))}  ${cyan(detail.last_node)} ${dim(`disposition=${detail.last_disposition || '?'}`)}`)
+    if (detail.abort_reason) console.log(`  ${dim('abort:'.padEnd(14))}    ${red(detail.abort_reason)}`)
+  } else {
+    console.log(`  ${dim('ended:'.padEnd(14))}    ${yellow('still in flight')}`)
+  }
+
+  console.log(`\n  ${bold('Steps')} ${dim(`(${detail.steps.length})`)}`)
+  if (!detail.steps.length) {
+    console.log(`    ${dim('(no dispatches recorded yet)')}`)
+  } else {
+    for (const s of detail.steps) {
+      const dispoColour =
+        s.disposition === 'success' ? green
+        : s.disposition === 'parked' ? yellow
+        : s.disposition === 'timeout' || s.disposition === 'error' ? red
+        : dim
+      const dispo = s.disposition ? dispoColour(s.disposition) : dim('in-flight')
+      const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
+      console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
+    }
+  }
+  console.log(`\n  ${dim(`drilldown: artel logs <task>`)}\n`)
+  process.exit(0)
 }
 
 console.error(`unknown subcommand: ${sub}`)
