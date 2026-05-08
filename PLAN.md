@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.6)** | `[done]` | Cumulative through V3.6: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with atomic predicates over dotted attrs paths (V3.2.b), git-worktree isolation + concurrent `parallel` via `Promise.all` (V3.3.a), `artel sweep` worktree prune cross-checked against `git worktree list` (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation via `AbortController` + SIGTERM→SIGKILL grace (V3.3.c), `artel pipeline runs` / `status` observability over `events.jsonl` (V3.4.a), `{{ dotted.path }}` prompt template substitution at dispatch time (V3.5), recursive predicate vocabulary — `not`/`and`/`or` compounds + `gt`/`gte`/`lt`/`lte`/`ne` comparison ops, `show` renders nested predicates (V3.6). 4 node types: `dispatch` / `parallel` / `condition` / `terminal`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` (workload). CLI: `register` / `list` / `show` / `run` / `runs` / `status`. Walker honours sticky `In progress` / `Recently done` semantics from V2. Reachability check follows parallel branches AND condition then/else. `cancelled` disposition distinct from `error` / `timeout` / `parked`; excluded from worst-of-children aggregate. Templates render against the merged attrs blob (user `--attrs` + pipeline-injected ids); fail-fast on missing/non-scalar. Predicate ops fail-closed on missing / wrong-typed attrs. 508 tests green (~150 across V3 — 100 unit + 50 e2e). V3.x open: `pause` / `signal` / `handler` / `subpipeline`, branch-level timeout budgets, operator cancel of full pipeline run. |
+| V3 | **Pipelines (V3.1–V3.7.a)** | `[done]` | Cumulative through V3.7.a: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with atomic predicates over dotted attrs paths (V3.2.b), git-worktree isolation + concurrent `parallel` via `Promise.all` (V3.3.a), `artel sweep` worktree prune cross-checked against `git worktree list` (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation via `AbortController` + SIGTERM→SIGKILL grace (V3.3.c), `artel pipeline runs` / `status` observability over `events.jsonl` (V3.4.a), `{{ dotted.path }}` prompt template substitution at dispatch time (V3.5), recursive predicate vocabulary — `not`/`and`/`or` compounds + `gt`/`gte`/`lt`/`lte`/`ne` comparison ops, `show` renders nested predicates (V3.6), `handler` node type with `builtin.exec` for platform actions (V3.7.a). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` (workload). CLI: `register` / `list` / `show` / `run` / `runs` / `status`. Walker honours sticky `In progress` / `Recently done` semantics from V2. Reachability check follows parallel branches AND condition then/else. `cancelled` disposition distinct from `error` / `timeout` / `parked`; excluded from worst-of-children aggregate. Templates render against the merged attrs blob (user `--attrs` + pipeline-injected ids); fail-fast on missing/non-scalar. Predicate ops fail-closed on missing / wrong-typed attrs. Handlers run in PROJECT_DIR (no worktree, no role); `builtin.exec` dispatches `bash -c <cmd>` with optional `timeout_ms`. 531 tests green. V3.x open: `pause` / `signal` / `subpipeline`, more handler builtins (`assert` / `set_attr` / `git_squash`), handler observability events, branch-level timeout budgets, operator cancel of full pipeline run. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,36 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-08** — V3.7.a — `handler` node type with `builtin.exec`.
+  Adds the missing primitive between `dispatch` (LLM-driven) and
+  `terminal` / routing — platform actions run inline by the walker
+  with no role / engine / worktree / `.meta` sidecar. Disposition
+  flows through outgoing edges identically to `dispatch`. New file
+  `engine/util/handlers.mjs` exposes
+  `runHandler(node, ctx)` returning
+  `{ disposition, exitCode, signal, durationMs }`; the BUILTINS map
+  registers each implementation. V3.7.a ships `builtin.exec` only
+  — `bash -c <cmd>` in `ctx.projectDir` with stdio: 'inherit' so
+  the operator sees the command output inline. Optional
+  `timeout_ms` field; on timeout the walker emits SIGTERM (no
+  grace window in V3.7.a — added when handler abort joins parallel
+  cancellation work). `engine/util/pipelines.mjs` adds `handler`
+  to `VALID_NODE_TYPES` + new `VALID_HANDLERS` set + per-handler
+  shape validators (cmd non-empty, timeout_ms positive finite).
+  Reachability already handles edge-walking, so handler nodes
+  participate without changes. Parallel branches still restricted
+  to dispatch nodes (V3.2.a rule preserved — handler-in-branch
+  needs cancellation work that lands later). `engine/cli/pipeline.mjs`
+  walker adds the handler case; `show` renders
+  `<id> handler <name> cmd=<json> timeout_ms=<n>`. 531 tests green
+  (23 new — 9 unit pipelines on validator shape + reachability +
+  parallel-branch rejection, 8 unit handlers on dispatch + exec
+  exit codes / cwd / shell features / timeout / syntax error,
+  6 e2e on success edge / error edge / timeout / register error /
+  show rendering / handler-then-dispatch chaining). Observability
+  gap noted: handler steps don't yet appear in
+  `artel pipeline status` (no `pipeline_handler.start/.end`
+  events) — deferred to V3.7.b.
 - **2026-05-08** — V3.6 — condition predicate vocabulary expansion.
   `engine/util/pipelines.mjs` adds compound predicates and
   comparison operators on top of the V3.2.b atomic vocabulary.

@@ -1004,10 +1004,65 @@ attribute-presence is run-time data that the validator can't see.
 A pipeline that templates `{{ ghost }}` but never gets `ghost` in
 its run attrs only fails when the run reaches that node.
 
-### 11.8 Open
+### 11.8 V3.7.a — handler nodes (landed)
 
+The missing primitive between `dispatch` (LLM-driven) and routing
+nodes: a node that performs a platform action inline. No role, no
+engine, no worktree, no `.meta` sidecar. Disposition flows through
+outgoing edges identically to `dispatch`.
+
+**Definition:**
+
+```yaml
+ci_check:
+  type: handler
+  handler: builtin.exec
+  cmd: 'npm test'
+  timeout_ms: 60000     # optional
+```
+
+**Disposition mapping** (from `runHandler`):
+- `disposition: 'success'` — command exited 0
+- `disposition: 'error'` — non-zero exit code
+- `disposition: 'timeout'` — `timeout_ms` elapsed (SIGTERM the child)
+
+**Builtins** (V3.7.a ships one — see `engine/util/handlers.mjs`):
+
+- `builtin.exec` — `bash -c <cmd>` in `ctx.projectDir`. `stdio: 'inherit'`
+  so the operator sees command output inline with the walker's
+  progress. Trust model: cmds come from the pipeline definition
+  the operator authored — same trust as a `Makefile` target.
+
+Adding a new builtin = registering its name in
+`VALID_HANDLERS` (`engine/util/pipelines.mjs`) + its implementation
+in the `BUILTINS` map (`engine/util/handlers.mjs`). Validator
+catches malformed handler nodes at register time.
+
+**Restrictions (V3.7.a):**
+
+- Handler nodes **cannot appear inside parallel branches**. The
+  V3.2.a rule (branches must be dispatch) is preserved; lifting it
+  needs handler cancellation that joins V3.3.c's `AbortController`
+  machinery — deferred.
+- Handler steps don't yet emit `pipeline_handler.start/.end`
+  events, so they don't appear in `artel pipeline status` step
+  timelines. Operators see their progress only in walker stderr.
+  Deferred to V3.7.b.
+
+**Validator shape checks:**
+
+- `.handler` is a known builtin name
+- `builtin.exec`: `.cmd` is a non-empty string; `.timeout_ms` (if
+  set) is a positive finite number
+
+### 11.9 Open
+
+- Handler observability: `pipeline_handler.start` / `.end` events,
+  `artel pipeline status` rendering (V3.7.b)
+- More handler builtins: `builtin.assert`, `builtin.set_attr`,
+  `builtin.git_squash`, `builtin.git_merge` (V3.7.c+)
+- Handler nodes inside `parallel` branches (needs abort plumbing)
 - `pause` — return-of-control, waits on signal
-- `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition
 - Branch-level timeout budgets (cap each branch independently of
   whole-dispatch timeout)

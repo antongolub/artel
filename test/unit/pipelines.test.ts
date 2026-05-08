@@ -487,6 +487,95 @@ describe('condition predicate vocabulary (V3.6) — compounds + comparisons', ()
   })
 })
 
+describe('handler node validation (V3.7.a)', () => {
+  const withHandler = (handlerNode: object) => ({
+    id: 'flow', version: 1, entry: 'h',
+    nodes: {
+      h: handlerNode,
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'h', on_disposition: 'success', to: 'done' },
+      { from: 'h', on_disposition: '*', to: 'done' },
+    ],
+  })
+
+  it('accepts a well-formed builtin.exec handler', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true',
+    }))).not.toThrow()
+  })
+
+  it('accepts builtin.exec with timeout_ms', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'sleep 1', timeout_ms: 5000,
+    }))).not.toThrow()
+  })
+
+  it('rejects handler node with no .handler field', () => {
+    expect(() => validatePipeline(withHandler({ type: 'handler' })))
+      .toThrow(/\.handler must be a non-empty string/)
+  })
+
+  it('rejects unknown handler builtin', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.ghost', cmd: 'true',
+    }))).toThrow(/'builtin\.ghost' is not a known builtin/)
+  })
+
+  it('rejects builtin.exec without cmd', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec',
+    }))).toThrow(/requires \.cmd as a non-empty string/)
+  })
+
+  it('rejects builtin.exec with empty / whitespace cmd', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: '   ',
+    }))).toThrow(/requires \.cmd as a non-empty string/)
+  })
+
+  it('rejects builtin.exec with non-positive timeout_ms', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: 0,
+    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: -100,
+    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: 'soon' as never,
+    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+  })
+
+  it('handler nodes participate in reachability', () => {
+    // Pipeline: entry h (handler) → done (terminal). Without handler
+    // being recognised by the type validator, the validator would
+    // reject; without edge-following, no terminal would be reachable.
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true',
+    }))).not.toThrow()
+  })
+
+  it('handler nodes are still rejected as parallel branches', () => {
+    // V3.7.a keeps the parallel-branches-must-be-dispatch rule —
+    // handlers in branches need cancellation work that lands later.
+    const def = {
+      id: 'mix', version: 1, entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['h', 'd'], join: 'all-complete' },
+        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        d: { type: 'dispatch', role: 'implementer', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'done' },
+      ],
+    }
+    expect(() => validatePipeline(def)).toThrow(/branch 'h' must be a dispatch node/)
+  })
+})
+
 describe('parallel join (V3.3.c) — any-complete / k-of-n', () => {
   const withJoin = (join: string, extra: object = {}) => ({
     id: 'race',

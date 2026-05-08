@@ -1063,3 +1063,136 @@ describe('artel pipeline run — condition compounds + comparisons (V3.6)', () =
     expect(r.stderr).toMatch(/\.if\.and\[1\] must specify exactly one/)
   })
 })
+
+describe('artel pipeline run — handler nodes (V3.7.a)', () => {
+  // builtin.exec runs `bash -c <cmd>`. Walker treats disposition like
+  // dispatch: success on exit 0 → success edge; non-zero → error edge.
+  const flow = (handlerNode: object, edges = [
+    { from: 'h', on_disposition: 'success', to: 'done' },
+    { from: 'h', on_disposition: '*', to: 'fail' },
+  ]) => ({
+    id: 'h-flow', version: 1, entry: 'h',
+    nodes: {
+      h: handlerNode,
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges,
+  })
+
+  it('builtin.exec exit 0 → success edge → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: `touch handler-marker.txt`,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    // The handler ran in the project dir — marker file lands there.
+    expect(existsSync(join(root, 'handler-marker.txt'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'completed', last_node: 'done', last_disposition: 'success',
+    })
+  })
+
+  it('builtin.exec non-zero exit → wildcard edge → failed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec', cmd: 'exit 7',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'error',
+    })
+  })
+
+  it('builtin.exec timeout → wildcard edge', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: 'sleep 5', timeout_ms: 100,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_disposition).toBe('timeout')
+  })
+
+  it('register surfaces precise error on bad handler shape', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({ type: 'handler', handler: 'builtin.exec' }) // no cmd
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/\(builtin\.exec\) requires \.cmd as a non-empty string/)
+  })
+
+  it('show renders handler row with cmd + timeout', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: 'npm test', timeout_ms: 60000,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.exec\s+cmd="npm test"\s+timeout_ms=60000/)
+  })
+
+  it('handler chains with dispatch through edges', () => {
+    // handler success → dispatch → terminal. Verifies that handler
+    // disposition flows through edges to a downstream dispatch the
+    // way dispatch dispositions do.
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mixed', version: 1, entry: 'h',
+      nodes: {
+        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'h', on_disposition: 'success', to: 'impl' },
+        { from: 'h', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mixed', '--task-prefix', 'mx'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', '.dispatches', 'mx-impl.meta'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+  })
+})

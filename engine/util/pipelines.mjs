@@ -58,7 +58,19 @@ export const pipelinePath = (projectDir, id) =>
 
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
-export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel', 'condition'])
+export const VALID_NODE_TYPES = new Set([
+  'dispatch', 'terminal', 'parallel', 'condition', 'handler',
+])
+
+// V3.7.a — handler node builtins. The walker dispatches handler
+// nodes through `runHandler` in `engine/util/handlers.mjs`; each
+// builtin is a small platform action (no LLM, no role). Adding a
+// handler = registering a new builtin name here AND extending the
+// runHandler dispatch map. Handlers cannot appear inside `parallel`
+// branches in V3.7.a (the parallel validator already restricts
+// branches to dispatch nodes; lifting that requires per-branch
+// cancellation work).
+export const VALID_HANDLERS = new Set(['builtin.exec'])
 
 // V3.3.c — three join policies. all-complete waits for every branch;
 // any-complete returns as soon as one succeeds (cancels the rest);
@@ -240,11 +252,34 @@ export const validatePipeline = (def, source = '<inline>') => {
         }
         seen.add(branchId)
         // V3.2.a restriction: branches must be dispatch nodes. Nested
-        // parallel / condition / subpipeline land in V3.2.b+ once the
-        // walker is recursive on aggregate dispositions.
+        // parallel / condition / subpipeline / handler land in V3.2.b+
+        // once the walker is recursive on aggregate dispositions.
         const branchNode = def.nodes[branchId]
         if (branchNode.type !== 'dispatch') {
           throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch node (V3.2.a; nesting deferred to V3.2.b)`)
+        }
+      }
+    } else if (node.type === 'handler') {
+      // V3.7.a — built-in platform action. Kind=workload but no LLM,
+      // no role, no engine. Disposition flows through outgoing edges
+      // exactly like dispatch.
+      if (typeof node.handler !== 'string' || !node.handler) {
+        throw new Error(`${source}: handler node '${nid}' .handler must be a non-empty string`)
+      }
+      if (!VALID_HANDLERS.has(node.handler)) {
+        throw new Error(`${source}: handler node '${nid}' .handler '${node.handler}' is not a known builtin (valid: ${[...VALID_HANDLERS].join(' | ')})`)
+      }
+      // Per-builtin shape checks. Centralised here so a malformed
+      // handler is caught at register time, not when the run touches
+      // it. Add a new builtin = add a case here AND in handlers.mjs.
+      if (node.handler === 'builtin.exec') {
+        if (typeof node.cmd !== 'string' || !node.cmd.trim()) {
+          throw new Error(`${source}: handler node '${nid}' (builtin.exec) requires .cmd as a non-empty string`)
+        }
+        if (node.timeout_ms != null) {
+          if (typeof node.timeout_ms !== 'number' || node.timeout_ms <= 0 || !Number.isFinite(node.timeout_ms)) {
+            throw new Error(`${source}: handler node '${nid}' .timeout_ms must be a positive finite number (got: ${node.timeout_ms})`)
+          }
         }
       }
     }

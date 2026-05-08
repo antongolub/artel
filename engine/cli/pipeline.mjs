@@ -34,6 +34,7 @@ import {
   validatePipeline,
 } from '../util/pipelines.mjs'
 import { dispatchLifecycle } from '../core/dispatch_lifecycle.mjs'
+import { runHandler } from '../util/handlers.mjs'
 import { uuidv7 } from '../util/ids.mjs'
 
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
@@ -212,6 +213,13 @@ if (sub === 'show') {
       // V3.6 — recursive renderer covers atomic (equals/ne/in/exists/
       // gt/gte/lt/lte) and compound (not/and/or) shapes.
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
+    } else if (node.type === 'handler') {
+      // V3.7.a — render builtin name + key fields. `cmd` quoted as
+      // JSON so spaces / quotes round-trip readably.
+      const detail = node.handler === 'builtin.exec'
+        ? ` cmd=${JSON.stringify(node.cmd)}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`
+        : ''
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
@@ -426,13 +434,31 @@ if (sub === 'run') {
       }
       const matched = evaluatePredicate(node.if, attrs)
       const branchTaken = matched ? node.then : node.else
-      console.error(`${bold('?')} ${cyan(nodeId)} ${dim('→')} condition ${dim('attr=')}${node.if.attr} ${dim('→')} ${matched ? green('then') : yellow('else')} ${dim('→')} ${cyan(branchTaken)}`)
+      console.error(`${bold('?')} ${cyan(nodeId)} ${dim('→')} condition ${dim('→')} ${matched ? green('then') : yellow('else')} ${dim('→')} ${cyan(branchTaken)}`)
       // Conditions don't generate a step disposition — short-circuit
       // straight to the chosen target.
       nodeId = branchTaken
       continue
+    } else if (node.type === 'handler') {
+      // V3.7.a — built-in platform action. No LLM, no role, no
+      // worktree. Runs in PROJECT_DIR; stdout/stderr go straight to
+      // the operator's tty so they see the command's output inline
+      // with the walker's progress. Disposition (success / error /
+      // timeout) flows through outgoing edges exactly like dispatch.
+      const detail = node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` : ''
+      console.error(`${bold('●')} ${cyan(nodeId)} ${dim('→')} handler ${node.handler}${detail}`)
+      try {
+        const result = await runHandler(node, { projectDir: PROJECT_DIR })
+        const ec = result.exitCode == null ? '?' : result.exitCode
+        console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(exit=${ec}, ${result.durationMs}ms)`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
+        stepDisposition = result.disposition
+      } catch (err) {
+        abortReason = `handler '${nodeId}' threw: ${err.message}`
+        finalState = 'failed'
+        break
+      }
     } else {
-      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.2.b supports: dispatch | parallel | condition | terminal)`
+      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.7.a supports: dispatch | parallel | condition | handler | terminal)`
       finalState = 'failed'
       break
     }

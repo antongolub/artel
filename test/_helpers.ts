@@ -192,6 +192,7 @@ export const ENGINE_FILES_UTIL = [
   'engine/util/audit.mjs',
   'engine/util/pipelines.mjs',
   'engine/util/worktree.mjs',
+  'engine/util/handlers.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',
