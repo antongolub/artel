@@ -556,6 +556,42 @@ describe('handler node validation (V3.7.a)', () => {
     }))).not.toThrow()
   })
 
+  it('accepts a well-formed builtin.assert handler', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+    }))).not.toThrow()
+  })
+
+  it('accepts builtin.assert with compound predicate + message', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.assert',
+      if: { and: [{ attr: 'env', equals: 'prod' }, { attr: 'approved', equals: true }] },
+      message: 'deploy {{ target }} requires approval',
+    }))).not.toThrow()
+  })
+
+  it('rejects builtin.assert without .if', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.assert',
+    }))).toThrow(/requires an \.if predicate object/)
+  })
+
+  it('rejects builtin.assert with malformed nested predicate (path-aware)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.assert',
+      if: { and: [{ attr: 'x', equals: 1 }, { attr: 'y' /* no op */ }] },
+    }))).toThrow(/\.if\.and\[1\] must specify exactly one/)
+  })
+
+  it('rejects builtin.assert with non-string message', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'x', equals: 1 },
+      message: 42,
+    }))).toThrow(/\.message must be a string/)
+  })
+
   it('handler nodes are still rejected as parallel branches', () => {
     // V3.7.a keeps the parallel-branches-must-be-dispatch rule —
     // handlers in branches need cancellation work that lands later.

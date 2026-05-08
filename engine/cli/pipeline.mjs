@@ -214,10 +214,14 @@ if (sub === 'show') {
       // gt/gte/lt/lte) and compound (not/and/or) shapes.
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
     } else if (node.type === 'handler') {
-      // V3.7.a — render builtin name + key fields. `cmd` quoted as
-      // JSON so spaces / quotes round-trip readably.
-      const detail = node.handler === 'builtin.exec'
-        ? ` cmd=${JSON.stringify(node.cmd)}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`
+      // V3.7.a/c — render builtin name + key fields. `cmd` quoted as
+      // JSON so spaces / quotes round-trip readably; assert prints
+      // the predicate via the same renderPredicate as condition.
+      const detail =
+        node.handler === 'builtin.exec'
+          ? ` cmd=${JSON.stringify(node.cmd)}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`
+        : node.handler === 'builtin.assert'
+          ? ` if(${renderPredicate(node.if)})${node.message ? ` message=${JSON.stringify(node.message)}` : ''}`
         : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     }
@@ -449,7 +453,19 @@ if (sub === 'run') {
       // status / runs reconstruct handler steps from events.jsonl
       // (same join key as dispatches: pipeline_run_id +
       // pipeline_node_id, plus a fresh handler_id UUID v7).
-      const detail = node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` : ''
+      // V3.7.c — pass merged attrs into runHandler ctx so
+      // builtin.assert (and future read-from-state builtins) can
+      // see user --attrs + pipeline-injected ids.
+      const handlerAttrs = {
+        ...userAttrs,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: nodeId,
+      }
+      const detail =
+        node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
+        node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
+        ''
       console.error(`${bold('●')} ${cyan(nodeId)} ${dim('→')} handler ${node.handler}${detail}`)
       const handlerId = uuidv7()
       appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
@@ -462,11 +478,21 @@ if (sub === 'run') {
           cmd: node.cmd,
           ...(node.timeout_ms != null ? { timeout_ms: node.timeout_ms } : {}),
         } : {}),
+        ...(node.handler === 'builtin.assert' ? {
+          // Snapshot the predicate for forensics — operators can read
+          // back what gate fired without cross-referencing the
+          // pipeline definition.
+          predicate: node.if,
+          ...(node.message ? { message_template: node.message } : {}),
+        } : {}),
       })
       try {
-        const result = await runHandler(node, { projectDir: PROJECT_DIR })
+        const result = await runHandler(node, { projectDir: PROJECT_DIR, attrs: handlerAttrs })
         const ec = result.exitCode == null ? '?' : result.exitCode
-        console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(exit=${ec}, ${result.durationMs}ms)`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
+        const durLabel = node.handler === 'builtin.assert'
+          ? `${result.durationMs}ms`
+          : `exit=${ec}, ${result.durationMs}ms`
+        console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
         appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
           handler_id: handlerId,
           handler: node.handler,

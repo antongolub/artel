@@ -1209,6 +1209,114 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(st.stdout).toMatch(/h\s+true\s+handler\s+exec\s+success/)
   })
 
+  it('builtin.assert true → success edge, false → error edge (V3.7.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'deploy of {{ env }} requires env=prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Predicate true → success → done.
+    const ok = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"prod"}',
+    ])
+    expect(ok.status).toBe(0)
+    const okEnded = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(okEnded.last_node).toBe('done')
+  })
+
+  it('builtin.assert failure surfaces rendered message in event + status (V3.7.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'deploy of {{ env }} requires env=prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Predicate false → error → fail terminal.
+    const fail = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"dev"}',
+    ])
+    expect(fail.status).not.toBe(0)
+    const evts = events(root)
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+
+    // pipeline_handler.end carries the rendered message.
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toBe('deploy of dev requires env=prod')
+
+    // pipeline_handler.start snapshots the predicate + message
+    // template for forensics.
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    expect(hStart.predicate).toEqual({ attr: 'env', equals: 'prod' })
+    expect(hStart.message_template).toBe('deploy of {{ env }} requires env=prod')
+
+    // status renders the assert step.
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; handler: string; disposition: string; error: string }>
+    }
+    expect(det.steps[0]).toMatchObject({
+      kind: 'handler', handler: 'builtin.assert', disposition: 'error',
+      error: 'deploy of dev requires env=prod',
+    })
+  })
+
+  it('builtin.assert with compound predicate routes correctly', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: {
+        and: [
+          { attr: 'env', equals: 'prod' },
+          { not: { attr: 'paused', equals: true } },
+        ],
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // env=prod, paused=true → and([true, not(true)]) = and([true,false]) = false → fail
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"prod","paused":true}',
+    ])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.last_node).toBe('fail')
+  })
+
+  it('show renders builtin.assert with predicate + message', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'must be prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.assert\s+if\(env equals "prod"\)\s+message="must be prod"/)
+  })
+
   it('handler chains with dispatch through edges', () => {
     // handler success → dispatch → terminal. Verifies that handler
     // disposition flows through edges to a downstream dispatch the

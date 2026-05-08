@@ -92,3 +92,97 @@ describe('builtin.exec', () => {
     expect(r.exitCode).not.toBe(0)
   })
 })
+
+describe('builtin.assert (V3.7.c)', () => {
+  it('returns success when predicate evaluates true', async () => {
+    const r = await runHandler(
+      { handler: 'builtin.assert', if: { attr: 'env', equals: 'prod' } },
+      { attrs: { env: 'prod' } },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.error).toBeUndefined()
+    expect(typeof r.durationMs).toBe('number')
+  })
+
+  it('returns error when predicate evaluates false', async () => {
+    const r = await runHandler(
+      { handler: 'builtin.assert', if: { attr: 'env', equals: 'prod' } },
+      { attrs: { env: 'dev' } },
+    )
+    expect(r.disposition).toBe('error')
+    // Default message when none supplied.
+    expect(r.error).toBe('assertion failed')
+  })
+
+  it('renders custom message via V3.5 template substitution', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.assert',
+        if: { attr: 'approved', equals: true },
+        message: 'deploy of {{ target }} blocked: approval flag missing',
+      },
+      { attrs: { approved: false, target: 'prod' } },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toBe('deploy of prod blocked: approval flag missing')
+  })
+
+  it('handles compound predicates (V3.6 and/or/not)', async () => {
+    const node = {
+      handler: 'builtin.assert',
+      if: {
+        and: [
+          { attr: 'env', equals: 'prod' },
+          { not: { attr: 'paused', equals: true } },
+        ],
+      },
+    }
+    const r1 = await runHandler(node, { attrs: { env: 'prod', paused: false } })
+    expect(r1.disposition).toBe('success')
+
+    const r2 = await runHandler(node, { attrs: { env: 'prod', paused: true } })
+    expect(r2.disposition).toBe('error')
+
+    const r3 = await runHandler(node, { attrs: { env: 'dev' } })
+    expect(r3.disposition).toBe('error')
+  })
+
+  it('treats missing attrs object as empty (every check fail-closed)', async () => {
+    // No ctx.attrs → builtin reads from {} → exists=true is false →
+    // routes through error.
+    const r = await runHandler(
+      { handler: 'builtin.assert', if: { attr: 'flag', exists: true } },
+      { /* no attrs */ },
+    )
+    expect(r.disposition).toBe('error')
+  })
+
+  it('reports template error in message field rather than crashing', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.assert',
+        if: { attr: 'x', equals: 1 },
+        message: 'x={{ x }} y={{ ghost }}',  // ghost is missing
+      },
+      { attrs: { x: 0 } },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/\[message render failed:.*ghost/)
+  })
+
+  it('reads dotted-path attrs', async () => {
+    const r = await runHandler(
+      { handler: 'builtin.assert', if: { attr: 'env.target', in: ['staging', 'prod'] } },
+      { attrs: { env: { target: 'staging' } } },
+    )
+    expect(r.disposition).toBe('success')
+  })
+
+  it('comparison ops fail-closed on missing attr (V3.6 semantics)', async () => {
+    const r = await runHandler(
+      { handler: 'builtin.assert', if: { attr: 'score', gte: 0.8 } },
+      { attrs: {} },
+    )
+    expect(r.disposition).toBe('error')
+  })
+})

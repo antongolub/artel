@@ -70,7 +70,13 @@ export const VALID_NODE_TYPES = new Set([
 // branches in V3.7.a (the parallel validator already restricts
 // branches to dispatch nodes; lifting that requires per-branch
 // cancellation work).
-export const VALID_HANDLERS = new Set(['builtin.exec'])
+//
+// V3.7.c adds `builtin.assert` — predicate-based guard. Evaluates
+// `node.if` (same V3.6 predicate vocabulary as `condition`) against
+// run attrs; success on true, error on false. Optional template-
+// rendered `node.message` lands in the `pipeline_handler.end`
+// event's `error` field for forensics.
+export const VALID_HANDLERS = new Set(['builtin.exec', 'builtin.assert'])
 
 // V3.3.c — three join policies. all-complete waits for every branch;
 // any-complete returns as soon as one succeeds (cancels the rest);
@@ -280,6 +286,19 @@ export const validatePipeline = (def, source = '<inline>') => {
           if (typeof node.timeout_ms !== 'number' || node.timeout_ms <= 0 || !Number.isFinite(node.timeout_ms)) {
             throw new Error(`${source}: handler node '${nid}' .timeout_ms must be a positive finite number (got: ${node.timeout_ms})`)
           }
+        }
+      }
+      // V3.7.c — builtin.assert: requires .if predicate (same shape
+      // as condition.if — atomic or compound, recursive). Optional
+      // .message string (template-rendered at run time, surfaced in
+      // the end event's `error` field on failure).
+      if (node.handler === 'builtin.assert') {
+        if (!node.if || typeof node.if !== 'object') {
+          throw new Error(`${source}: handler node '${nid}' (builtin.assert) requires an .if predicate object`)
+        }
+        validatePredicateShape(node.if, source, nid, '.if')
+        if (node.message != null && typeof node.message !== 'string') {
+          throw new Error(`${source}: handler node '${nid}' .message must be a string (got: ${typeof node.message})`)
         }
       }
     }

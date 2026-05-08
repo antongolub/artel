@@ -1027,17 +1027,39 @@ ci_check:
 - `disposition: 'error'` — non-zero exit code
 - `disposition: 'timeout'` — `timeout_ms` elapsed (SIGTERM the child)
 
-**Builtins** (V3.7.a ships one — see `engine/util/handlers.mjs`):
+**Builtins** (in `engine/util/handlers.mjs`):
 
-- `builtin.exec` — `bash -c <cmd>` in `ctx.projectDir`. `stdio: 'inherit'`
-  so the operator sees command output inline with the walker's
-  progress. Trust model: cmds come from the pipeline definition
-  the operator authored — same trust as a `Makefile` target.
+- `builtin.exec` (V3.7.a) — `bash -c <cmd>` in `ctx.projectDir`.
+  `stdio: 'inherit'` so the operator sees command output inline
+  with the walker's progress. Optional `timeout_ms`. Trust model:
+  cmds come from the pipeline definition the operator authored —
+  same trust as a `Makefile` target.
+- `builtin.assert` (V3.7.c) — predicate-based guard. Reads
+  `node.if` (V3.6 predicate vocabulary — atomic + compound +
+  comparisons, recursive) and evaluates it against `ctx.attrs`.
+  Success on true, error on false. Optional `node.message`
+  (V3.5-templated against `ctx.attrs`) surfaces in the
+  `pipeline_handler.end` event's `error` field on failure.
+  Bad templates render as `[message render failed: ...]` rather
+  than crashing the walker. Pure function — no spawn, no I/O.
 
 Adding a new builtin = registering its name in
 `VALID_HANDLERS` (`engine/util/pipelines.mjs`) + its implementation
 in the `BUILTINS` map (`engine/util/handlers.mjs`). Validator
 catches malformed handler nodes at register time.
+
+**Handler ctx shape:**
+
+```
+{
+  projectDir,    // path to project root (handlers run here, not in worktrees)
+  attrs,         // merged blob: user --attrs + pipeline-injected ids
+}
+```
+
+`attrs` is the same scope that flows through dispatch task_attrs
+and condition predicates. Read-from-state builtins (assert) use
+it; `builtin.exec` ignores it.
 
 **Restrictions (V3.7.a):**
 
@@ -1051,6 +1073,9 @@ catches malformed handler nodes at register time.
 - `.handler` is a known builtin name
 - `builtin.exec`: `.cmd` is a non-empty string; `.timeout_ms` (if
   set) is a positive finite number
+- `builtin.assert`: `.if` is a valid predicate (recursive shape
+  check via `validatePredicateShape`); `.message` (if set) is a
+  string
 
 **Observability (V3.7.b — landed):**
 
@@ -1074,8 +1099,9 @@ slots so the column alignment with dispatches is preserved.
 
 ### 11.9 Open
 
-- More handler builtins: `builtin.assert`, `builtin.set_attr`,
-  `builtin.git_squash`, `builtin.git_merge` (V3.7.c+)
+- More handler builtins: `builtin.set_attr` (mutate run attrs that
+  flow downstream), `builtin.git_squash`, `builtin.git_merge`
+  (V3.7.d+)
 - Handler nodes inside `parallel` branches (needs abort plumbing)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
