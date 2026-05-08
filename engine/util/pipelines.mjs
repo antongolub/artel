@@ -286,6 +286,39 @@ export const evaluatePredicate = (predicate, attrs) => {
   return false
 }
 
+// V3.5 — `{{ dotted.path }}` substitution for dispatch prompts.
+// Whitespace-tolerant; missing or null/undefined attrs throw with a
+// helpful error (fail-fast beats silent "" replacement; an
+// unparametrized prompt is almost always an operator bug). Object /
+// array values throw — only scalars (string|number|boolean) have an
+// obvious string form.
+//
+// Vocabulary is intentionally just substitution. No conditionals,
+// loops, filters, or escapes — keep the surface minimal until a
+// concrete need arises. A literal `{{` in the source is therefore
+// reserved; if a real prompt needs that bigraph, encode it in the
+// scope (`--attrs '{"open":"{{"}'` + `prompt: "{{open}}foo"`).
+//
+// Scope shape: same blob the walker passes through as `task_attrs`
+// (user `--attrs` merged on top of pipeline-injected ids — same
+// scope `evaluatePredicate` reads against).
+export const renderTemplate = (template, scope) => {
+  if (template == null) return template
+  if (typeof template !== 'string') return template
+  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, path) => {
+    const v = readPath(scope, path)
+    if (v === undefined || v === null) {
+      throw new Error(`template: missing attribute '${path}'`)
+    }
+    if (typeof v === 'object') {
+      throw new Error(
+        `template: cannot substitute object/array at '${path}' — only scalars (string|number|boolean) supported`,
+      )
+    }
+    return String(v)
+  })
+}
+
 // Aggregate disposition for a parallel join.
 // V3.2.a (all-complete): worst-of-children rule —
 //   any error → 'error'

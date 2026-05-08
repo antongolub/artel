@@ -907,12 +907,84 @@ is unusual — it would only happen if the walker itself was
 cancelled (out of scope today), but the wildcard `on_disposition: '*'`
 edge would catch it.
 
-### 11.7 Open
+### 11.7 V3.5 — prompt template substitution (landed)
+
+`{{ dotted.path }}` substitution applied to a `dispatch` node's
+`prompt` at dispatch time. Renders against the merged attrs blob
+the walker also exposes as `task_attrs` — same scope as
+`evaluatePredicate` (§11.3 condition).
+
+**Vocabulary.** Intentionally just substitution. No conditionals,
+loops, filters, or escapes. Whitespace-tolerant: `{{x}}`,
+`{{ x }}`, `{{  x  }}`. A literal `{{` in source is reserved; if a
+prompt needs that bigraph, encode it via the scope
+(`--attrs '{"open":"{{"}'` + `prompt: "{{open}}foo"`).
+
+**Scope.** Same blob the walker passes through as `task_attrs`:
+
+```
+{
+  // pipeline-injected
+  pipeline_run_id:  "<uuid>",
+  pipeline_id:      "<pipeline>",
+  pipeline_node_id: "<this node>",
+  pipeline_parallel_of: "<parent parallel id>",  // when applicable
+
+  // user-supplied via `--attrs '{...}'`
+  ...userAttrs,
+}
+```
+
+User attrs are spread top-level. So `--attrs '{"target":"foo"}'`
+makes `{{ target }}` work; nested objects work through dotted
+paths (`--attrs '{"flags":{"skip_tests":true}}'` →
+`{{ flags.skip_tests }}` → `"true"`).
+
+**Coercion.** Scalar values (string | number | boolean) are
+rendered via `String(v)`. Object / array values throw — there's no
+obvious scalar form, and silently `JSON.stringify`-ing them invites
+prompts to drift between human-readable and JSON-encoded.
+
+**Fail-fast.** Missing path → throws. Null / undefined value →
+throws. Both render as `prompt template at node '<id>': missing
+attribute '<path>'`. The walker's `runDispatchNode` catches the
+throw and emits it as the dispatch's `__error` — the run aborts
+with `abort_reason` containing the template error, same shape as
+any other dispatch failure.
+
+**No recursion.** Substituted values aren't re-scanned. So if
+`{{ name }}` resolves to `"{{ inner }}"`, the rendered output is
+literally `"{{ inner }}"` — no infinite-loop foot-gun.
+
+**Walker integration** (`engine/cli/pipeline.mjs#runDispatchNode`):
+
+```js
+const taskAttrs = { ...userAttrs, pipeline_run_id, pipeline_id, pipeline_node_id, ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}) }
+let renderedPrompt
+try { renderedPrompt = renderTemplate(node.prompt, taskAttrs) }
+catch (err) { return { __error: `prompt template at node '${id}': ${err.message}`, node: id } }
+return dispatchLifecycle({ ..., prompt: renderedPrompt, taskAttrs })
+```
+
+The `taskAttrs` blob is built once and used both for the template
+render and the lifecycle's `task_attrs` flow — no risk of
+substituting against a stale view.
+
+**Validation.** None at register time — well-formed `{{ ... }}`
+is checked implicitly by the regex at render time, and
+attribute-presence is run-time data that the validator can't see.
+A pipeline that templates `{{ ghost }}` but never gets `ghost` in
+its run attrs only fails when the run reaches that node.
+
+### 11.8 Open
 
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition
-- Prompt template substitution
+- Branch-level timeout budgets (cap each branch independently of
+  whole-dispatch timeout)
+- Operator cancel of in-flight pipeline run (`artel pipeline cancel
+  <run-id>`)
 - More predicate ops in `condition` (and/or/not, regex, comparisons)
 
 **Additional edges:** `on_signal: <type>`, `on_budget_exhausted`.

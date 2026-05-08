@@ -599,6 +599,88 @@ describe('listPipelineRuns / pipelineRunDetail (V3.4.a)', () => {
   })
 })
 
+describe('renderTemplate (V3.5)', () => {
+  const { renderTemplate } = pipelinesModule as { renderTemplate: (t: unknown, scope: object) => unknown }
+
+  it('passes through strings without templates unchanged', () => {
+    expect(renderTemplate('hello world', {})).toBe('hello world')
+    expect(renderTemplate('', {})).toBe('')
+    expect(renderTemplate('a {b} c', {})).toBe('a {b} c') // single braces left alone
+  })
+
+  it('passes through non-strings unchanged', () => {
+    expect(renderTemplate(null, {})).toBe(null)
+    expect(renderTemplate(undefined, {})).toBe(undefined)
+    expect(renderTemplate(42 as unknown as string, {})).toBe(42)
+  })
+
+  it('substitutes a single {{ name }} from top-level scope', () => {
+    expect(renderTemplate('hi {{ user }}', { user: 'anton' })).toBe('hi anton')
+  })
+
+  it('substitutes multiple placeholders in one string', () => {
+    expect(renderTemplate('{{ a }} + {{ b }} = {{ c }}', { a: 1, b: 2, c: 3 }))
+      .toBe('1 + 2 = 3')
+  })
+
+  it('reads dotted paths', () => {
+    expect(renderTemplate('target={{ attrs.target }}', { attrs: { target: 'foo' } }))
+      .toBe('target=foo')
+    expect(renderTemplate('flag={{ a.b.c }}', { a: { b: { c: true } } }))
+      .toBe('flag=true')
+  })
+
+  it('is whitespace-tolerant', () => {
+    expect(renderTemplate('{{user}}', { user: 'x' })).toBe('x')
+    expect(renderTemplate('{{ user }}', { user: 'x' })).toBe('x')
+    expect(renderTemplate('{{   user   }}', { user: 'x' })).toBe('x')
+  })
+
+  it('coerces scalar types to string', () => {
+    expect(renderTemplate('{{ n }}', { n: 7 })).toBe('7')
+    expect(renderTemplate('{{ b }}', { b: false })).toBe('false')
+    expect(renderTemplate('{{ s }}', { s: '' })).toBe('')
+  })
+
+  it('throws on missing attribute', () => {
+    expect(() => renderTemplate('{{ ghost }}', {}))
+      .toThrow(/missing attribute 'ghost'/)
+    expect(() => renderTemplate('{{ a.b }}', { a: {} }))
+      .toThrow(/missing attribute 'a.b'/)
+  })
+
+  it('throws on null/undefined value (fail-fast — no silent "")', () => {
+    expect(() => renderTemplate('{{ x }}', { x: null }))
+      .toThrow(/missing attribute 'x'/)
+    expect(() => renderTemplate('{{ x }}', { x: undefined }))
+      .toThrow(/missing attribute 'x'/)
+  })
+
+  it('throws on object/array values', () => {
+    expect(() => renderTemplate('{{ x }}', { x: { y: 1 } }))
+      .toThrow(/cannot substitute object\/array/)
+    expect(() => renderTemplate('{{ x }}', { x: [1, 2] }))
+      .toThrow(/cannot substitute object\/array/)
+  })
+
+  it('mixes pipeline-injected ids and user attrs in the same template', () => {
+    const scope = {
+      pipeline_id: 'review-flow',
+      pipeline_run_id: 'abc123',
+      target: 'auth-bug',
+    }
+    expect(renderTemplate('[{{pipeline_id}} run={{pipeline_run_id}}] impl {{target}}', scope))
+      .toBe('[review-flow run=abc123] impl auth-bug')
+  })
+
+  it('does not recursively expand substituted values', () => {
+    // If `name` resolves to "{{ inner }}" we leave it as a literal —
+    // re-rendering would invite infinite-loop bugs.
+    expect(renderTemplate('hi {{ name }}', { name: '{{ inner }}', inner: 'x' }))
+      .toBe('hi {{ inner }}')
+  })
+})
+
 describe('loadPipelineFile / listPipelineFiles', () => {
   it('loadPipelineFile parses + validates from disk', () => {
     const root = createTempRepo()

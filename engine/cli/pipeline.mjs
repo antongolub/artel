@@ -29,6 +29,7 @@ import {
   pipelinesDir,
   pipelineRunDetail,
   quorumOf,
+  renderTemplate,
   resolveNext,
   validatePipeline,
 } from '../util/pipelines.mjs'
@@ -265,11 +266,29 @@ if (sub === 'run') {
       : `${taskPrefix}-${id}`
     const node = def.nodes[id]
     console.error(`${bold('◆')} ${cyan(id)} ${dim('→')} dispatch role=${node.role}${node.engine ? ` engine=${node.engine}` : ''} task=${dim(taskSlug)}`)
+    // V3.5 — render `{{ attr }}` substitutions in the prompt against
+    // the same merged attrs blob that flows through as `task_attrs`.
+    // Built once here so the rendered prompt and the passed-through
+    // attrs stay synchronized — no risk of substituting against a
+    // stale view. Render errors (missing attr, non-scalar value)
+    // surface as the dispatch's __error so the run aborts cleanly.
+    const taskAttrs = {
+      ...userAttrs,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+    }
+    let renderedPrompt
+    try { renderedPrompt = renderTemplate(node.prompt, taskAttrs) }
+    catch (err) {
+      return { __error: `prompt template at node '${id}': ${err.message}`, node: id }
+    }
     try {
       return await dispatchLifecycle({
         role: node.role,
         task: taskSlug,
-        prompt: node.prompt,
+        prompt: renderedPrompt,
         engine: node.engine || null,
         model: node.model || null,
         effort: node.effort || null,
@@ -278,13 +297,7 @@ if (sub === 'run') {
         permissionMode: node['permission-mode'] || null,
         useWorktree: !!opts.useWorktree,
         abortSignal: opts.signal || null,
-        taskAttrs: {
-          ...userAttrs,
-          pipeline_run_id: runId,
-          pipeline_id: def.id,
-          pipeline_node_id: id,
-          ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
-        },
+        taskAttrs,
       })
     } catch (err) {
       return { __error: err?.message || String(err), node: id }

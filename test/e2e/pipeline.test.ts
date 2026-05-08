@@ -803,3 +803,139 @@ describe('artel pipeline run — parallel any-complete / k-of-n (V3.3.c)', () =>
     expect(r.stdout).toMatch(/fan\s+parallel\s+branches=\[fast1, fast2, slow\]\s+join=k-of-n\s+k=2/)
   })
 })
+
+describe('artel pipeline run — prompt template substitution (V3.5)', () => {
+  // The walker renders `{{ attr }}` placeholders against the merged
+  // attrs (user --attrs + pipeline-injected ids) before passing to
+  // dispatchLifecycle. The rendered prompt lands in
+  // .artel/.dispatches/<task>.prompt — we read it back to assert.
+
+  const templated = (overrides = {}) => ({
+    id: 'tmpl',
+    version: 1,
+    entry: 'first',
+    nodes: {
+      first: {
+        type: 'dispatch',
+        role: 'implementer',
+        engine: 'claude',
+        prompt: 'Implement: {{ target }} for run {{ pipeline_run_id }}',
+      },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'first', on_disposition: 'success', to: 'done' },
+      { from: 'first', on_disposition: '*', to: 'fail' },
+    ],
+    ...overrides,
+  })
+
+  it('substitutes user --attrs and pipeline-injected ids into prompt', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', templated())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'tmpl',
+      '--attrs', '{"target":"auth-bug"}',
+      '--task-prefix', 'tt',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const promptPath = join(root, '.artel', '.dispatches', 'tt-first.prompt')
+    expect(existsSync(promptPath)).toBe(true)
+    const rendered = readFileSync(promptPath, 'utf8')
+    // pipeline_run_id is a UUIDv7 — assert shape via the static parts
+    // and the dynamic parts via regex.
+    expect(rendered).toMatch(/^Implement: auth-bug for run [0-9a-f-]{36}$/)
+  })
+
+  it('missing attribute fails the run with a clear template error', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', templated())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    // No --attrs → `target` is missing → render throws → run aborts.
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'tmpl', '--task-prefix', 'fail'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/prompt template at node 'first':.*missing attribute 'target'/)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.abort_reason).toMatch(/template/)
+  })
+
+  it('parallel branches see pipeline_node_id + parallel_of in their prompt scope', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'fanout-tmpl',
+      version: 1,
+      entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['a', 'b'], join: 'all-complete' },
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude',
+             prompt: 'branch={{ pipeline_node_id }} parent={{ pipeline_parallel_of }}' },
+        b: { type: 'dispatch', role: 'implementer', engine: 'claude',
+             prompt: 'branch={{ pipeline_node_id }} parent={{ pipeline_parallel_of }}' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout-tmpl', '--task-prefix', 'fo'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const promptA = readFileSync(join(root, '.artel', '.dispatches', 'fo-fan-a.prompt'), 'utf8')
+    const promptB = readFileSync(join(root, '.artel', '.dispatches', 'fo-fan-b.prompt'), 'utf8')
+    expect(promptA).toBe('branch=a parent=fan')
+    expect(promptB).toBe('branch=b parent=fan')
+  })
+
+  it('passes through prompt with no templates unchanged (back-compat)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'plain', version: 1, entry: 'first',
+      nodes: {
+        first: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'just a literal prompt' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'first', on_disposition: 'success', to: 'done' },
+        { from: 'first', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'plain', '--task-prefix', 'pp'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(readFileSync(join(root, '.artel', '.dispatches', 'pp-first.prompt'), 'utf8'))
+      .toBe('just a literal prompt')
+  })
+})
