@@ -20,6 +20,7 @@ import { parseArgs } from 'node:util'
 import { appendWorkloadEvent } from '../util/audit.mjs'
 import {
   aggregateDisposition,
+  aggregateForJoin,
   evaluatePredicate,
   listPipelineFiles,
   listPipelineRuns,
@@ -27,6 +28,7 @@ import {
   pipelinePath,
   pipelinesDir,
   pipelineRunDetail,
+  quorumOf,
   resolveNext,
   validatePipeline,
 } from '../util/pipelines.mjs'
@@ -185,7 +187,9 @@ if (sub === 'show') {
         : node.final_state === 'aborted' ? yellow : red
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('terminal')} → ${colour(node.final_state)}`)
     } else if (node.type === 'parallel') {
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'}`)
+      const join = node.join || 'all-complete'
+      const kSuffix = join === 'k-of-n' ? ` k=${node.k}` : ''
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${join}${kSuffix}`)
     } else if (node.type === 'condition') {
       const op = ['equals', 'in', 'exists'].find((k) => k in node.if)
       const opVal = op === 'in' ? `[${node.if.in.join(', ')}]` : JSON.stringify(node.if[op])
@@ -273,6 +277,7 @@ if (sub === 'run') {
         tools: node.tools || null,
         permissionMode: node['permission-mode'] || null,
         useWorktree: !!opts.useWorktree,
+        abortSignal: opts.signal || null,
         taskAttrs: {
           ...userAttrs,
           pipeline_run_id: runId,
@@ -311,28 +316,74 @@ if (sub === 'run') {
     } else if (node.type === 'parallel') {
       // V3.3.a: branches each get their own worktree under
       // `.artel/.worktrees/<branch>/` so working-tree state doesn't
-      // race across siblings. Promise.all gives true wall-clock
-      // concurrency — N branches finish in roughly max(t_i) instead
-      // of sum(t_i). One branch throwing aborts the parallel block;
-      // the others' settled results are still collected (they ran
-      // in their own worktrees, no rollback semantics).
-      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${node.join || 'all-complete'} ${dim('(concurrent worktrees)')}`)
-      const settled = await Promise.all(
-        node.branches.map((branchId) =>
-          runDispatchNode(branchId, nodeId, { useWorktree: true })),
+      // race across siblings.
+      // V3.3.c: progressive quorum collection. For all-complete the
+      // walker waits for every branch (Promise.all-equivalent). For
+      // any-complete (k=1) and k-of-n (k=node.k), each branch gets an
+      // AbortController; once `k` successes are observed the walker
+      // aborts the rest, then waits for them to settle as
+      // `cancelled`. Cancelled branches are excluded from the
+      // worst-of-children aggregate.
+      const join = node.join || 'all-complete'
+      const quorum = quorumOf(node)
+      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${join}${join === 'k-of-n' ? ` k=${node.k}` : ''} ${dim('(concurrent worktrees)')}`)
+
+      const aborts = node.branches.map(() => new AbortController())
+      const promises = node.branches.map((branchId, i) =>
+        runDispatchNode(branchId, nodeId, { useWorktree: true, signal: aborts[i].signal })
+          .then((result) => ({ index: i, branchId, result })),
       )
-      const errored = settled.find((r) => r.__error)
-      if (errored) {
-        abortReason = `parallel '${nodeId}': branch '${errored.node}' threw: ${errored.__error}`
+      const settledByIndex = new Array(node.branches.length).fill(null)
+      const remaining = new Set(promises)
+      let succeeded = 0
+      let parallelAbort = null
+
+      while (remaining.size && succeeded < quorum) {
+        const r = await Promise.race(remaining)
+        // Find the original promise for this resolution to delete
+        // from `remaining` (Promise.race resolves to value, not
+        // promise — so we look up by index).
+        for (const p of remaining) {
+          if (promises[r.index] === p) { remaining.delete(p); break }
+        }
+        settledByIndex[r.index] = r.result
+        if (r.result.__error) {
+          parallelAbort = `branch '${r.branchId}' threw: ${r.result.__error}`
+          break
+        }
+        console.error(`  ${dim('branch')} ${cyan(r.branchId)} ${dim('disposition:')} ${r.result.disposition}`)
+        if (r.result.disposition === 'success') succeeded++
+      }
+
+      if (parallelAbort) {
+        // One branch threw — cancel siblings + bail.
+        for (let i = 0; i < node.branches.length; i++) {
+          if (settledByIndex[i] === null) aborts[i].abort()
+        }
+        await Promise.allSettled([...remaining])
+        abortReason = `parallel '${nodeId}': ${parallelAbort}`
         finalState = 'failed'
         break
       }
-      const dispositions = settled.map((r) => r.disposition)
-      for (let i = 0; i < node.branches.length; i++) {
-        console.error(`  ${dim('branch')} ${cyan(node.branches[i])} ${dim('disposition:')} ${dispositions[i]}`)
+
+      // Quorum met (or all settled). If anyone's still in flight,
+      // cancel them and collect their (cancelled) results.
+      if (remaining.size > 0) {
+        for (let i = 0; i < node.branches.length; i++) {
+          if (settledByIndex[i] === null) aborts[i].abort()
+        }
+        const trailing = await Promise.allSettled([...remaining])
+        for (const t of trailing) {
+          if (t.status !== 'fulfilled') continue
+          const { index, result } = t.value
+          settledByIndex[index] = result
+          console.error(`  ${dim('branch')} ${cyan(node.branches[index])} ${dim('disposition:')} ${result.disposition}${result.disposition === 'cancelled' ? dim(' (cancelled — quorum met)') : ''}`)
+        }
       }
-      stepDisposition = aggregateDisposition(dispositions)
-      console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + (node.join || 'all-complete') + ' of ' + dispositions.length + ')')}`)
+
+      const dispositions = settledByIndex.map((r) => (r ? r.disposition : 'cancelled'))
+      stepDisposition = aggregateForJoin(dispositions, join, node.k)
+      console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + join + ': ' + succeeded + '/' + quorum + ' succeeded, ' + dispositions.length + ' branches)')}`)
     } else if (node.type === 'condition') {
       // V3.2.b — pure routing. Predicate evaluated against the run's
       // task attrs (user-supplied + pipeline-injected ids). No

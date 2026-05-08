@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.3)** | `[done]` | Cumulative through V3.3.b: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with `equals`/`in`/`exists` predicates over dotted attrs paths (V3.2.b), git-worktree isolation + concurrent `parallel` via `Promise.all` (V3.3.a), `artel sweep` worktree prune cross-checked against `git worktree list` (V3.3.b). 4 node types: `dispatch` / `parallel` / `condition` / `terminal`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` (workload). CLI: `register` / `list` / `show` / `run`. Walker honours sticky `In progress` / `Recently done` semantics from V2. Reachability check follows parallel branches AND condition then/else. 435 tests green (~90 across V3 — 55 unit on parser/validator/aggregate/predicate/worktree + 35 e2e on register/list/show/run/parallel/condition/worktree/sweep). V3.3.c+ open: `any-complete` / `k-of-n` joins (now feasible with worktree process isolation, needs cancellation design), `pause` / `signal` / `handler` / `subpipeline`, prompt template substitution. |
+| V3 | **Pipelines (V3.1–V3.4.a)** | `[done]` | Cumulative through V3.4.a: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing with `equals`/`in`/`exists` predicates over dotted attrs paths (V3.2.b), git-worktree isolation + concurrent `parallel` via `Promise.all` (V3.3.a), `artel sweep` worktree prune cross-checked against `git worktree list` (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation via `AbortController` + SIGTERM→SIGKILL grace (V3.3.c), `artel pipeline runs` / `status` observability over `events.jsonl` (V3.4.a). 4 node types: `dispatch` / `parallel` / `condition` / `terminal`. Schema lives at `.artel/pipelines/<id>.json`; events `pipeline.registered` / `pipeline_run.started` / `pipeline_run.ended` (workload). CLI: `register` / `list` / `show` / `run` / `runs` / `status`. Walker honours sticky `In progress` / `Recently done` semantics from V2. Reachability check follows parallel branches AND condition then/else. New `cancelled` disposition distinct from `error` / `timeout` / `parked`; excluded from worst-of-children aggregate. 470 tests green (~110 across V3 — 70 unit + 40 e2e covering parser/validator/aggregate/predicate/worktree/quorum/cancellation + register/list/show/run/parallel/condition/worktree/sweep/runs/status/race). V3.3+ open: `pause` / `signal` / `handler` / `subpipeline`, prompt template substitution. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,33 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-08** — V3.3.c — `any-complete` / `k-of-n` parallel joins
+  with cancellation. `engine/util/pipelines.mjs` extends
+  `VALID_JOIN_POLICIES` to `{all-complete, any-complete, k-of-n}`;
+  k-of-n requires integer `k` in `[1, branches.length]` (validated at
+  register). New helpers `quorumOf(node)` (1 for any-complete, `k`
+  for k-of-n, `branches.length` for all-complete) and
+  `aggregateForJoin(dispositions, join, k)` (success once quorum is
+  met regardless of trailing branches; otherwise falls through to
+  `aggregateDisposition` worst-of-children). `aggregateDisposition`
+  itself now filters out `cancelled` first — a cancelled branch
+  reflects intentional teardown, not a real outcome.
+  `engine/core/dispatch_lifecycle.mjs` accepts an `abortSignal`
+  option; on abort sends SIGTERM, then SIGKILL after the existing
+  termination-grace window. New `disposition: 'cancelled'` distinct
+  from error / timeout / parked. Worktree cleanup treats `cancelled`
+  like `success` (intentional, not forensic). `engine/cli/pipeline.mjs`
+  walker switches the parallel block from `Promise.all` to
+  progressive quorum collection: each branch gets its own
+  `AbortController`; `Promise.race` resolves them with index +
+  branchId so the walker can back-map; once `succeeded >= quorum` it
+  aborts siblings + collects trailing settles via `Promise.allSettled`.
+  `show` renders `k=` for k-of-n. 470 tests green (17 new — 13 unit
+  on join validator / quorumOf / aggregateForJoin / cancelled
+  exclusion + 4 e2e on first-success-wins / k=2-of-3 / all-fail
+  fallthrough / show k-of-n; e2e timing-tolerant — accept either
+  `cancelled` or `error` per branch but assert at least one was
+  actually cancelled).
 - **2026-05-04** — V3.4.a — pipeline run observability.
   Two read-side helpers in `engine/util/pipelines.mjs`:
   `listPipelineRuns(projectDir, { limit, pipelineId })` joins

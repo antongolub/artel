@@ -303,6 +303,7 @@ export async function dispatchLifecycle(
     identity = null,
     useWorktree = false,
     keepWorktreeOnSuccess = false,
+    abortSignal = null,
     platformDir = DEFAULT_PLATFORM_DIR,
     projectDir = projectDirOf(),
     projectArtelDir = projectArtelDirOf(projectDir),
@@ -513,17 +514,23 @@ export async function dispatchLifecycle(
   return await new Promise((resolve) => {
     let settled = false
     let timedOut = false
+    let cancelled = false
     let timeoutAt = null
     let graceAt = null
+    let cancelAt = null
     let finalTimeoutSignal = null
     let timeoutHandle = null
     let graceHandle = null
     let heartbeatHandle = null
+    let abortHandler = null
 
     const cleanupTimers = () => {
       if (timeoutHandle) clearTimeout(timeoutHandle)
       if (graceHandle) clearTimeout(graceHandle)
       if (heartbeatHandle) clearInterval(heartbeatHandle)
+      if (abortSignal && abortHandler) {
+        try { abortSignal.removeEventListener('abort', abortHandler) } catch {}
+      }
     }
 
     const maybeCaptureCodexSession = () => {
@@ -568,7 +575,13 @@ export async function dispatchLifecycle(
       let disposition = 'error'
       let parked = null
       let timeout = null
-      if (timedOut) {
+      if (cancelled) {
+        // V3.3.c — pipeline parallel cancelled this branch via
+        // AbortSignal (quorum already met or impossible). Distinct
+        // from timeout: cancellation was intentional, not a failure
+        // mode worth surfacing as parked/error.
+        disposition = 'cancelled'
+      } else if (timedOut) {
         disposition = 'timeout'
         timeout = {
           timeoutMs: effectiveTimeoutMs,
@@ -610,7 +623,12 @@ export async function dispatchLifecycle(
       // `--keep-worktree-on-success` overrides the success branch when
       // someone wants to inspect even successful runs.
       if (worktree) {
-        const keep = keepWorktreeOnSuccess || disposition !== 'success'
+        // V3.3.c — `cancelled` is treated like `success` for cleanup:
+        // the cancellation was intentional (quorum met / sibling won
+        // the race), not a failure to investigate. `parked`/`timeout`/
+        // `error` keep the worktree by default for forensics.
+        const cleanupOk = disposition === 'success' || disposition === 'cancelled'
+        const keep = keepWorktreeOnSuccess || !cleanupOk
         if (keep) {
           log(`spawn: worktree kept at ${worktree} (disposition=${disposition})`)
         } else {
@@ -665,6 +683,30 @@ export async function dispatchLifecycle(
         } catch {}
       }, effectiveGraceMs)
     }, effectiveTimeoutMs)
+
+    // V3.3.c — external cancellation via AbortSignal. Used by
+    // pipeline parallel quorum joins (`any-complete` / `k-of-n`) to
+    // stop sibling branches once enough have succeeded. Same SIGTERM
+    // → SIGKILL grace as timeout, but disposition is 'cancelled'.
+    if (abortSignal) {
+      const triggerAbort = () => {
+        if (settled || cancelled) return
+        cancelled = true
+        cancelAt = new Date().toISOString()
+        log(`spawn: cancelled (AbortSignal); sending SIGTERM to ${child.pid}`)
+        try { child.kill('SIGTERM') } catch {}
+        graceHandle = graceHandle || setTimeout(() => {
+          if (settled) return
+          log(`spawn: cancel grace ${effectiveGraceMs}ms elapsed for ${task}; sending SIGKILL to ${child.pid}`)
+          try { child.kill('SIGKILL') } catch {}
+        }, effectiveGraceMs)
+      }
+      if (abortSignal.aborted) triggerAbort()
+      else {
+        abortHandler = triggerAbort
+        abortSignal.addEventListener('abort', abortHandler, { once: true })
+      }
+    }
 
     child.on('exit', (code, signal) => settle({ code, signal }))
     child.on('error', (error) => {

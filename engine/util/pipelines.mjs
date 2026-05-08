@@ -60,9 +60,13 @@ const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
 export const VALID_NODE_TYPES = new Set(['dispatch', 'terminal', 'parallel', 'condition'])
 
-// V3.2.a: only all-complete join. any-complete + k-of-n deferred —
-// they need cancellation semantics that depend on V3.3 worktrees.
-export const VALID_JOIN_POLICIES = new Set(['all-complete'])
+// V3.3.c — three join policies. all-complete waits for every branch;
+// any-complete returns as soon as one succeeds (cancels the rest);
+// k-of-n returns as soon as `node.k` succeed (cancels the rest).
+// Cancellation rides on AbortSignal plumbed through dispatchLifecycle
+// (V3.3.c) — branches each run in their own worktree, so cancelling
+// is just SIGTERM + worktree remove, no shared-state cleanup.
+export const VALID_JOIN_POLICIES = new Set(['all-complete', 'any-complete', 'k-of-n'])
 
 // V3.2.b condition predicates. Schema:
 //   { "attr": "key.path", "equals": <any> }
@@ -154,7 +158,13 @@ export const validatePipeline = (def, source = '<inline>') => {
       }
       const join = node.join || 'all-complete'
       if (!VALID_JOIN_POLICIES.has(join)) {
-        throw new Error(`${source}: parallel node '${nid}' has invalid join '${join}' (V3.2.a: ${[...VALID_JOIN_POLICIES].join(' | ')})`)
+        throw new Error(`${source}: parallel node '${nid}' has invalid join '${join}' (valid: ${[...VALID_JOIN_POLICIES].join(' | ')})`)
+      }
+      // V3.3.c — k-of-n requires `k` integer in [1, branches.length].
+      if (join === 'k-of-n') {
+        if (!Number.isInteger(node.k) || node.k < 1 || node.k > node.branches.length) {
+          throw new Error(`${source}: parallel node '${nid}' join=k-of-n requires .k integer in [1, ${node.branches.length}] (got: ${node.k})`)
+        }
       }
       const seen = new Set()
       for (const branchId of node.branches) {
@@ -276,25 +286,47 @@ export const evaluatePredicate = (predicate, attrs) => {
   return false
 }
 
-// Aggregate disposition for a parallel join. V3.2.a only supports
-// `all-complete`. Worst-of-the-children rule:
+// Aggregate disposition for a parallel join.
+// V3.2.a (all-complete): worst-of-children rule —
 //   any error → 'error'
 //   else any timeout → 'timeout'
 //   else any parked → 'parked'
-//   else any unknown → that string (last seen)
 //   else (all success) → 'success'
-// Wildcard `*` edges from the parallel node still match any of these.
+//   else first non-success / non-cancelled (driver-specific oddities)
+// `cancelled` (V3.3.c) is excluded — cancellation isn't an outcome
+// the join cares about; it just means the branch was stopped early
+// because quorum was already met.
+// Wildcard `*` edges from the parallel node still match the result.
 const SEVERITY = ['error', 'timeout', 'parked']
 
 export const aggregateDisposition = (dispositions) => {
-  if (!dispositions.length) return 'success'
+  const meaningful = dispositions.filter((d) => d !== 'cancelled')
+  if (!meaningful.length) return 'success'
   for (const sev of SEVERITY) {
-    if (dispositions.includes(sev)) return sev
+    if (meaningful.includes(sev)) return sev
   }
-  // All success, or all unknowns. Return success when all match,
-  // otherwise the first non-success (covers driver-specific oddities).
-  if (dispositions.every((d) => d === 'success')) return 'success'
-  return dispositions.find((d) => d !== 'success') || 'success'
+  if (meaningful.every((d) => d === 'success')) return 'success'
+  return meaningful.find((d) => d !== 'success') || 'success'
+}
+
+// V3.3.c — quorum-aware aggregate. Used by the pipeline walker after
+// it observes branch results. Returns 'success' when ≥ k branches
+// succeeded (regardless of how the rest landed); otherwise falls back
+// to the worst-of-children rule on the non-cancelled subset.
+export const aggregateForJoin = (dispositions, join, k = null) => {
+  if (join === 'all-complete') return aggregateDisposition(dispositions)
+  const required = join === 'any-complete' ? 1 : join === 'k-of-n' ? (k || 0) : 0
+  const successes = dispositions.filter((d) => d === 'success').length
+  if (successes >= required) return 'success'
+  return aggregateDisposition(dispositions)
+}
+
+// Quorum size for a parallel node — caller already validated shape.
+export const quorumOf = (parallelNode) => {
+  const join = parallelNode.join || 'all-complete'
+  if (join === 'any-complete') return 1
+  if (join === 'k-of-n') return parallelNode.k
+  return parallelNode.branches.length // all-complete
 }
 
 export const loadPipelineFile = (path) => {

@@ -665,10 +665,12 @@ so events.jsonl reconstructs the chain.
 `branches` must reference existing **dispatch** nodes (V3.2.a
 restriction; nested parallel / condition / subpipeline land in
 V3.2.b once the walker is recursive). `join` defaults to
-`all-complete`. Self-references and duplicate branches rejected at
-register time.
+`all-complete`; V3.3.c adds `any-complete` and `k-of-n` (see
+§11.6). Self-references and duplicate branches rejected at register
+time.
 
 **Aggregate disposition** (`aggregateDisposition`):
+- `cancelled` branches filtered out first (V3.3.c — see §11.6)
 - any branch → `error` ⇒ aggregate `error`
 - else any branch → `timeout` ⇒ aggregate `timeout`
 - else any branch → `parked` ⇒ aggregate `parked`
@@ -677,7 +679,10 @@ register time.
 
 The aggregate matches against the parallel node's outgoing edges
 (`on_disposition: success` / `*` etc.) — same machinery as a regular
-dispatch.
+dispatch. For `any-complete` / `k-of-n` joins, the wrapper
+`aggregateForJoin` short-circuits to `success` once the quorum is
+met regardless of trailing branches; otherwise it falls through to
+the rule above. See §11.6.
 
 **Concurrency (V3.3.a).** Each branch dispatches in its own
 `.artel/.worktrees/<branch>/` checkout via git worktrees, and the
@@ -821,10 +826,89 @@ Successful dispatches already remove their worktree on settle (see
 §11.4) — sweep catches the leftovers from parked / timeout /
 errored runs that were kept for forensics.
 
-### 11.6 Open
+### 11.6 V3.3.c — any-complete / k-of-n joins (landed)
 
-- `parallel` extra joins: `any-complete`, `k-of-n` — now feasible
-  with V3.3.a process isolation, needs cancellation design
+Two extra join policies on `parallel`, both with cancellation of
+trailing siblings once the quorum is met.
+
+**Definitions:**
+
+```json
+{ "type": "parallel", "branches": ["a", "b", "c"], "join": "any-complete" }
+
+{ "type": "parallel", "branches": ["a", "b", "c"], "join": "k-of-n", "k": 2 }
+```
+
+**Validation** (register-time): `k-of-n` requires integer `k` in
+`[1, branches.length]`. Out-of-range or non-integer → registration
+fails with a precise message. `any-complete` is shorthand for
+`k-of-n` with `k = 1` — both share the same walker path.
+
+**Walker behavior** (`engine/cli/pipeline.mjs`):
+
+1. Each branch gets its own `AbortController`. Branches are
+   dispatched concurrently in worktrees (V3.3.a).
+2. The walker iterates `Promise.race` over the in-flight set,
+   counting `disposition === 'success'`. Each resolution is tagged
+   with `{ index, branchId, result }` so it can be back-mapped to
+   the right promise.
+3. As soon as `succeeded >= quorum` (where `quorum` is
+   `quorumOf(node)` — 1 for any-complete, `k` for k-of-n,
+   `branches.length` for all-complete), the walker aborts every
+   still-running sibling.
+4. Aborted branches receive SIGTERM (then SIGKILL after the
+   existing termination grace) and settle with the new
+   `disposition: 'cancelled'`. `Promise.allSettled` collects the
+   trailing results.
+
+If a branch *throws* (i.e. the dispatch helper itself returned
+`__error`, not a settled disposition), the walker cancels siblings
+and bails out as `failed` regardless of join policy.
+
+**Aggregate disposition** (`aggregateForJoin(dispositions, join, k)`):
+
+- For `all-complete`: identical to V3.2.a (worst-of-children).
+- For `any-complete` / `k-of-n`: if `successes >= quorum` ⇒
+  `success`. Otherwise fall through to the worst-of-children rule
+  on remaining branches.
+- `aggregateDisposition` filters out `cancelled` before the
+  worst-of-children check — a cancelled branch was stopped early
+  because quorum was met (or impossible); it isn't a real outcome.
+
+So `[success, cancelled, cancelled]` aggregates to `success`. And
+`[error, cancelled, cancelled]` (one branch errored, the other two
+were cancelled because the threshold was now unreachable)
+aggregates to `error` — the first non-success outcome wins after
+filtering.
+
+**Cancelled disposition.** New value alongside `success` / `error`
+/ `timeout` / `parked`. No schema reservation needed — the event
+validator only checks event `type` against reserved prefixes, not
+`disposition` payload values. Worktree cleanup treats `cancelled`
+like `success`: removed on settle, not kept for forensics
+(intentional teardown, not a failure to investigate).
+
+**Cancellation timing.**
+`dispatchLifecycle({ abortSignal })`:
+
+1. On abort: send SIGTERM to the child immediately.
+2. Reuse the existing `effectiveGraceMs` window (default same as
+   non-cancellation graceful shutdown) to let the child finish.
+3. If still alive, send SIGKILL.
+4. Whichever exit comes first sets `disposition = 'cancelled'`.
+
+If the abort fires before the child even starts, we still flow
+through the cleanup path — the child gets killed at startup and
+the dispatch ends as `cancelled`.
+
+**Edge selection.** The aggregate flows into the walker's
+`resolveNext` like any other disposition. A `cancelled` aggregate
+is unusual — it would only happen if the walker itself was
+cancelled (out of scope today), but the wildcard `on_disposition: '*'`
+edge would catch it.
+
+### 11.7 Open
+
 - `pause` — return-of-control, waits on signal
 - `handler` — built-in (`builtin.git_squash`, etc.)
 - `subpipeline` — composition

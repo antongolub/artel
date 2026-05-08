@@ -198,8 +198,8 @@ describe('parallel node validation (V3.2.a)', () => {
 
   it('rejects unknown join policy', () => {
     const def = withParallel()
-    def.nodes.fan = { type: 'parallel', branches: ['a', 'b'], join: 'k-of-n' }
-    expect(() => validatePipeline(def)).toThrow(/invalid join 'k-of-n'/)
+    def.nodes.fan = { type: 'parallel', branches: ['a', 'b'], join: 'frob-of-n' }
+    expect(() => validatePipeline(def)).toThrow(/invalid join 'frob-of-n'/)
   })
 
   it('rejects non-dispatch branches (V3.2.a restriction)', () => {
@@ -332,6 +332,95 @@ describe('evaluatePredicate (V3.2.b)', () => {
   })
 })
 
+describe('parallel join (V3.3.c) — any-complete / k-of-n', () => {
+  const withJoin = (join: string, extra: object = {}) => ({
+    id: 'race',
+    version: 1,
+    entry: 'fan',
+    nodes: {
+      fan: { type: 'parallel', branches: ['a', 'b', 'c'], join, ...extra },
+      a: { type: 'dispatch', role: 'cold-reader', prompt: 'a' },
+      b: { type: 'dispatch', role: 'adversary', prompt: 'b' },
+      c: { type: 'dispatch', role: 'maintainer', prompt: 'c' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'fan', on_disposition: 'success', to: 'done' },
+      { from: 'fan', on_disposition: '*', to: 'fail' },
+    ],
+  })
+
+  it('accepts any-complete', () => {
+    expect(() => validatePipeline(withJoin('any-complete'))).not.toThrow()
+  })
+
+  it('accepts k-of-n with valid k', () => {
+    expect(() => validatePipeline(withJoin('k-of-n', { k: 2 }))).not.toThrow()
+  })
+
+  it('rejects k-of-n without k', () => {
+    expect(() => validatePipeline(withJoin('k-of-n')))
+      .toThrow(/k-of-n requires \.k integer in \[1, 3\]/)
+  })
+
+  it('rejects k-of-n with k outside [1, branches.length]', () => {
+    expect(() => validatePipeline(withJoin('k-of-n', { k: 0 })))
+      .toThrow(/integer in \[1, 3\]/)
+    expect(() => validatePipeline(withJoin('k-of-n', { k: 4 })))
+      .toThrow(/integer in \[1, 3\]/)
+    expect(() => validatePipeline(withJoin('k-of-n', { k: 1.5 })))
+      .toThrow(/integer in \[1, 3\]/)
+  })
+})
+
+describe('quorumOf (V3.3.c)', () => {
+  const { quorumOf } = pipelinesModule as { quorumOf: (n: { branches: string[]; join?: string; k?: number }) => number }
+
+  it('all-complete → branches.length', () => {
+    expect(quorumOf({ branches: ['a', 'b', 'c'] })).toBe(3)
+    expect(quorumOf({ branches: ['a', 'b'], join: 'all-complete' })).toBe(2)
+  })
+
+  it('any-complete → 1', () => {
+    expect(quorumOf({ branches: ['a', 'b', 'c'], join: 'any-complete' })).toBe(1)
+  })
+
+  it('k-of-n → node.k', () => {
+    expect(quorumOf({ branches: ['a', 'b', 'c'], join: 'k-of-n', k: 2 })).toBe(2)
+  })
+})
+
+describe('aggregateForJoin (V3.3.c)', () => {
+  const { aggregateForJoin } = pipelinesModule as {
+    aggregateForJoin: (xs: string[], join: string, k?: number | null) => string
+  }
+
+  it('all-complete delegates to worst-of-children', () => {
+    expect(aggregateForJoin(['success', 'success', 'success'], 'all-complete')).toBe('success')
+    expect(aggregateForJoin(['success', 'error', 'success'], 'all-complete')).toBe('error')
+  })
+
+  it('any-complete returns success when ≥1 branch succeeded', () => {
+    expect(aggregateForJoin(['success', 'cancelled', 'cancelled'], 'any-complete')).toBe('success')
+    expect(aggregateForJoin(['error', 'success', 'cancelled'], 'any-complete')).toBe('success')
+  })
+
+  it('any-complete falls back to worst when no success', () => {
+    expect(aggregateForJoin(['error', 'parked', 'timeout'], 'any-complete')).toBe('error')
+    expect(aggregateForJoin(['parked', 'parked', 'parked'], 'any-complete')).toBe('parked')
+  })
+
+  it('k-of-n returns success when ≥k branches succeeded', () => {
+    expect(aggregateForJoin(['success', 'success', 'cancelled'], 'k-of-n', 2)).toBe('success')
+    expect(aggregateForJoin(['success', 'error', 'success'], 'k-of-n', 2)).toBe('success')
+  })
+
+  it('k-of-n falls back to worst when fewer than k succeeded', () => {
+    expect(aggregateForJoin(['success', 'error', 'error'], 'k-of-n', 2)).toBe('error')
+  })
+})
+
 describe('aggregateDisposition (V3.2.a)', () => {
   const { aggregateDisposition } = pipelinesModule as { aggregateDisposition: (xs: string[]) => string }
 
@@ -355,6 +444,12 @@ describe('aggregateDisposition (V3.2.a)', () => {
 
   it('unknown disposition: returns first non-success', () => {
     expect(aggregateDisposition(['success', 'weirdo', 'success'])).toBe('weirdo')
+  })
+
+  it('V3.3.c — cancelled is excluded (not a real outcome)', () => {
+    expect(aggregateDisposition(['success', 'cancelled', 'cancelled'])).toBe('success')
+    expect(aggregateDisposition(['cancelled', 'cancelled'])).toBe('success')
+    expect(aggregateDisposition(['error', 'cancelled'])).toBe('error')
   })
 })
 
