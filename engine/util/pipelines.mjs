@@ -56,6 +56,21 @@ export const pipelinesDir = (projectDir) =>
 export const pipelinePath = (projectDir, id) =>
   join(pipelinesDir(projectDir), `${id}.json`)
 
+// V3.8 — operator-cancel sentinel directory. `artel pipeline cancel
+// <run-id>` writes an empty file at `.artel/.pipeline-cancels/<run-id>`;
+// the running walker polls for it and aborts on detection. Dot-prefix
+// matches the rest of the runtime-state convention (`.dispatches/`,
+// `.sessions/`, `.worktrees/`). One file per cancelled run; presence
+// is the signal — no payload. Stale sentinels (run never picked up)
+// can be pruned via `artel sweep` (deferred).
+const PIPELINE_CANCELS_DIR_REL = ['.artel', '.pipeline-cancels']
+
+export const pipelineCancelsDir = (projectDir) =>
+  join(projectDir, ...PIPELINE_CANCELS_DIR_REL)
+
+export const pipelineCancelPath = (projectDir, runId) =>
+  join(pipelineCancelsDir(projectDir), runId)
+
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
 export const VALID_NODE_TYPES = new Set([

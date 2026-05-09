@@ -1599,3 +1599,110 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(ended.final_state).toBe('completed')
   })
 })
+
+describe('artel pipeline cancel — operator cancel of in-flight run (V3.8)', () => {
+  // Concurrent test: spawn the run async, drop the sentinel, await
+  // the run's exit. We simulate the operator's "cancel from another
+  // terminal" workflow without needing two interactive shells.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawn: nodeSpawn } = require('node:child_process') as typeof import('node:child_process')
+
+  it('cancel CLI rejects unknown run id', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', 'no-such-run'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/no run matches/)
+  })
+
+  it('cancel CLI rejects already-terminal run', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'q', version: 1, entry: 'h',
+      nodes: {
+        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'h', on_disposition: 'success', to: 'done' }],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    // Run completes synchronously (true exits 0).
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'q'])
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', ended.pipeline_run_id])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/already terminal \(final_state=completed\)/)
+  })
+
+  it('cancel mid-flight: long-running handler aborts, run ends as aborted', async () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'longish', version: 1, entry: 'h',
+      nodes: {
+        // Sleep long enough for the cancel CLI to land. SIGTERM
+        // handler exits non-zero so disposition becomes `cancelled`
+        // (V3.7.e cancel path).
+        h: {
+          type: 'handler', handler: 'builtin.exec',
+          cmd: 'trap "exit 143" TERM; sleep 30',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'h', on_disposition: 'success', to: 'done' },
+        { from: 'h', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Spawn the run asynchronously so we can issue cancel from this
+    // process. stdio: 'pipe' avoids cluttering test output; we
+    // collect stderr for diagnostics.
+    const proc = nodeSpawn('node', ['engine/cli/pipeline.mjs', 'run', 'longish'],
+      { cwd: root, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (d) => { stderr += d.toString() })
+
+    // Poll for pipeline_run.started so we know the run_id is on disk.
+    const eventsPath = join(root, '.artel', 'events.jsonl')
+    const waitForStart = async () => {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        if (existsSync(eventsPath)) {
+          const evts = events(root)
+          const started = evts.find((e) => e.type === 'pipeline_run.started')
+          if (started) return started.pipeline_run_id
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error(`run never started; stderr was:\n${stderr}`)
+    }
+    const runId = await waitForStart()
+
+    // Issue cancel. Walker polls every 500ms, so allow up to ~1s
+    // for it to pick up the sentinel + cascade abort.
+    const cancelR = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', runId.slice(-12)])
+    expect(cancelR.status).toBe(0)
+    expect(cancelR.stderr).toMatch(/cancel signal sent for run/)
+
+    // Wait for the run process to exit.
+    const exitCode = await new Promise<number>((resolve) => {
+      proc.on('exit', (code) => resolve(code ?? -1))
+    })
+    expect(exitCode).not.toBe(0)
+
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('aborted')
+    expect(ended.abort_reason).toMatch(/cancelled by operator/)
+    expect(ended.pipeline_run_id).toBe(runId)
+  }, 30000)
+})

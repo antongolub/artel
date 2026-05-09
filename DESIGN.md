@@ -1138,7 +1138,70 @@ duration_ms / timeout_ms / error). Steps interleave by
 the cmd in the task slot and builtin name in the role/engine
 slots so the column alignment with dispatches is preserved.
 
-### 11.9 Open
+### 11.9 V3.8 — operator cancel of in-flight run (landed)
+
+`artel pipeline cancel <run-id-or-fragment>` aborts a run from a
+separate process/terminal. Sentinel-file design: cross-platform,
+no PID/perms coupling, future-friendly to cross-machine setups
+once federation lands.
+
+**CLI:**
+
+```bash
+artel pipeline cancel 0193abc          # full UUID
+artel pipeline cancel abc              # trailing fragment (matches recent runs)
+```
+
+**Mechanism:**
+
+1. `cancel` resolves the fragment to a full run_id via
+   `listPipelineRuns` (same logic as `status`).
+2. Refuses to cancel a run that's already terminal (final_state
+   set) — leaves no useful effect.
+3. Writes an empty-file sentinel at
+   `.artel/.pipeline-cancels/<run-id>` (presence = signal; no
+   payload).
+4. Walker polls the sentinel path every 500ms via
+   `setInterval(...).unref()`. On detection: `runAbort.abort()`,
+   which cascades to:
+   - Linear dispatch / handler steps via `opts.signal` plumbing
+   - Every per-branch parallel controller via an `abort` event
+     listener that fires all of them
+5. Walker emits `pipeline_run.ended` with `final_state: 'aborted'`,
+   `abort_reason: 'cancelled by operator: <fragment>'`. Operator
+   cancel beats step disposition at the run level — even if every
+   branch happened to succeed before the cascade reached them, the
+   run is still `aborted`.
+
+**Cancel cascade timing.** Walker's poll cadence (500ms) is the
+upper bound on cancel detection latency. From there, cancellation
+propagates through existing V3.3.c / V3.7.e plumbing: SIGTERM,
+5s grace window, SIGKILL backstop. Total worst-case from cancel
+CLI to walker exit ≈ 5.5s. Operators see the sentinel write
+acknowledged immediately; the actual run process exits when its
+in-flight steps settle.
+
+**Why polling not PID/SIGTERM.** PID-based cancel would require:
+- Walker writes its PID to a sidecar at start
+- Cancel CLI reads the PID and `kill -TERM <pid>`
+- Walker installs a SIGTERM handler that drives the abort dance
+
+Trade-offs against the sentinel approach: PID is faster (no
+poll), but assumes same-machine execution and matching uid; the
+SIGTERM handler also has to coexist with whatever signal the
+parent shell sends (Ctrl+C delivers SIGINT, not SIGTERM, but
+SIGTERM from a separate process could clash with shell-driven
+shutdown). Sentinel polling is platform-agnostic and the latency
+budget (≤500ms detect + V3.3.c grace) is already what the
+operator pays for any cancel.
+
+**Sentinel cleanup.** The walker doesn't remove the sentinel —
+it's left as forensic evidence (the existence proves an operator
+cancel happened, even if events.jsonl gets pruned). `artel sweep`
+will prune stale sentinels (files for terminated run_ids) once
+that lands. Same run_id can't collide because UUIDv7.
+
+### 11.10 Open
 
 - More handler builtins: `builtin.git_squash`, `builtin.git_merge`
   (V3.7.f+)
@@ -1149,6 +1212,8 @@ slots so the column alignment with dispatches is preserved.
 - `builtin.set_attr` in parallel branches with explicit merge
   contract (e.g. last-write-wins ordered by branch index, or
   per-branch namespacing)
+- `artel sweep` pruning stale `.artel/.pipeline-cancels/`
+  sentinels (presence after their run terminated)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
 - Branch-level timeout budgets (cap each branch independently of

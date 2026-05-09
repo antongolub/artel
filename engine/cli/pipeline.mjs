@@ -25,6 +25,8 @@ import {
   listPipelineFiles,
   listPipelineRuns,
   loadPipelineFile,
+  pipelineCancelPath,
+  pipelineCancelsDir,
   pipelinePath,
   pipelinesDir,
   pipelineRunDetail,
@@ -82,7 +84,12 @@ Usage: artel pipeline <subcommand>
                               past pipeline runs from events.jsonl, newest
                                 first
   status <run-id> [--json]    drilldown for one run (summary + per-node
-                                timeline)`)
+                                timeline)
+  cancel <run-id>             signal an in-flight run to abort; walker
+                                picks up the sentinel at next step
+                                boundary, aborts in-flight branches,
+                                emits pipeline_run.ended (final_state:
+                                aborted)`)
   process.exit(code)
 }
 
@@ -284,6 +291,26 @@ if (sub === 'run') {
   let finalState = null
   let abortReason = null
 
+  // V3.8 — operator cancel watcher. The walker creates a master
+  // AbortController and polls for the sentinel file
+  // `.artel/.pipeline-cancels/<run-id>`; on detection it aborts the
+  // master controller, which cascades to in-flight dispatch +
+  // handler.exec branches via their abortSignal plumbing. Polling
+  // (rather than fs.watch) for cross-platform reliability; 500ms
+  // is responsive enough for an interactive cancel without burning
+  // CPU.
+  const runAbort = new AbortController()
+  const sentinelPath = pipelineCancelPath(PROJECT_DIR, runId)
+  let sentinelFragment = null
+  const cancelWatcher = setInterval(() => {
+    if (existsSync(sentinelPath) && !runAbort.signal.aborted) {
+      sentinelFragment = runId.slice(-12)
+      runAbort.abort()
+    }
+  }, 500)
+  // unref so a stuck watcher can't keep node alive past walker exit
+  cancelWatcher.unref?.()
+
   // V3.2.a — extracted dispatch helper used by both the linear walker
   // and the parallel fan-out path. Wraps dispatchLifecycle with
   // pipeline-aware taskAttrs + slug generation; propagates throws as
@@ -455,9 +482,21 @@ if (sub === 'run') {
       break
     }
 
+    // V3.8 — operator cancel can fire between steps; check before
+    // committing to a new step.
+    if (runAbort.signal.aborted) {
+      abortReason = `cancelled by operator: ${sentinelFragment}`
+      finalState = 'aborted'
+      break
+    }
+
     let stepDisposition = null
     if (node.type === 'dispatch') {
-      const result = await runDispatchNode(nodeId)
+      // V3.8 — pass runAbort.signal so a cancel during the dispatch
+      // (which can be long-lived) terminates the child via V3.3.c's
+      // SIGTERM→SIGKILL plumbing. Linear dispatch was previously
+      // signal-less; cancel only took effect at next step boundary.
+      const result = await runDispatchNode(nodeId, null, { signal: runAbort.signal })
       if (result.__error) {
         abortReason = `dispatch threw at node '${nodeId}': ${result.__error}`
         finalState = 'failed'
@@ -480,6 +519,21 @@ if (sub === 'run') {
       console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${join}${join === 'k-of-n' ? ` k=${node.k}` : ''} ${dim('(concurrent worktrees)')}`)
 
       const aborts = node.branches.map(() => new AbortController())
+      // V3.8 — operator cancel cascades into every branch. If
+      // runAbort fires while the parallel block is active, abort
+      // each per-branch controller; their existing V3.3.c
+      // cancellation paths handle the SIGTERM dance for dispatches +
+      // handler.exec; assert/set_attr never appear in branches.
+      const cascadeAbort = () => {
+        for (const c of aborts) {
+          if (!c.signal.aborted) c.abort()
+        }
+      }
+      if (runAbort.signal.aborted) {
+        cascadeAbort()
+      } else {
+        runAbort.signal.addEventListener('abort', cascadeAbort, { once: true })
+      }
       const promises = node.branches.map((branchId, i) =>
         // V3.7.e — runBranchNode dispatches by node type so dispatch
         // and handler branches can coexist. Each gets its own
@@ -538,6 +592,17 @@ if (sub === 'run') {
       const dispositions = settledByIndex.map((r) => (r ? r.disposition : 'cancelled'))
       stepDisposition = aggregateForJoin(dispositions, join, node.k)
       console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + join + ': ' + succeeded + '/' + quorum + ' succeeded, ' + dispositions.length + ' branches)')}`)
+      // V3.8 — if cancel fired during the parallel block, the
+      // branches settled (cancelled / error / partial success) but
+      // the run as a whole is aborted. Set the outcome here rather
+      // than letting the disposition flow through edges — operator
+      // cancel always terminates with `aborted`, regardless of
+      // which branches happened to finish.
+      if (runAbort.signal.aborted) {
+        abortReason = `cancelled by operator: ${sentinelFragment}`
+        finalState = 'aborted'
+        break
+      }
     } else if (node.type === 'condition') {
       // V3.2.b — pure routing. Predicate evaluated against the run's
       // task attrs (user-supplied + pipeline-injected ids). No
@@ -558,8 +623,9 @@ if (sub === 'run') {
     } else if (node.type === 'handler') {
       // V3.7.a-d inline; V3.7.e extracted into runHandlerNode so the
       // parallel walker can call it for handler branches via
-      // runBranchNode.
-      const result = await runHandlerNode(nodeId)
+      // runBranchNode. V3.8 — pass runAbort.signal so a cancel
+      // during a long-running builtin.exec terminates via SIGTERM.
+      const result = await runHandlerNode(nodeId, null, { signal: runAbort.signal })
       if (result.__error) {
         abortReason = `handler '${nodeId}' threw: ${result.__error}`
         finalState = 'failed'
@@ -573,6 +639,15 @@ if (sub === 'run') {
     }
 
     lastDisposition = stepDisposition
+    // V3.8 — cancel could have fired mid-step (e.g. during a
+    // long-running dispatch where SIGTERM aborted it). The step's
+    // disposition becomes `cancelled`, but at the run level we want
+    // `aborted` regardless of how each step settled.
+    if (runAbort.signal.aborted) {
+      abortReason = `cancelled by operator: ${sentinelFragment}`
+      finalState = 'aborted'
+      break
+    }
     const next = resolveNext(def, nodeId, stepDisposition)
     if (!next) {
       abortReason = `no transition for disposition '${stepDisposition}' from node '${nodeId}'`
@@ -582,6 +657,10 @@ if (sub === 'run') {
     console.error(`  ${dim('disposition:')} ${stepDisposition} ${dim('→')} ${cyan(next)}`)
     nodeId = next
   }
+
+  // V3.8 — release the sentinel watcher; without unref this would
+  // keep the node loop alive past process.exit on some platforms.
+  clearInterval(cancelWatcher)
 
   appendWorkloadEvent(PROJECT_DIR, 'pipeline_run.ended', {
     pipeline_run_id: runId,
@@ -598,6 +677,48 @@ if (sub === 'run') {
     console.error(`${green('✓')} pipeline run ${dim(runId.slice(-12))} ${green(finalState)}`)
   }
   process.exit(finalState === 'completed' ? 0 : 1)
+}
+
+// --- cancel (V3.8 — operator cancel) ---
+
+if (sub === 'cancel') {
+  let values, positionals
+  try {
+    ({ values, positionals } = parseArgs({
+      args: subRest,
+      options: { help: { type: 'boolean', short: 'h' } },
+      allowPositionals: true,
+    }))
+  } catch (err) { die(err.message, 2) }
+  if (values.help) usage(0)
+  const [runIdArg] = positionals
+  if (!runIdArg) die('cancel: <run-id> is required (full UUID or trailing fragment)', 2)
+
+  // Resolve fragment → full run_id (same logic as `status`).
+  const allRuns = listPipelineRuns(PROJECT_DIR, { limit: null })
+  const matched = allRuns.filter((r) => r.run_id === runIdArg || r.run_id.endsWith(runIdArg))
+  if (!matched.length) die(`cancel: no run matches '${runIdArg}'`, 1)
+  if (matched.length > 1 && !matched.some((r) => r.run_id === runIdArg)) {
+    die(`cancel: '${runIdArg}' matches ${matched.length} runs — use a longer fragment`, 1)
+  }
+  const fullRunId = matched.length === 1 ? matched[0].run_id : runIdArg
+  const summary = matched.find((r) => r.run_id === fullRunId)
+
+  // Refuse to cancel a terminated run — leaves no useful effect.
+  if (summary?.final_state) {
+    die(`cancel: run '${runIdArg}' already terminal (final_state=${summary.final_state})`, 1)
+  }
+
+  // Drop the sentinel. Walker's poller picks it up at next tick;
+  // empty-file-presence is the entire signal (no payload). We don't
+  // rm the file here — leave it for forensics. `artel sweep` can
+  // prune stale ones (deferred).
+  mkdirSync(pipelineCancelsDir(PROJECT_DIR), { recursive: true })
+  const sentinel = pipelineCancelPath(PROJECT_DIR, fullRunId)
+  writeFileSync(sentinel, '')
+
+  console.error(`${yellow('⚑')} cancel signal sent for run ${dim(fullRunId.slice(-12))} ${dim(`→ ${sentinel}`)}`)
+  process.exit(0)
 }
 
 // --- runs (V3.4.a — observability) ---
