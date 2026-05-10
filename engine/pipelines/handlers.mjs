@@ -9,8 +9,8 @@
 // Each builtin is a small async function `(node, ctx) =>
 // { disposition, exitCode?, signal?, durationMs?, error? }`. Add a
 // new builtin = register its name in `VALID_HANDLERS`
-// (engine/util/pipelines.mjs) AND its implementation in the BUILTINS
-// map below.
+// (engine/pipelines/pipelines.mjs) AND its implementation in the
+// BUILTINS map below.
 //
 // `ctx`:
 //   { projectDir, attrs }
@@ -32,7 +32,7 @@
 // the validator rejects reserved keys for clarity.
 
 import { evaluatePredicate, renderTemplate, writePath } from './pipelines.mjs'
-import { parseDuration, spawnCancellable } from './proc.mjs'
+import { parseDuration, spawnCancellable } from '../util/proc.mjs'
 
 // builtin.exec — run `bash -c <cmd>`; stdio inherited so the operator
 // sees command output inline with the walker. Disposition mapping:

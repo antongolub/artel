@@ -1,4 +1,4 @@
-// Unit tests for engine/util/worktree.mjs (V3.3.a).
+// Unit tests for engine/git/worktree.mjs (V3.3.a).
 //
 // These exercise the helpers against the real `git` binary. Tests
 // build a tiny repo via createTempRepo (already a real git repo with
@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import * as worktreeModule from '../../engine/util/worktree.mjs'
+import * as worktreeModule from '../../engine/git/worktree.mjs'
 import { cleanupTempRoots, createTempRepo, execGit, snapshotRepo } from '../_helpers.js'
 
 const {

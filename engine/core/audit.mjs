@@ -8,9 +8,9 @@
 
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { SCHEMA_VERSION, validateEventType } from '../core/schema.mjs'
-import { ensureClusterIdentity, instanceId as getInstanceId } from '../core/cluster.mjs'
-import { uuidv7 } from './ids.mjs'
+import { SCHEMA_VERSION, validateEventType } from './schema.mjs'
+import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
+import { uuidv7 } from '../util/ids.mjs'
 
 // Shared envelope writer. `kind` may be infra | workload | signal |
 // control. Workload events get fence_token: 0 (V1 federation

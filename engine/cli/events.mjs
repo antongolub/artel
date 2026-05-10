@@ -9,11 +9,10 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { PROJECT_DIR, c, dim, cyan, yellow, green, red } from '../util/cli.mjs'
+import { chalk } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
 
-const EVENTS_PATH = join(PROJECT_DIR, '.artel', 'events.jsonl')
-// `events` is the only CLI that needs magenta (control kind).
-const magenta = (s) => c('35', s)
+const EVENTS_PATH = config.eventsPath
 
 const usage = (code = 0) => {
   console.log(`\
@@ -99,29 +98,29 @@ const readEvents = () => {
 // --- formatting ---
 
 const KIND_COLOR = {
-  workload: cyan,
-  infra: yellow,
-  signal: yellow,
-  control: magenta,
+  workload: chalk.cyan,
+  infra: chalk.yellow,
+  signal: chalk.yellow,
+  control: chalk.magenta,
 }
 
 const DISPOSITION_COLOR = {
-  success: green,
-  parked: yellow,
-  timeout: red,
-  error: red,
+  success: chalk.green,
+  parked: chalk.yellow,
+  timeout: chalk.red,
+  error: chalk.red,
 }
 
 const formatEvent = (e) => {
   const t = e.at ? new Date(e.at).toISOString().slice(11, 19) : '?'
-  const kindColor = KIND_COLOR[e.kind] || dim
+  const kindColor = KIND_COLOR[e.kind] || chalk.dim
   const type = kindColor((e.type || '?').padEnd(20))
   const role = e.owner_role || e.from_role
-  const roleStr = role ? cyan(role.padEnd(12)) : ' '.repeat(12)
+  const roleStr = role ? chalk.cyan(role.padEnd(12)) : ' '.repeat(12)
   const ctx = []
   if (e.task) ctx.push(`task=${e.task}`)
   if (e.disposition) {
-    const col = DISPOSITION_COLOR[e.disposition] || dim
+    const col = DISPOSITION_COLOR[e.disposition] || chalk.dim
     ctx.push(`disposition=${col(e.disposition)}`)
   }
   if (e.engine && !e.disposition) ctx.push(`engine=${e.engine}`)
@@ -131,7 +130,7 @@ const formatEvent = (e) => {
   if (e.next_safe_step) ctx.push(`next=${JSON.stringify(e.next_safe_step)}`)
   if (e.reason) ctx.push(`reason=${e.reason}`)
   if (e.retry_count) ctx.push(`retry=${e.retry_count}`)
-  if (e.delta) ctx.push(`${green('+' + (e.delta.lines_added || 0))}/${red('-' + (e.delta.lines_removed || 0))}`)
+  if (e.delta) ctx.push(`${chalk.green('+' + (e.delta.lines_added || 0))}/${chalk.red('-' + (e.delta.lines_removed || 0))}`)
   if (e.usage) ctx.push(`tokens=${(e.usage.tokens_in || 0)}/${(e.usage.tokens_out || 0)}`)
   // queue_node.* (V2.1) — surface node_id + the meaningful patch fields.
   if (e.node_id) ctx.push(`node=${e.node_id}`)
@@ -141,7 +140,7 @@ const formatEvent = (e) => {
   if (e.from_status) ctx.push(`from=${e.from_status}`)
   // queue_edge.* (V2.2) — render `<from> --rel-> <to>`.
   if (e.relation && e.from && e.to) ctx.push(`${e.from} --${e.relation}-> ${e.to}`)
-  return `${dim(t)}  ${type} ${roleStr} ${dim(ctx.join(' '))}`
+  return `${chalk.dim(t)}  ${type} ${roleStr} ${chalk.dim(ctx.join(' '))}`
 }
 
 // --- run ---

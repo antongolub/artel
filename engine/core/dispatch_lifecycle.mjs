@@ -17,11 +17,12 @@ import { createDispatchApi } from './dispatch_api.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { detectParked } from './parked.mjs'
 import { uuidv7 } from '../util/ids.mjs'
-import { gitContext, gitDelta } from '../util/git.mjs'
-import { listDrivers } from '../util/drivers.mjs'
-import { identityEnv, resolveIdentity, resolveRequires } from '../util/trust.mjs'
-import { createWorktreeForBranch, removeWorktree } from '../util/worktree.mjs'
+import { gitContext, gitDelta } from '../git/git.mjs'
+import { listDrivers } from '../drivers/loader.mjs'
+import { identityEnv, resolveIdentity, resolveRequires } from '../trust/trust.mjs'
+import { createWorktreeForBranch, removeWorktree } from '../git/worktree.mjs'
 import { parseDuration } from '../util/proc.mjs'
+import { createConfig, dispatchEnv, pathsFor } from '../config/env.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -30,9 +31,9 @@ const DEFAULT_PLATFORM_DIR = join(here, '..', '..')
 // Project dir is per-project: each consuming repo holds its own `.artel/`
 // runtime (.dispatches/, .sessions/, events.jsonl, dispatcher_state.json,
 // state.md, JOURNAL/QUEUE). Resolve from cwd (or env override) — never from
-// `here`, since a single platform serves many projects.
-const projectDirOf = () => process.env.ARTEL_PROJECT_DIR || process.cwd()
-const projectArtelDirOf = (projectDir = projectDirOf()) => join(projectDir, '.artel')
+// `here`, since a single platform serves many projects. Reads via
+// createConfig() so test-time env mutations between calls take effect.
+const projectArtelDirOf = (projectDir = createConfig().projectDir) => pathsFor(projectDir).artelDir
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
@@ -82,7 +83,7 @@ const frontmatterOf = (text) => {
 
 const dispatchPathsOf = ({
   platformDir = DEFAULT_PLATFORM_DIR,
-  projectDir = projectDirOf(),
+  projectDir = createConfig().projectDir,
   projectArtelDir = projectArtelDirOf(projectDir),
 } = {}) => {
   const engineDir = join(platformDir, 'engine')
@@ -157,7 +158,7 @@ const checkDispatchPolicy = (parentRoleName, requestedRole, agentsDir) => {
 const parseTimeoutMs = (raw, label) => parseDuration(raw, label)
 
 const normalizeTimeoutMs = (timeoutMs) =>
-  parseTimeoutMs(timeoutMs ?? process.env.ARTEL_DISPATCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
+  parseTimeoutMs(timeoutMs ?? createConfig().dispatchTimeoutMs ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
 
 const signalExitCode = (signal) => {
   if (!signal) return null
@@ -301,7 +302,7 @@ export async function dispatchLifecycle(
     keepWorktreeOnSuccess = false,
     abortSignal = null,
     platformDir = DEFAULT_PLATFORM_DIR,
-    projectDir = projectDirOf(),
+    projectDir = createConfig().projectDir,
     projectArtelDir = projectArtelDirOf(projectDir),
   } = {},
   {
@@ -320,9 +321,14 @@ export async function dispatchLifecycle(
   const repoDir = projectDir
   const gitImpl = spawnGit || ((args) => spawnSync('git', args, { cwd: repoDir, encoding: 'utf8' }))
 
+  // Parent → child envelope (per-call read; tests mutate process.env
+  // between calls). Used both for the role-policy guard below and for
+  // tracing further down.
+  const dEnv = dispatchEnv()
+
   // Role policy guard — DESIGN.md §8. Throws BEFORE any side-effects (no
   // branch creation, no file writes) so denied dispatches leave no trace.
-  checkDispatchPolicy(process.env.ARTEL_ROLE || null, role, paths.agentsDir)
+  checkDispatchPolicy(dEnv.role, role, paths.agentsDir)
 
   const roleMeta = readRoleMeta(role, paths.agentsDir)
   const engineId = engine || roleMeta.engine || 'claude'
@@ -362,10 +368,10 @@ export async function dispatchLifecycle(
   // (dispatch_id, parent_dispatch_id, trace_id) tuples. Top-level dispatch
   // (no parent in env) defines the trace root. Nested dispatches inherit
   // trace_id from env and record the parent.
-  const parentDispatchId = process.env.ARTEL_DISPATCH_ID || null
-  const parentRole = process.env.ARTEL_ROLE || null
+  const parentDispatchId = dEnv.dispatchId
+  const parentRole = dEnv.role
   const dispatchId = uuidv7()
-  const traceId = process.env.ARTEL_TRACE_ID || dispatchId
+  const traceId = dEnv.traceId || dispatchId
 
   const promptPath = join(paths.dispatchesDir, `${task}.prompt`)
   const outPath = join(paths.dispatchesDir, `${task}.out`)
@@ -644,7 +650,7 @@ export async function dispatchLifecycle(
     // `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) and updates `.meta`'s
     // `lastHeartbeatAt`/`pidAlive` so `artel status` can show "alive Ns ago"
     // without scanning events.jsonl. Cleared on settle / timeout / error.
-    const heartbeatIntervalMs = Number(process.env.ARTEL_HEARTBEAT_INTERVAL_MS) || DEFAULT_HEARTBEAT_INTERVAL_MS
+    const heartbeatIntervalMs = Number(createConfig().heartbeatIntervalMs) || DEFAULT_HEARTBEAT_INTERVAL_MS
     if (heartbeatIntervalMs > 0) {
       heartbeatHandle = setInterval(() => {
         if (settled || child.killed) return

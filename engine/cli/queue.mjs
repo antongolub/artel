@@ -15,7 +15,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { appendWorkloadEvent } from '../util/audit.mjs'
+import { appendWorkloadEvent } from '../core/audit.mjs'
 import {
   buildGraph,
   EDGE_RELATIONS,
@@ -26,9 +26,10 @@ import {
   readyForDispatch,
 } from '../core/queue_graph.mjs'
 
-import { PROJECT_DIR, dim, bold, cyan, yellow, green, die } from '../util/cli.mjs'
+import { chalk, die } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
 
-const QUEUE_PATH = join(PROJECT_DIR, '.artel', 'QUEUE.md')
+const { projectDir: PROJECT_DIR, queuePath: QUEUE_PATH } = config
 
 const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 
@@ -175,21 +176,21 @@ if (sub === 'list') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel queue')} ${dim(`— ${QUEUE_PATH}`)}\n`)
+  console.log(`\n${chalk.bold('artel queue')} ${chalk.dim(`— ${QUEUE_PATH}`)}\n`)
   for (const s of queue.sections) {
     if (values.section && s.name !== values.section) continue
-    const head = `${bold(s.name)} ${dim(`(${s.items.length})`)}`
+    const head = `${chalk.bold(s.name)} ${chalk.dim(`(${s.items.length})`)}`
     console.log(head)
     if (!s.items.length) {
-      console.log(`  ${dim('(none)')}`)
+      console.log(`  ${chalk.dim('(none)')}`)
     } else {
       for (const it of s.items) {
         const slug = slugOf(it) || '?'
-        const marker = s.name === 'For Owner' ? yellow('•')
-          : s.name === 'Blocked' ? yellow('!')
-          : s.name === 'Recently done' ? green('✓')
-          : dim('•')
-        console.log(`  ${marker} ${cyan(slug.padEnd(28))} ${dim(it.replace(slug, '').replace(/^\s*[\[\]a-zA-Z0-9_-]+\s*/, '').trim())}`)
+        const marker = s.name === 'For Owner' ? chalk.yellow('•')
+          : s.name === 'Blocked' ? chalk.yellow('!')
+          : s.name === 'Recently done' ? chalk.green('✓')
+          : chalk.dim('•')
+        console.log(`  ${marker} ${chalk.cyan(slug.padEnd(28))} ${chalk.dim(it.replace(slug, '').replace(/^\s*[\[\]a-zA-Z0-9_-]+\s*/, '').trim())}`)
       }
     }
     console.log()
@@ -236,7 +237,7 @@ if (sub === 'add') {
     ...(values.tag ? { lane: values.tag } : {}),
     ...(descParts.length ? { description: descParts.join(' ') } : {}),
   })
-  console.error(`${green('+')} '${task}' added to ${sectionName}`)
+  console.error(`${chalk.green('+')} '${task}' added to ${sectionName}`)
   process.exit(0)
 }
 
@@ -251,7 +252,7 @@ const moveTask = (slug, target, label = 'move') => {
   if (!found) die(`${label}: '${slug}' not found in queue`, 1)
   const { section: from, index, item } = found
   if (from.name === target) {
-    console.error(`${dim(`'${slug}' already in ${target}`)}`)
+    console.error(`${chalk.dim(`'${slug}' already in ${target}`)}`)
     process.exit(0)
   }
   from.items.splice(index, 1)
@@ -280,7 +281,7 @@ const moveTask = (slug, target, label = 'move') => {
     fields,
     from_status: from.name,
   })
-  console.error(`${green('→')} '${slug}' moved: ${from.name} → ${target}`)
+  console.error(`${chalk.green('→')} '${slug}' moved: ${from.name} → ${target}`)
 }
 
 if (sub === 'move') {
@@ -327,7 +328,7 @@ if (sub === 'rm') {
     node_id: task,
     from_status: section.name,
   })
-  console.error(`${yellow('−')} '${task}' removed from ${section.name}`)
+  console.error(`${chalk.yellow('−')} '${task}' removed from ${section.name}`)
   process.exit(0)
 }
 
@@ -353,18 +354,18 @@ if (sub === 'ready') {
   // when the ready list is empty for a non-obvious reason.
   const pendingBlocked = [...graph.nodes.values()]
     .filter((n) => n.status === 'Pending' && effectiveStatus(graph, n.slug) === 'Blocked')
-  console.log(`\n${bold('artel queue ready')} ${dim(`— ${ready.length} dispatchable node${ready.length === 1 ? '' : 's'}`)}\n`)
+  console.log(`\n${chalk.bold('artel queue ready')} ${chalk.dim(`— ${ready.length} dispatchable node${ready.length === 1 ? '' : 's'}`)}\n`)
   if (!ready.length) {
-    console.log(`  ${dim('(none — no Pending nodes' + (pendingBlocked.length ? ' with all upstream resolved' : '') + ')')}`)
+    console.log(`  ${chalk.dim('(none — no Pending nodes' + (pendingBlocked.length ? ' with all upstream resolved' : '') + ')')}`)
   } else {
     for (const n of ready) {
-      const lane = n.lane ? `${dim('[')}${n.lane}${dim(']')} ` : ''
-      const desc = n.description ? ` ${dim('—')} ${dim(n.description)}` : ''
-      console.log(`  ${green('•')} ${lane}${cyan(n.slug)}${desc}`)
+      const lane = n.lane ? `${chalk.dim('[')}${n.lane}${chalk.dim(']')} ` : ''
+      const desc = n.description ? ` ${chalk.dim('—')} ${chalk.dim(n.description)}` : ''
+      console.log(`  ${chalk.green('•')} ${lane}${chalk.cyan(n.slug)}${desc}`)
     }
   }
   if (pendingBlocked.length) {
-    console.log(`\n${bold('Held by upstream')} ${dim(`(${pendingBlocked.length} Pending nodes blocked on gating edges)`)}`)
+    console.log(`\n${chalk.bold('Held by upstream')} ${chalk.dim(`(${pendingBlocked.length} Pending nodes blocked on gating edges)`)}`)
     for (const n of pendingBlocked) {
       const upstream = incomingEdges(graph, n.slug)
         .filter((e) => e.relation === 'blocks' || e.relation === 'depends_on')
@@ -372,8 +373,8 @@ if (sub === 'ready') {
           const src = graph.nodes.get(e.from)
           return !src || src.status !== 'Recently done'
         })
-        .map((e) => `${e.from} ${dim('(' + e.relation + ')')}`)
-      console.log(`  ${yellow('!')} ${cyan(n.slug)} ${dim('←')} ${upstream.join(', ')}`)
+        .map((e) => `${e.from} ${chalk.dim('(' + e.relation + ')')}`)
+      console.log(`  ${chalk.yellow('!')} ${chalk.cyan(n.slug)} ${chalk.dim('←')} ${upstream.join(', ')}`)
     }
   }
   console.log()
@@ -409,25 +410,25 @@ if (sub === 'graph') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel queue graph')} ${dim(`— ${allNodes.length} node${allNodes.length === 1 ? '' : 's'}, ${allEdges.length} edge${allEdges.length === 1 ? '' : 's'} (event-sourced)`)}\n`)
+  console.log(`\n${chalk.bold('artel queue graph')} ${chalk.dim(`— ${allNodes.length} node${allNodes.length === 1 ? '' : 's'}, ${allEdges.length} edge${allEdges.length === 1 ? '' : 's'} (event-sourced)`)}\n`)
   if (!allNodes.length) {
-    console.log(`  ${dim('(no queue_node.* events yet — mutate via `artel queue add` etc.)')}`)
+    console.log(`  ${chalk.dim('(no queue_node.* events yet — mutate via `artel queue add` etc.)')}`)
   } else {
-    console.log(bold('Nodes'))
+    console.log(chalk.bold('Nodes'))
     for (const n of allNodes) {
-      const lane = n.lane ? `${dim('[')}${n.lane}${dim(']')} ` : ''
-      const since = n.since_at ? ` ${dim('· since')} ${n.since_at.replace('T', ' ').slice(0, 19)}` : ''
+      const lane = n.lane ? `${chalk.dim('[')}${n.lane}${chalk.dim(']')} ` : ''
+      const since = n.since_at ? ` ${chalk.dim('· since')} ${n.since_at.replace('T', ' ').slice(0, 19)}` : ''
       const eff = effectiveStatus(graph, n.slug)
       const statusStr = eff !== n.status
-        ? `${n.status} ${dim('→ effective:')} ${yellow(eff)}`
+        ? `${n.status} ${chalk.dim('→ effective:')} ${chalk.yellow(eff)}`
         : n.status
-      console.log(`  ${cyan(n.slug.padEnd(28))} ${lane}${dim('status:')} ${statusStr}${since}`)
+      console.log(`  ${chalk.cyan(n.slug.padEnd(28))} ${lane}${chalk.dim('status:')} ${statusStr}${since}`)
     }
   }
   if (allEdges.length) {
-    console.log(`\n${bold('Edges')}`)
+    console.log(`\n${chalk.bold('Edges')}`)
     for (const e of allEdges) {
-      console.log(`  ${cyan(e.from)} ${dim('--')} ${e.relation} ${dim('->')} ${cyan(e.to)}`)
+      console.log(`  ${chalk.cyan(e.from)} ${chalk.dim('--')} ${e.relation} ${chalk.dim('->')} ${chalk.cyan(e.to)}`)
     }
   }
   console.log()
@@ -475,7 +476,7 @@ if (sub === 'link') {
   appendWorkloadEvent(PROJECT_DIR, 'queue_edge.added', {
     relation, from, to,
   })
-  console.error(`${green('+')} ${from} ${dim('--')} ${relation} ${dim('->')} ${to}`)
+  console.error(`${chalk.green('+')} ${from} ${chalk.dim('--')} ${relation} ${chalk.dim('->')} ${to}`)
   process.exit(0)
 }
 
@@ -503,7 +504,7 @@ if (sub === 'unlink') {
   appendWorkloadEvent(PROJECT_DIR, 'queue_edge.removed', {
     relation, from, to,
   })
-  console.error(`${yellow('−')} ${from} ${dim('--')} ${relation} ${dim('->')} ${to}`)
+  console.error(`${chalk.yellow('−')} ${from} ${chalk.dim('--')} ${relation} ${chalk.dim('->')} ${to}`)
   process.exit(0)
 }
 

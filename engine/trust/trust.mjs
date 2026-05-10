@@ -30,18 +30,14 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { pathsFor } from '../config/env.mjs'
 import { decryptJson, encryptJson, loadMasterKey } from './crypto.mjs'
 
-const TRUST_DIR_REL = ['.artel', 'trust']
+const trustDir = (projectDir) => pathsFor(projectDir).trustDir
 
-const identitiesPath = (projectDir) =>
-  join(projectDir, ...TRUST_DIR_REL, 'identities.json')
-
-const credentialsPath = (projectDir) =>
-  join(projectDir, ...TRUST_DIR_REL, 'credentials.json')
-
-const credentialsEncPath = (projectDir) =>
-  join(projectDir, ...TRUST_DIR_REL, 'credentials.json.enc')
+const identitiesPath      = (projectDir) => join(trustDir(projectDir), 'identities.json')
+const credentialsPath     = (projectDir) => join(trustDir(projectDir), 'credentials.json')
+const credentialsEncPath  = (projectDir) => join(trustDir(projectDir), 'credentials.json.enc')
 
 // V11.4 — encryption mode is detected by the on-disk file shape:
 //   credentials.json.enc present  → encrypted (master key required)
@@ -276,6 +272,6 @@ export const deleteCredential = (projectDir, name) => {
 // (private), `.pub` sibling for the public half. Caller is responsible
 // for invoking `ssh-keygen` — util only resolves the path.
 export const sshKeyPath = (projectDir, name) =>
-  join(projectDir, ...TRUST_DIR_REL, 'keys', name)
+  join(trustDir(projectDir), 'keys', name)
 
 export { identitiesPath, credentialsPath, credentialsEncPath }

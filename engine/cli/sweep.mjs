@@ -36,16 +36,19 @@
 import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { appendInfraEvent } from '../util/audit.mjs'
-import { defaultGit, listWorktrees, removeWorktree } from '../util/worktree.mjs'
-import { listPipelineRuns, pipelineCancelsDir } from '../util/pipelines.mjs'
-import { PROJECT_DIR, dim, bold, green, yellow } from '../util/cli.mjs'
+import { appendInfraEvent } from '../core/audit.mjs'
+import { defaultGit, listWorktrees, removeWorktree } from '../git/worktree.mjs'
+import { listPipelineRuns } from '../pipelines/pipelines.mjs'
+import { chalk } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
 
-const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
-const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
-const WORKTREES_DIR = join(PROJECT_ARTEL, '.worktrees')
-const PIPELINE_CANCELS_DIR = pipelineCancelsDir(PROJECT_DIR)
-const QUEUE_PATH = join(PROJECT_ARTEL, 'QUEUE.md')
+const {
+  projectDir: PROJECT_DIR,
+  dispatchesDir: DISPATCHES_DIR,
+  worktreesDir: WORKTREES_DIR,
+  pipelineCancelsDir: PIPELINE_CANCELS_DIR,
+  queuePath: QUEUE_PATH,
+} = config
 
 const usage = (code = 0) => {
   console.log(`\
@@ -313,36 +316,36 @@ if (values.json) {
     pipeline_cancels_held: cancelsSkipped.length,
   }, null, 2))
 } else {
-  console.log(`\n${bold('artel sweep')} ${dim(`— older than ${values['older-than'] || '30d'}, keep newest ${keepN}`)}\n`)
+  console.log(`\n${chalk.bold('artel sweep')} ${chalk.dim(`— older than ${values['older-than'] || '30d'}, keep newest ${keepN}`)}\n`)
   if (!toRemove.length && !worktreesToRemove.length && !cancelsToRemove.length) {
-    console.log(`  ${dim('nothing to sweep — all dispatches/worktrees/cancel-sentinels are fresh, active, or within --keep')}`)
+    console.log(`  ${chalk.dim('nothing to sweep — all dispatches/worktrees/cancel-sentinels are fresh, active, or within --keep')}`)
   }
   if (toRemove.length) {
-    console.log(`  ${bold('dispatches')}`)
+    console.log(`  ${chalk.bold('dispatches')}`)
     for (const d of toRemove) {
-      console.log(`  ${yellow('×')} ${d.task.padEnd(36)} ${dim(d.completedAt.replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(fmtBytes(d.bytes).padStart(7))}`)
+      console.log(`  ${chalk.yellow('×')} ${d.task.padEnd(36)} ${chalk.dim(d.completedAt.replace('T', ' ').slice(0, 19) + 'Z')}  ${chalk.dim(fmtBytes(d.bytes).padStart(7))}`)
     }
-    console.log(`  ${dim(`subtotal: ${toRemove.length} dispatches · ${fmtBytes(totalBytes)}`)}`)
+    console.log(`  ${chalk.dim(`subtotal: ${toRemove.length} dispatches · ${fmtBytes(totalBytes)}`)}`)
   }
   if (worktreesToRemove.length) {
-    console.log(`\n  ${bold('worktrees')}`)
+    console.log(`\n  ${chalk.bold('worktrees')}`)
     for (const wt of worktreesToRemove) {
-      console.log(`  ${yellow('×')} ${wt.branch.padEnd(36)} ${dim(new Date(wt.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(wt.path)}`)
+      console.log(`  ${chalk.yellow('×')} ${wt.branch.padEnd(36)} ${chalk.dim(new Date(wt.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${chalk.dim(wt.path)}`)
     }
-    console.log(`  ${dim(`subtotal: ${worktreesToRemove.length} worktrees`)}`)
+    console.log(`  ${chalk.dim(`subtotal: ${worktreesToRemove.length} worktrees`)}`)
   }
   if (cancelsToRemove.length) {
-    console.log(`\n  ${bold('pipeline-cancel sentinels')}`)
+    console.log(`\n  ${chalk.bold('pipeline-cancel sentinels')}`)
     for (const c of cancelsToRemove) {
-      console.log(`  ${yellow('×')} ${c.runId.slice(-12).padEnd(36)} ${dim(new Date(c.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(c.path)}`)
+      console.log(`  ${chalk.yellow('×')} ${c.runId.slice(-12).padEnd(36)} ${chalk.dim(new Date(c.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${chalk.dim(c.path)}`)
     }
-    console.log(`  ${dim(`subtotal: ${cancelsToRemove.length} cancel sentinels`)}`)
+    console.log(`  ${chalk.dim(`subtotal: ${cancelsToRemove.length} cancel sentinels`)}`)
   }
   const allSkipped = [...skipped, ...worktreesSkipped, ...cancelsSkipped]
   if (allSkipped.length) {
     const counts = allSkipped.reduce((acc, s) => ((acc[s.reason] = (acc[s.reason] || 0) + 1), acc), {})
     const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ')
-    console.log(`\n  ${dim(`held: ${parts}`)}`)
+    console.log(`\n  ${chalk.dim(`held: ${parts}`)}`)
   }
   console.log()
 }
@@ -383,6 +386,6 @@ if (toRemove.length || worktreesToRemove.length || cancelsToRemove.length) {
     if (toRemove.length) parts.push(`${toRemove.length} dispatches (${removed} files, ${fmtBytes(totalBytes)})`)
     if (worktreesRemovedOk) parts.push(`${worktreesRemovedOk} worktrees`)
     if (cancelsRemovedOk) parts.push(`${cancelsRemovedOk} cancel sentinels`)
-    if (parts.length) console.log(`${green('✓')} swept ${parts.join(', ')}\n`)
+    if (parts.length) console.log(`${chalk.green('✓')} swept ${parts.join(', ')}\n`)
   }
 }

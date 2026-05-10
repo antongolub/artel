@@ -47,30 +47,16 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseDuration } from './proc.mjs'
+import { pathsFor } from '../config/env.mjs'
+import { parseDuration } from '../util/proc.mjs'
 
-const PIPELINES_DIR_REL = ['.artel', 'pipelines']
-
-export const pipelinesDir = (projectDir) =>
-  join(projectDir, ...PIPELINES_DIR_REL)
-
-export const pipelinePath = (projectDir, id) =>
-  join(pipelinesDir(projectDir), `${id}.json`)
-
-// V3.8 — operator-cancel sentinel directory. `artel pipeline cancel
-// <run-id>` writes an empty file at `.artel/.pipeline-cancels/<run-id>`;
-// the running walker polls for it and aborts on detection. Dot-prefix
-// matches the rest of the runtime-state convention (`.dispatches/`,
-// `.sessions/`, `.worktrees/`). One file per cancelled run; presence
-// is the signal — no payload. Stale sentinels (run never picked up)
-// can be pruned via `artel sweep` (deferred).
-const PIPELINE_CANCELS_DIR_REL = ['.artel', '.pipeline-cancels']
-
-export const pipelineCancelsDir = (projectDir) =>
-  join(projectDir, ...PIPELINE_CANCELS_DIR_REL)
-
-export const pipelineCancelPath = (projectDir, runId) =>
-  join(pipelineCancelsDir(projectDir), runId)
+// V3.1 + V3.8 — explicit-projectDir variants for tests / sub-pipeline
+// children that operate on a non-default project root. The canonical
+// "current project" versions live on `config` (config/env.mjs).
+export const pipelinesDir       = (projectDir)        => pathsFor(projectDir).pipelinesDir
+export const pipelinePath       = (projectDir, id)    => join(pipelinesDir(projectDir), `${id}.json`)
+export const pipelineCancelsDir = (projectDir)        => pathsFor(projectDir).pipelineCancelsDir
+export const pipelineCancelPath = (projectDir, runId) => join(pipelineCancelsDir(projectDir), runId)
 
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
@@ -79,8 +65,8 @@ export const VALID_NODE_TYPES = new Set([
 ])
 
 // V3.7.a — handler node builtins. The walker dispatches handler
-// nodes through `runHandler` in `engine/util/handlers.mjs`; each
-// builtin is a small platform action (no LLM, no role). Adding a
+// nodes through `runHandler` in `engine/pipelines/handlers.mjs`;
+// each builtin is a small platform action (no LLM, no role). Adding a
 // handler = registering a new builtin name here AND extending the
 // runHandler dispatch map. Handlers cannot appear inside `parallel`
 // branches in V3.7.a (the parallel validator already restricts

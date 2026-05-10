@@ -18,18 +18,19 @@ import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
 import { readClusterIdentity } from '../core/cluster.mjs'
-import { PROJECT_DIR, bold, dim, cyan, yellow, green, red } from '../util/cli.mjs'
+import { chalk } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
+
+const { projectDir: PROJECT_DIR } = config
 
 const here = dirname(fileURLToPath(import.meta.url))
 // `here` is engine/cli/, so platform root is two levels up.
 const PLATFORM_DIR = dirname(dirname(here))
 // Project paths: each consuming repo holds its own .artel/ runtime. Resolved
-// in util/cli.mjs from cwd (or env override) — never from `here`, since one
-// platform serves many projects.
-const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
+// in config/env.mjs from cwd (or env override) — never from `here`,
+// since one platform serves many projects.
 const PROJECT_NAME = basename(PROJECT_DIR)
-const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
-const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
+const { artelDir: PROJECT_ARTEL, eventsPath: EVENTS_PATH, dispatcherStatePath: DISPATCHER_STATE_PATH } = config
 const DAYS = 7
 
 const fmt = (n) => {
@@ -500,7 +501,7 @@ const getAuthHealth = (engine) => {
   let recentSuccess = false
   let latestFailAt = 0
   let latestSuccessAt = 0
-  if (!existsSync(dir)) return { mark: '?', color: dim }
+  if (!existsSync(dir)) return { mark: '?', color: chalk.dim }
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.meta')) continue
     let meta
@@ -518,9 +519,9 @@ const getAuthHealth = (engine) => {
     }
   }
   // If success post-dates the failure, treat as recovered.
-  if (recentAuthFail && latestFailAt > latestSuccessAt) return { mark: '⚠', color: yellow }
-  if (recentSuccess) return { mark: '✓', color: green }
-  return { mark: '?', color: dim }
+  if (recentAuthFail && latestFailAt > latestSuccessAt) return { mark: '⚠', color: chalk.yellow }
+  if (recentSuccess) return { mark: '✓', color: chalk.green }
+  return { mark: '?', color: chalk.dim }
 }
 
 // --- Token aggregates (delegated to drivers) ---
@@ -538,61 +539,61 @@ const getCopilotTokens = (days = DAYS) =>
 // --- render ---
 
 const renderFeed = (items) => {
-  let out = `\n${bold('FEED')} ${dim('(shared telemetry, last 5 events)')}\n`
-  if (!items.length) return out + `  ${dim('(none)')}\n`
+  let out = `\n${chalk.bold('FEED')} ${chalk.dim('(shared telemetry, last 5 events)')}\n`
+  if (!items.length) return out + `  ${chalk.dim('(none)')}\n`
   const cols = process.stdout.columns || 120
   const trunc = Math.min(140, cols - 18)
   for (const t of items) {
     const time = new Date(t.ts).toISOString().slice(11, 16)
-    const role = (t.role === 'the owner' ? yellow(t.role.padEnd(12)) : cyan(String(t.role).padEnd(12)))
+    const role = (t.role === 'the owner' ? chalk.yellow(t.role.padEnd(12)) : chalk.cyan(String(t.role).padEnd(12)))
     const text = t.text.replace(/\s+/g, ' ')
-    out += `  ${dim(time)}  ${role}  ${truncate(text, trunc)}\n`
+    out += `  ${chalk.dim(time)}  ${role}  ${truncate(text, trunc)}\n`
   }
   return out
 }
 
 const renderRunning = (dispatcher, procs) => {
-  let out = `\n${bold('RUNNING')} ${dim('(background subprocesses)')}\n`
+  let out = `\n${chalk.bold('RUNNING')} ${chalk.dim('(background subprocesses)')}\n`
   // Empty-state: dispatcher_state.json missing → show a friendly hint
   // instead of a row full of "null"/"unknown".
   if (!dispatcher.role) {
     if (procs.length) {
       for (const p of procs) {
-        const role = cyan(p.role.padEnd(13))
+        const role = chalk.cyan(p.role.padEnd(13))
         const exec = `${p.engine} ${p.version}`
-        const task = p.task ? truncate(p.task, 28) : dim('—')
-        out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}\n`
+        const task = p.task ? truncate(p.task, 28) : chalk.dim('—')
+        out += `  ${role}  ${task.padEnd(30)}  ${chalk.dim(exec.padEnd(18))}  ${chalk.dim('pid')} ${p.pid}  ${chalk.dim(p.etime)}\n`
       }
     } else {
-      out += `  ${dim('(no dispatcher_state.json — no active dispatcher session)')}\n`
+      out += `  ${chalk.dim('(no dispatcher_state.json — no active dispatcher session)')}\n`
     }
     return out
   }
-  const status = dispatcher.controlStatus === 'active' ? yellow(dispatcher.controlStatus) : dim(dispatcher.controlStatus)
+  const status = dispatcher.controlStatus === 'active' ? chalk.yellow(dispatcher.controlStatus) : chalk.dim(dispatcher.controlStatus)
   const last = dispatcher.lastActionAt ? relativeTime(dispatcher.lastActionAt) : '?'
   const orch = `${dispatcher.orchestratorEngine}/${dispatcher.orchestratorSessionId ? truncate(dispatcher.orchestratorSessionId, 12) : 'unknown'}`
-  out += `  ${cyan(String(dispatcher.role).padEnd(13))}  ${truncate('(shared control actor)', 30).padEnd(30)}  ${dim(`${dispatcher.provider} / ${dispatcher.session}`.padEnd(18))}  ${dim('status')} ${status}  ${dim('last')} ${last}\n`
-  out += `  ${dim(' '.repeat(15) + `orchestrator ${orch}`)}`
+  out += `  ${chalk.cyan(String(dispatcher.role).padEnd(13))}  ${truncate('(shared control actor)', 30).padEnd(30)}  ${chalk.dim(`${dispatcher.provider} / ${dispatcher.session}`.padEnd(18))}  ${chalk.dim('status')} ${status}  ${chalk.dim('last')} ${last}\n`
+  out += `  ${chalk.dim(' '.repeat(15) + `orchestrator ${orch}`)}`
   if (dispatcher.lastActionTask || dispatcher.lastActionKind) {
-    out += `${dim(' · ')}${dispatcher.lastActionKind || 'unknown'}`
+    out += `${chalk.dim(' · ')}${dispatcher.lastActionKind || 'unknown'}`
     if (dispatcher.lastActionTask) out += ` → ${dispatcher.lastActionTask}`
   }
   out += '\n'
   if (!procs.length) return out
   for (const p of procs) {
-    const role = cyan(p.role.padEnd(13))
+    const role = chalk.cyan(p.role.padEnd(13))
     const exec = `${p.engine} ${p.version}`
-    const task = p.task ? truncate(p.task, 28) : dim('—')
+    const task = p.task ? truncate(p.task, 28) : chalk.dim('—')
     // V9: heartbeat freshness — green when recent (≤90s), yellow when
     // stale (≤5m), red when older (likely stuck). Threshold tuned around
     // default 60s heartbeat interval.
     let heartbeat = ''
     if (p.lastHeartbeatAt) {
       const ageMs = Date.now() - Date.parse(p.lastHeartbeatAt)
-      const colour = ageMs <= 90000 ? green : ageMs <= 300000 ? yellow : red
-      heartbeat = `  ${dim('hb')} ${colour(relativeTime(p.lastHeartbeatAt))}`
+      const colour = ageMs <= 90000 ? chalk.green : ageMs <= 300000 ? chalk.yellow : chalk.red
+      heartbeat = `  ${chalk.dim('hb')} ${colour(relativeTime(p.lastHeartbeatAt))}`
     }
-    out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}${heartbeat}\n`
+    out += `  ${role}  ${task.padEnd(30)}  ${chalk.dim(exec.padEnd(18))}  ${chalk.dim('pid')} ${p.pid}  ${chalk.dim(p.etime)}${heartbeat}\n`
   }
   return out
 }
@@ -600,11 +601,11 @@ const renderRunning = (dispatcher, procs) => {
 const renderRecent = (items) => {
   const cols = process.stdout.columns || 120
   const trunc = Math.min(110, cols - 100)
-  let out = `\n${bold('RECENT')} ${dim('(last 5 dispatches)')}\n`
-  if (!items.length) return out + `  ${dim('(none)')}\n`
+  let out = `\n${chalk.bold('RECENT')} ${chalk.dim('(last 5 dispatches)')}\n`
+  if (!items.length) return out + `  ${chalk.dim('(none)')}\n`
   for (const item of items) {
     const age = relativeTime(new Date(item.mtime).toISOString())
-    const role = cyan(item.role.padEnd(13))
+    const role = chalk.cyan(item.role.padEnd(13))
     const dur = formatDuration(item.durationMs)
     const exec = dur ? `${item.engine} ${item.version} (${dur})` : `${item.engine} ${item.version}`
     const task = item.task ? truncate(item.task, 28).padEnd(30) : ' '.repeat(30)
@@ -615,12 +616,12 @@ const renderRecent = (items) => {
     }
     if (item.delta && (item.delta.lines_added || item.delta.lines_removed || item.delta.files_changed)) {
       const d = item.delta
-      annot.push(`${green('+' + (d.lines_added || 0))}/${red('-' + (d.lines_removed || 0))}`)
+      annot.push(`${chalk.green('+' + (d.lines_added || 0))}/${chalk.red('-' + (d.lines_removed || 0))}`)
     }
-    if (item.retryCount > 0) annot.push(yellow(`r${item.retryCount}`))
-    const annotStr = annot.length ? `${dim('[')}${annot.join(' ')}${dim(']')} ` : ''
+    if (item.retryCount > 0) annot.push(chalk.yellow(`r${item.retryCount}`))
+    const annotStr = annot.length ? `${chalk.dim('[')}${annot.join(' ')}${chalk.dim(']')} ` : ''
     const summary = truncate(item.summary.replace(/\s+/g, ' '), trunc)
-    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(24))} ${task} ${annotStr}${summary}\n`
+    out += `  ${chalk.dim(age.padEnd(9))} ${role} ${chalk.dim(exec.padEnd(24))} ${task} ${annotStr}${summary}\n`
   }
   return out
 }
@@ -629,16 +630,16 @@ const renderParked = (items) => {
   if (!items.length) return ''
   const cols = process.stdout.columns || 120
   const trunc = Math.min(80, cols - 90)
-  let out = `\n${bold('PARKED')} ${dim('(recoverable dispatch failures)')}\n`
+  let out = `\n${chalk.bold('PARKED')} ${chalk.dim('(recoverable dispatch failures)')}\n`
   for (const p of items) {
-    const role = cyan((p.role || '?').padEnd(13))
+    const role = chalk.cyan((p.role || '?').padEnd(13))
     const exec = `${p.engine || 'claude'} ${probeEngineVersion(p.engine || 'claude')}`
     const task = p.task ? truncate(p.task, 28).padEnd(30) : ' '.repeat(30)
     const reset = p.parked.reason === 'auth-expired'
       ? 'relogin required'
-      : p.parked.resetAt ? `resets ${p.parked.resetAt}` : dim('no reset time')
+      : p.parked.resetAt ? `resets ${p.parked.resetAt}` : chalk.dim('no reset time')
     const raw = truncate((p.parked.raw || '').replace(/\s+/g, ' '), Math.max(20, trunc))
-    out += `  ${role}  ${dim(exec.padEnd(18))}  ${task}  ${reset.padEnd(20)}  ${dim(raw)}\n`
+    out += `  ${role}  ${chalk.dim(exec.padEnd(18))}  ${task}  ${reset.padEnd(20)}  ${chalk.dim(raw)}\n`
   }
   return out
 }
@@ -646,10 +647,10 @@ const renderParked = (items) => {
 const renderActivity = (stats) => {
   if (!stats) return ''
   const dispoOrder = [
-    ['success', green('✓')],
-    ['parked', yellow('⚠')],
-    ['timeout', red('⏱')],
-    ['error', red('✗')],
+    ['success', chalk.green('✓')],
+    ['parked', chalk.yellow('⚠')],
+    ['timeout', chalk.red('⏱')],
+    ['error', chalk.red('✗')],
   ]
   const dispoChunks = dispoOrder
     .filter(([d]) => stats.dispositions[d])
@@ -657,16 +658,16 @@ const renderActivity = (stats) => {
     .join(' ')
   const sortedRoles = Object.entries(stats.byRole).sort(([, a], [, b]) => b - a).slice(0, 5)
   const sortedEngines = Object.entries(stats.byEngine).sort(([, a], [, b]) => b - a)
-  const roleStr = sortedRoles.map(([r, n]) => `${r} ${n}`).join(dim(' · '))
-  const engineStr = sortedEngines.map(([e, n]) => `${e} ${n}`).join(dim(' · '))
-  let out = `\n${bold('ACTIVITY')} ${dim(`(last ${DAYS}d)`)}\n`
+  const roleStr = sortedRoles.map(([r, n]) => `${r} ${n}`).join(chalk.dim(' · '))
+  const engineStr = sortedEngines.map(([e, n]) => `${e} ${n}`).join(chalk.dim(' · '))
+  let out = `\n${chalk.bold('ACTIVITY')} ${chalk.dim(`(last ${DAYS}d)`)}\n`
   out += `  ${stats.total} dispatches  ${dispoChunks}`
   if (stats.filesChanged) {
-    out += `  ${dim('·')}  ${green('+' + stats.linesAdded)}/${red('-' + stats.linesRemoved)} ${dim(`across ${stats.filesChanged} files`)}`
+    out += `  ${chalk.dim('·')}  ${chalk.green('+' + stats.linesAdded)}/${chalk.red('-' + stats.linesRemoved)} ${chalk.dim(`across ${stats.filesChanged} files`)}`
   }
   out += '\n'
-  if (sortedRoles.length) out += `  ${dim('by role:  ')}${roleStr}\n`
-  if (sortedEngines.length) out += `  ${dim('by engine:')} ${engineStr}\n`
+  if (sortedRoles.length) out += `  ${chalk.dim('by role:  ')}${roleStr}\n`
+  if (sortedEngines.length) out += `  ${chalk.dim('by engine:')} ${engineStr}\n`
   return out
 }
 
@@ -674,9 +675,9 @@ const renderTimedOut = (items) => {
   if (!items.length) return ''
   const cols = process.stdout.columns || 120
   const trunc = Math.min(80, cols - 90)
-  let out = `\n${bold('TIMED-OUT')} ${dim('(dispatch timeout releases)')}\n`
+  let out = `\n${chalk.bold('TIMED-OUT')} ${chalk.dim('(dispatch timeout releases)')}\n`
   for (const p of items) {
-    const role = cyan((p.role || '?').padEnd(13))
+    const role = chalk.cyan((p.role || '?').padEnd(13))
     const exec = `${p.engine || 'claude'} ${probeEngineVersion(p.engine || 'claude')}`
     const task = p.task ? truncate(p.task, 28).padEnd(30) : ' '.repeat(30)
     const timeout = p.timeout?.timeoutMs ? `timeout ${p.timeout.timeoutMs}ms` : 'timeout'
@@ -684,7 +685,7 @@ const renderTimedOut = (items) => {
       [`exit ${p.exitCode ?? '?'}`, p.timeout?.signal].filter(Boolean).join(' · '),
       Math.max(20, trunc),
     )
-    out += `  ${role}  ${dim(exec.padEnd(18))}  ${task}  ${timeout.padEnd(20)}  ${dim(raw)}\n`
+    out += `  ${role}  ${chalk.dim(exec.padEnd(18))}  ${task}  ${timeout.padEnd(20)}  ${chalk.dim(raw)}\n`
   }
   return out
 }
@@ -693,35 +694,35 @@ const renderQueue = (q) => {
   const cols = process.stdout.columns || 120
   const trunc = Math.min(120, cols - 4)
   if (q._missing) {
-    return `\n${bold('QUEUE')} ${dim('(no .artel/QUEUE.md — create one to start tracking work)')}\n`
+    return `\n${chalk.bold('QUEUE')} ${chalk.dim('(no .artel/QUEUE.md — create one to start tracking work)')}\n`
   }
   const counts = SECTIONS.map((s) => {
     const n = q[s].length
     const v = `${s}: ${n}`
-    return s === 'For Owner' && n > 0 ? yellow(v) : v
+    return s === 'For Owner' && n > 0 ? chalk.yellow(v) : v
   }).join('    ')
-  let out = `\n${bold('QUEUE')}\n  ${counts}\n`
+  let out = `\n${chalk.bold('QUEUE')}\n  ${counts}\n`
   if (q['For Owner'].length) {
-    out += `\n${bold('FOR ANTON')}\n`
-    for (const it of q['For Owner']) out += `  ${yellow('•')} ${truncate(it, trunc)}\n`
+    out += `\n${chalk.bold('FOR ANTON')}\n`
+    for (const it of q['For Owner']) out += `  ${chalk.yellow('•')} ${truncate(it, trunc)}\n`
   }
   if (q['In progress'].length) {
-    out += `\n${bold('ACTIVE')} ${dim('(in progress)')}\n`
+    out += `\n${chalk.bold('ACTIVE')} ${chalk.dim('(in progress)')}\n`
     for (const it of q['In progress']) {
       const m = it.match(/\[since ([^\]]+)\]/)
       const since = m ? m[1].trim() : null
       const cleaned = m ? it.replace(/\s*\[since [^\]]+\]/, '').trim() : it
-      const prefix = since ? dim(relativeTime(since).padEnd(9)) : ' '.repeat(9)
+      const prefix = since ? chalk.dim(relativeTime(since).padEnd(9)) : ' '.repeat(9)
       out += `  ${prefix}${truncate(cleaned, trunc - 11)}\n`
     }
   }
   if (q['Blocked'].length) {
-    out += `\n${bold('BLOCKED')} ${dim('(needs attention)')}\n`
-    for (const it of q['Blocked']) out += `  ${yellow('!')} ${truncate(it, trunc - 4)}\n`
+    out += `\n${chalk.bold('BLOCKED')} ${chalk.dim('(needs attention)')}\n`
+    for (const it of q['Blocked']) out += `  ${chalk.yellow('!')} ${truncate(it, trunc - 4)}\n`
   }
   if (q['Pending'].length) {
-    out += `\n${bold('PENDING')}\n`
-    for (const it of q['Pending']) out += `  ${dim('•')} ${truncate(it, trunc - 4)}\n`
+    out += `\n${chalk.bold('PENDING')}\n`
+    for (const it of q['Pending']) out += `  ${chalk.dim('•')} ${truncate(it, trunc - 4)}\n`
   }
   return out
 }
@@ -751,13 +752,13 @@ const renderTokens = (claude, codex, copilot) => {
     },
   ]
   const max = Math.max(...rows.map((x) => x.output), 1)
-  let out = `\n${bold('TOKENS')} ${dim(`(last ${DAYS}d, project-scoped)`)} ${dim('· health: ✓ recent success / ⚠ recent auth fail / ? unknown')}\n`
+  let out = `\n${chalk.bold('TOKENS')} ${chalk.dim(`(last ${DAYS}d, project-scoped)`)} ${chalk.dim('· health: ✓ recent success / ⚠ recent auth fail / ? unknown')}\n`
   for (const x of rows) {
     const cachePct = x.input > 0 ? Math.round((x.cached / x.input) * 100) : 0
     const health = getAuthHealth(x.engine)
     out +=
       `  ${health.color(health.mark)} ${x.label.padEnd(8)} ${bar(x.output, max)}   ` +
-      `out: ${fmt(x.output).padEnd(6)} ${dim('·')} in: ${fmt(x.input)} ${dim(`(${cachePct}% cached)`)}\n`
+      `out: ${fmt(x.output).padEnd(6)} ${chalk.dim('·')} in: ${fmt(x.input)} ${chalk.dim(`(${cachePct}% cached)`)}\n`
   }
   return out
 }
@@ -775,7 +776,7 @@ const renderPerDay = (claude, codex, copilot) => {
   const spark = merged.map((x) => sparkChar(x.out, max)).join('')
   const peak = merged.reduce((p, x) => (x.out > p.out ? x : p), merged[0])
   const peakLabel = peak.out > 0 ? `peak ${dayLabel(peak.date)}: ${fmt(peak.out)}` : 'no activity'
-  return `\n${bold('PER DAY')} ${dim(`(${DAYS}d output, today rightmost)`)}  ${spark}   ${dim(peakLabel)}\n`
+  return `\n${chalk.bold('PER DAY')} ${chalk.dim(`(${DAYS}d output, today rightmost)`)}  ${spark}   ${chalk.dim(peakLabel)}\n`
 }
 
 // --- main ---
@@ -820,21 +821,21 @@ const render = () => {
   const copilot = getCopilotTokens()
   const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ')
   if (watchSec) process.stdout.write('\x1b[H\x1b[2J')
-  console.log(`${bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${dim(stamp + ' UTC')}`)
+  console.log(`${chalk.bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${chalk.dim(stamp + ' UTC')}`)
   const cluster = getClusterContext()
   const git = getGitContext()
   const ctx = []
   if (cluster) {
-    const id = cluster.shortId ? cyan(cluster.shortId) : '?'
+    const id = cluster.shortId ? chalk.cyan(cluster.shortId) : '?'
     ctx.push(cluster.name && cluster.name !== PROJECT_NAME
-      ? `${dim('cluster')} ${id} ${dim('·')} ${dim(cluster.name)}`
-      : `${dim('cluster')} ${id}`)
+      ? `${chalk.dim('cluster')} ${id} ${chalk.dim('·')} ${chalk.dim(cluster.name)}`
+      : `${chalk.dim('cluster')} ${id}`)
   }
   if (git) {
-    const dirty = git.dirty > 0 ? yellow(`${git.dirty} modified`) : green('clean')
-    ctx.push(`${dim('branch')} ${cyan(git.branch)} ${dim('·')} ${dirty}`)
+    const dirty = git.dirty > 0 ? chalk.yellow(`${git.dirty} modified`) : chalk.green('clean')
+    ctx.push(`${chalk.dim('branch')} ${chalk.cyan(git.branch)} ${chalk.dim('·')} ${dirty}`)
   }
-  if (ctx.length) console.log(`  ${ctx.join(`  ${dim('·')}  `)}`)
+  if (ctx.length) console.log(`  ${ctx.join(`  ${chalk.dim('·')}  `)}`)
   process.stdout.write(renderFeed(feed))
   process.stdout.write(renderRunning(dispatcher, running))
   process.stdout.write(renderRecent(recent))
@@ -844,7 +845,7 @@ const render = () => {
   process.stdout.write(renderQueue(queue))
   process.stdout.write(renderTokens(claude, codex, copilot))
   process.stdout.write(renderPerDay(claude, codex, copilot))
-  if (watchSec) console.log(dim(`\nrefreshing every ${watchSec}s · q or ctrl+c to exit`))
+  if (watchSec) console.log(chalk.dim(`\nrefreshing every ${watchSec}s · q or ctrl+c to exit`))
 }
 
 render()

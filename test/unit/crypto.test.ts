@@ -1,10 +1,10 @@
-// Unit tests for engine/util/crypto.mjs — AES-256-GCM helpers (V11.4).
+// Unit tests for engine/trust/crypto.mjs — AES-256-GCM helpers (V11.4).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import * as cryptoModule from '../../engine/util/crypto.mjs'
+import * as cryptoModule from '../../engine/trust/crypto.mjs'
 import { cleanupTempRoots, createTempRepo } from '../_helpers.js'
 
 const {

@@ -21,6 +21,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createConfig } from '../config/env.mjs'
 
 const ALGO = 'aes-256-gcm'
 const KEY_BYTES = 32
@@ -32,15 +33,17 @@ const SCHEMA = 'secret-aes-256-gcm-v1'
 // `~/.config/artel/master.key`. Env override `ARTEL_MASTER_KEY_FILE` wins
 // over both.
 export const masterKeyPath = () => {
-  if (process.env.ARTEL_MASTER_KEY_FILE) return process.env.ARTEL_MASTER_KEY_FILE
+  const override = createConfig().masterKeyFile
+  if (override) return override
   const xdg = process.env.XDG_CONFIG_HOME || join(homedir(), '.config')
   return join(xdg, 'artel', 'master.key')
 }
 
 // Resolve the 32-byte key from env-inline > file > error. Returns a Buffer.
 export const loadMasterKey = () => {
-  if (process.env.ARTEL_MASTER_KEY) {
-    const buf = Buffer.from(process.env.ARTEL_MASTER_KEY, 'base64')
+  const inline = createConfig().masterKeyInline
+  if (inline) {
+    const buf = Buffer.from(inline, 'base64')
     if (buf.length !== KEY_BYTES) {
       throw new Error(
         `ARTEL_MASTER_KEY must decode to ${KEY_BYTES} bytes (got ${buf.length}). ` +

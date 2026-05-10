@@ -1,4 +1,4 @@
-// Unit tests for engine/util/handlers.mjs — runHandler + builtins
+// Unit tests for engine/pipelines/handlers.mjs — runHandler + builtins
 // (V3.7.a). These actually spawn shell commands so they're slower
 // than pure-unit tests; the suite stays bounded by using `true` /
 // `false` / minimal `node -e` snippets.
@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runHandler, knownHandlers } from '../../engine/util/handlers.mjs'
+import { runHandler, knownHandlers } from '../../engine/pipelines/handlers.mjs'
 
 const tempDirs: string[] = []
 const mktmp = () => {

@@ -41,6 +41,7 @@ import { basename, join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
 import { mtimeMs, readJsonl, walkJsonl } from '../util/fs.mjs'
 import { runWithTimeout } from '../util/proc.mjs'
+import { createConfig } from '../config/env.mjs'
 
 export const id = 'codex'
 export const command = 'codex'
@@ -59,8 +60,7 @@ const SANDBOX_FLAGS = {
 // the user rather than masking it.
 const isClaudeNamespaceModel = (m) => /^(opus|sonnet|haiku|claude-)/i.test(m || '')
 
-const sessionsDir = () =>
-  process.env.ARTEL_CODEX_SESSIONS_DIR || join(homedir(), '.codex/sessions')
+// (createConfig().codexSessionsDir is read directly at use sites below)
 
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), '.codex')
 
@@ -90,7 +90,7 @@ export function args (meta, promptParts, session = {}) {
 
 const findSessionFile = (sessionId) => {
   if (!sessionId) return null
-  for (const path of walkJsonl(sessionsDir())) {
+  for (const path of walkJsonl(createConfig().codexSessionsDir)) {
     if (basename(path).includes(sessionId)) return path
   }
   return null
@@ -198,7 +198,7 @@ export function sessionTokens ({ projectName, sinceMs = 0 } = {}) {
   const perDay = {}
   if (!projectName) return { totals, perDay }
 
-  for (const path of walkJsonl(sessionsDir())) {
+  for (const path of walkJsonl(createConfig().codexSessionsDir)) {
     if ((mtimeMs(path) ?? 0) < sinceMs) continue
 
     let inProject = false

@@ -12,17 +12,18 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { buildTaskContextBlock, parseJsonObject } from '../core/dispatch_api.mjs'
-import { parseFrontmatter, normaliseFrontmatter } from '../util/frontmatter.mjs'
-import { expandSkills } from '../util/skills.mjs'
-import { validateRoleFrontmatter } from '../util/contract.mjs'
-import { listDrivers, loadDriver } from '../util/drivers.mjs'
-import { PROJECT_DIR, die } from '../util/cli.mjs'
+import { parseFrontmatter, normaliseFrontmatter } from '../agents/frontmatter.mjs'
+import { expandSkills } from '../agents/skills.mjs'
+import { validateRoleFrontmatter } from '../agents/contract.mjs'
+import { listDrivers, loadDriver } from '../drivers/loader.mjs'
+import { die } from '../util/chalk.mjs'
+import { config, dispatchEnv } from '../config/env.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PLATFORM_DIR = join(here, '..', '..')
 const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
 const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
-const PROJECT_SKILLS_DIR = join(PROJECT_DIR, '.artel', 'skills')
+const PROJECT_SKILLS_DIR = config.skillsDir
 
 const listDir = (dir, ext) =>
   existsSync(dir)
@@ -93,11 +94,12 @@ if (values['codex-effort'] && !values.effort) {
 }
 
 const [role, ...promptParts] = positionals
-const task = values.task || process.env.ARTEL_TASK || null
+const dEnv = dispatchEnv()
+const task = values.task || dEnv.task
 const taskAttrs = values['task-attrs']
   ? parseJsonObject(values['task-attrs'], '--task-attrs')
-  : process.env.ARTEL_TASK_ATTRS
-    ? parseJsonObject(process.env.ARTEL_TASK_ATTRS, 'ARTEL_TASK_ATTRS')
+  : dEnv.taskAttrs
+    ? parseJsonObject(dEnv.taskAttrs, 'ARTEL_TASK_ATTRS')
     : null
 
 const rolePath = join(AGENTS_DIR, `${role}.md`)

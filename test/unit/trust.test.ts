@@ -1,9 +1,9 @@
-// Unit tests for engine/util/trust.mjs — identity registry + env builder.
+// Unit tests for engine/trust/trust.mjs — identity registry + env builder.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import * as trustModule from '../../engine/util/trust.mjs'
+import * as trustModule from '../../engine/trust/trust.mjs'
 import { cleanupTempRoots, createTempRepo } from '../_helpers.js'
 
 type Identity = { name?: string; email?: string; ssh_key?: string }

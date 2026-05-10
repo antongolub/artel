@@ -14,19 +14,23 @@ import { dirname, join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readClusterIdentity } from '../core/cluster.mjs'
-import { PROJECT_DIR as projectDir } from '../util/cli.mjs'
+import { config } from '../config/env.mjs'
+
+const { projectDir } = config
 
 const here = dirname(fileURLToPath(import.meta.url))
 // `here` is engine/cli/, so platform root is two levels up.
 const platformDir = dirname(dirname(here))
 const agentsDir = join(platformDir, 'agents')
 const driversDir = join(platformDir, 'engine', 'drivers')
-const projectArtelDir = join(projectDir, '.artel')
-const queuePath = join(projectArtelDir, 'QUEUE.md')
-const dispatchDir = join(projectArtelDir, '.dispatches')
-const eventsPath = join(projectArtelDir, 'events.jsonl')
-const dispatcherStatePath = join(projectArtelDir, 'dispatcher_state.json')
-const outPath = join(projectArtelDir, 'state.md')
+const {
+  artelDir: projectArtelDir,
+  queuePath,
+  dispatchesDir: dispatchDir,
+  eventsPath,
+  dispatcherStatePath,
+  statePath: outPath,
+} = config
 
 const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 

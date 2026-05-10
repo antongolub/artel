@@ -36,10 +36,13 @@ import {
   setCredential,
   setIdentity,
   sshKeyPath,
-} from '../util/trust.mjs'
-import { generateMasterKey, loadMasterKey, masterKeyPath } from '../util/crypto.mjs'
-import { appendInfraEvent } from '../util/audit.mjs'
-import { PROJECT_DIR, dim, bold, cyan, green, yellow, die } from '../util/cli.mjs'
+} from '../trust/trust.mjs'
+import { generateMasterKey, loadMasterKey, masterKeyPath } from '../trust/crypto.mjs'
+import { appendInfraEvent } from '../core/audit.mjs'
+import { chalk, die } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
+
+const { projectDir: PROJECT_DIR } = config
 
 const usage = (code = 2) => {
   console.error(`\
@@ -114,33 +117,33 @@ if (sub === 'list') {
   }
 
   const names = Object.keys(identities)
-  console.log(`\n${bold('artel trust list')} ${dim(`— ${idsPath}`)}\n`)
-  console.log(`${bold('Identities')}`)
+  console.log(`\n${chalk.bold('artel trust list')} ${chalk.dim(`— ${idsPath}`)}\n`)
+  console.log(`${chalk.bold('Identities')}`)
   if (!names.length) {
-    console.log(`  ${dim('(no identities — try: artel trust set-identity bot --author "artel-bot <bot@cluster.local>")')}`)
+    console.log(`  ${chalk.dim('(no identities — try: artel trust set-identity bot --author "artel-bot <bot@cluster.local>")')}`)
   } else {
     for (const name of names.sort()) {
       const id = identities[name]
-      const author = id.name && id.email ? `${id.name} <${id.email}>` : (id.name || id.email || dim('—'))
-      const ssh = id.ssh_key ? `${dim('· ssh')} ${id.ssh_key}` : ''
-      console.log(`  ${cyan(name.padEnd(12))} ${author} ${ssh}`)
+      const author = id.name && id.email ? `${id.name} <${id.email}>` : (id.name || id.email || chalk.dim('—'))
+      const ssh = id.ssh_key ? `${chalk.dim('· ssh')} ${id.ssh_key}` : ''
+      console.log(`  ${chalk.cyan(name.padEnd(12))} ${author} ${ssh}`)
     }
   }
 
   const modeBadge = mode === 'encrypted'
-    ? `${green('encrypted')}`
+    ? `${chalk.green('encrypted')}`
     : mode === 'plaintext'
-      ? `${yellow('plaintext')}`
-      : dim('empty')
-  console.log(`\n${bold('Credentials')} ${dim('· mode:')} ${modeBadge} ${dim(`— ${credPath}`)}`)
+      ? `${chalk.yellow('plaintext')}`
+      : chalk.dim('empty')
+  console.log(`\n${chalk.bold('Credentials')} ${chalk.dim('· mode:')} ${modeBadge} ${chalk.dim(`— ${credPath}`)}`)
   if (credReadError) {
-    console.log(`  ${dim('(read failed:')} ${credReadError}${dim(')')}`)
+    console.log(`  ${chalk.dim('(read failed:')} ${credReadError}${chalk.dim(')')}`)
   } else if (!credNames.length && mode === 'empty') {
-    console.log(`  ${dim('(none — try: artel trust set-credential GITHUB_TOKEN --from-env MY_VAR)')}`)
+    console.log(`  ${chalk.dim('(none — try: artel trust set-credential GITHUB_TOKEN --from-env MY_VAR)')}`)
   } else if (!credNames.length) {
-    console.log(`  ${dim('(none registered)')}`)
+    console.log(`  ${chalk.dim('(none registered)')}`)
   } else {
-    for (const name of credNames) console.log(`  ${cyan(name)}`)
+    for (const name of credNames) console.log(`  ${chalk.cyan(name)}`)
   }
   console.log()
   process.exit(0)
@@ -303,11 +306,11 @@ if (sub === 'gen-ssh') {
   })
   const pub = readFileSync(`${keyPath}.pub`, 'utf8').trim()
   const size = statSync(keyPath).size
-  console.error(`${green('✓')} keypair for '${identity}' at ${keyPath} (${size} bytes, mode 0600)`)
+  console.error(`${chalk.green('✓')} keypair for '${identity}' at ${keyPath} (${size} bytes, mode 0600)`)
   console.error(`  ssh_key path recorded in identities.json`)
-  console.error(`  ${dim('public key (paste into GitHub deploy keys etc.):')}`)
+  console.error(`  ${chalk.dim('public key (paste into GitHub deploy keys etc.):')}`)
   console.log(pub)
-  console.error(`\n  ${dim('reminder: gitignore .artel/trust/keys/ if you keep .artel under version control')}`)
+  console.error(`\n  ${chalk.dim('reminder: gitignore .artel/trust/keys/ if you keep .artel under version control')}`)
   process.exit(0)
 }
 
@@ -338,13 +341,13 @@ if (sub === 'gen-key') {
     path,
     force: !!values.force,
   })
-  console.error(`${green('✓')} master key written to ${path} (32 bytes, mode 0600)`)
+  console.error(`${chalk.green('✓')} master key written to ${path} (32 bytes, mode 0600)`)
   if (values.print) {
-    console.error(`  ${dim('base64 (also acceptable as ARTEL_MASTER_KEY env var):')}`)
+    console.error(`  ${chalk.dim('base64 (also acceptable as ARTEL_MASTER_KEY env var):')}`)
     console.log(key.toString('base64'))
   } else {
-    console.error(`  ${dim('keep this file safe — losing it makes encrypted credentials unrecoverable')}`)
-    console.error(`  ${dim('to use on another machine: copy the file or pass via ARTEL_MASTER_KEY env var')}`)
+    console.error(`  ${chalk.dim('keep this file safe — losing it makes encrypted credentials unrecoverable')}`)
+    console.error(`  ${chalk.dim('to use on another machine: copy the file or pass via ARTEL_MASTER_KEY env var')}`)
   }
   process.exit(0)
 }
@@ -359,11 +362,11 @@ if (sub === 'encrypt') {
   try { result = encryptCredentials(PROJECT_DIR) }
   catch (err) { die(`encrypt: ${err.message}`, 1) }
   if (!result.changed) {
-    console.error(`${dim('credentials already encrypted at')} ${credentialsEncPath(PROJECT_DIR)}`)
+    console.error(`${chalk.dim('credentials already encrypted at')} ${credentialsEncPath(PROJECT_DIR)}`)
   } else {
     appendInfraEvent(PROJECT_DIR, 'trust.credentials.encrypted', { from_mode: fromMode })
-    console.error(`${green('✓')} credentials encrypted at ${credentialsEncPath(PROJECT_DIR)}`)
-    console.error(`  ${dim('plaintext credentials.json removed')}`)
+    console.error(`${chalk.green('✓')} credentials encrypted at ${credentialsEncPath(PROJECT_DIR)}`)
+    console.error(`  ${chalk.dim('plaintext credentials.json removed')}`)
   }
   process.exit(0)
 }
@@ -378,12 +381,12 @@ if (sub === 'decrypt') {
   try { result = decryptCredentials(PROJECT_DIR) }
   catch (err) { die(`decrypt: ${err.message}`, 1) }
   if (!result.changed) {
-    console.error(`${dim('credentials are not encrypted (mode:')} ${credentialsMode(PROJECT_DIR)}${dim(')')}`)
+    console.error(`${chalk.dim('credentials are not encrypted (mode:')} ${credentialsMode(PROJECT_DIR)}${chalk.dim(')')}`)
   } else {
     appendInfraEvent(PROJECT_DIR, 'trust.credentials.decrypted', { from_mode: fromMode })
-    console.error(`${green('✓')} credentials decrypted at ${credentialsPath(PROJECT_DIR)}`)
-    console.error(`  ${dim('encrypted .enc file removed')}`)
-    console.error(`  ${yellow('!')} ${dim('plaintext credentials.json now in the truststore — gitignore!')}`)
+    console.error(`${chalk.green('✓')} credentials decrypted at ${credentialsPath(PROJECT_DIR)}`)
+    console.error(`  ${chalk.dim('encrypted .enc file removed')}`)
+    console.error(`  ${chalk.yellow('!')} ${chalk.dim('plaintext credentials.json now in the truststore — gitignore!')}`)
   }
   process.exit(0)
 }

@@ -1,10 +1,10 @@
-// Unit tests for engine/util/drivers.mjs — overlay-precedence loader (V6).
+// Unit tests for engine/drivers/loader.mjs — overlay-precedence loader (V6).
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import * as driversModule from '../../engine/util/drivers.mjs'
+import * as driversModule from '../../engine/drivers/loader.mjs'
 
 type Mod = Record<string, unknown> & { args?: (...a: unknown[]) => unknown }
 

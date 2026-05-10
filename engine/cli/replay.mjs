@@ -17,12 +17,12 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
-import { PROJECT_DIR } from '../util/cli.mjs'
+import { config } from '../config/env.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const SPAWN_PATH = join(here, 'spawn.mjs')
 
-const DISPATCHES_DIR = join(PROJECT_DIR, '.artel', '.dispatches')
+const DISPATCHES_DIR = config.dispatchesDir
 
 const usage = (code = 2) => {
   console.error(`\

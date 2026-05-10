@@ -24,7 +24,6 @@
 
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { readJsonl } from '../util/fs.mjs'
 import { runWithTimeout } from '../util/proc.mjs'
@@ -43,8 +42,7 @@ const SANDBOX_TO_PERMISSION_MODE = {
 // Conservative: matches only well-known OpenAI families.
 const isCodexNamespaceModel = (m) => /^(gpt-|o\d|chatgpt-|codex-)/i.test(m || '')
 
-const projectsDir = () =>
-  process.env.ARTEL_CLAUDE_PROJECTS_DIR || join(homedir(), '.claude/projects')
+import { createConfig } from '../config/env.mjs'
 
 // claude encodes `/Users/me/proj` → `-Users-me-proj`.
 const encodeProjectDir = (dir) => '-' + dir.replace(/^\//, '').replace(/\//g, '-')
@@ -99,7 +97,7 @@ export function probe () {
       hint: `${command} CLI not on PATH — see https://docs.anthropic.com/en/docs/claude-code`,
     }
   }
-  const dir = projectsDir()
+  const dir = createConfig().claudeProjectsDir
   let lastSessionMs = 0
   let sessions = 0
   if (existsSync(dir)) {
@@ -168,7 +166,7 @@ export function sessionTokens ({ projectDir, sinceMs = 0 } = {}) {
   const perDay = {}
   if (!projectDir) return { totals, perDay }
 
-  const dir = join(projectsDir(), encodeProjectDir(projectDir))
+  const dir = join(createConfig().claudeProjectsDir, encodeProjectDir(projectDir))
   if (!existsSync(dir)) return { totals, perDay }
 
   for (const f of readdirSync(dir)) {

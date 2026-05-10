@@ -11,29 +11,24 @@
 // default locations for tests / sandboxes.
 
 import { existsSync, readdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createConfig } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-// engine/util/ → platform root is two up
-const PLATFORM_DRIVERS_DIR = join(here, '..', 'drivers')
+// loader.mjs lives next to its peer drivers — the platform default dir
+// is the directory containing this module.
+const PLATFORM_DRIVERS_DIR = dirname(fileURLToPath(import.meta.url))
 
-const userOverlayDir = () =>
-  process.env.ARTEL_USER_DRIVERS_DIR || join(homedir(), '.artel', 'drivers')
-
-const projectOverlayDir = () => {
-  const project = process.env.ARTEL_PROJECT_DIR || process.cwd()
-  return join(project, '.artel', 'drivers')
+// Resolve config per call so test overrides of ARTEL_PROJECT_DIR /
+// ARTEL_USER_DRIVERS_DIR between calls take effect.
+const layers = () => {
+  const cfg = createConfig()
+  return [
+    { source: 'project',  dir: cfg.driversDir },
+    { source: 'user',     dir: cfg.userDriversDir },
+    { source: 'platform', dir: PLATFORM_DRIVERS_DIR },
+  ]
 }
-
-// Each layer in resolution order. Listed once; functions defer env reads
-// to call time so test overrides still take effect.
-const layers = () => [
-  { source: 'project', dir: projectOverlayDir() },
-  { source: 'user', dir: userOverlayDir() },
-  { source: 'platform', dir: PLATFORM_DRIVERS_DIR },
-]
 
 // Resolve `<engineId>.mjs` to its effective on-disk path + which layer
 // provided it. Returns null when no layer has the driver.
@@ -75,10 +70,14 @@ export const loadDriver = async (engineId) => {
   return { id: engineId, source: hit.source, path: hit.path, module: mod }
 }
 
+// Skip the loader itself + any underscore-prefixed sibling lib so the
+// platform-default dir can host both the resolver and its drivers.
+const SKIP = new Set(['loader.mjs'])
+
 const dirEngines = (dir) =>
   existsSync(dir)
     ? readdirSync(dir)
-        .filter((f) => f.endsWith('.mjs'))
+        .filter((f) => f.endsWith('.mjs') && !f.startsWith('_') && !SKIP.has(f))
         .map((f) => f.slice(0, -'.mjs'.length))
     : []
 

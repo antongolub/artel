@@ -10,10 +10,13 @@ import { fileURLToPath } from 'node:url'
 import * as schemaModule from '../engine/core/schema.mjs'
 import * as clusterModule from '../engine/core/cluster.mjs'
 import * as idsModule from '../engine/util/ids.mjs'
-import * as contractModule from '../engine/util/contract.mjs'
+import * as contractModule from '../engine/agents/contract.mjs'
 import * as claudeModule from '../engine/drivers/claude.mjs'
 import * as codexModule from '../engine/drivers/codex.mjs'
 import * as copilotModule from '../engine/drivers/copilot.mjs'
+// dispatchLifecycle stays under core/; the V12 reorg moved its peers
+// (env/trust/git/pipelines) into domain dirs, but the lifecycle itself
+// is still core orchestration.
 import { dispatchLifecycle as dispatchLifecycleRaw } from '../engine/core/dispatch_lifecycle.mjs'
 
 // -------- typed re-exports of engine modules --------
@@ -177,6 +180,10 @@ export const runNode = (cwd: string, args: string[], env: Record<string, string>
 
 // Bundled lists of files needed by various e2e CLI smoke tests.
 // Centralised so adding a new dependency in a CLI = one place to update.
+// Layout follows the V12 domain split: core/ holds orchestration,
+// config/ the env contract + path layout, trust/ + git/ + pipelines/
+// the per-domain modules, and util/ keeps only cross-cutting tiny
+// helpers (ids/fs/proc/frontmatter/contract/skills/audit).
 export const ENGINE_FILES_CORE = [
   'engine/core/dispatch_api.mjs',
   'engine/core/dispatch_lifecycle.mjs',
@@ -185,22 +192,27 @@ export const ENGINE_FILES_CORE = [
   'engine/core/cluster.mjs',
   'engine/core/queue_graph.mjs',
 ]
+// Everything a CLI script transitively needs that isn't a driver or a
+// core orchestration module. Order doesn't matter (cpSync each file
+// independently). `engine/util/chalk.mjs` is here because most CLIs
+// import it for the chalk-shaped colour API + die().
 export const ENGINE_FILES_UTIL = [
-  'engine/util/cli.mjs',
+  'engine/util/chalk.mjs',
+  'engine/config/env.mjs',
   'engine/util/ids.mjs',
   'engine/util/fs.mjs',
-  'engine/util/frontmatter.mjs',
-  'engine/util/skills.mjs',
-  'engine/util/contract.mjs',
-  'engine/util/git.mjs',
-  'engine/util/drivers.mjs',
+  'engine/agents/frontmatter.mjs',
+  'engine/agents/skills.mjs',
+  'engine/agents/contract.mjs',
+  'engine/git/git.mjs',
+  'engine/git/worktree.mjs',
+  'engine/drivers/loader.mjs',
   'engine/util/proc.mjs',
-  'engine/util/trust.mjs',
-  'engine/util/crypto.mjs',
-  'engine/util/audit.mjs',
-  'engine/util/pipelines.mjs',
-  'engine/util/worktree.mjs',
-  'engine/util/handlers.mjs',
+  'engine/trust/trust.mjs',
+  'engine/trust/crypto.mjs',
+  'engine/core/audit.mjs',
+  'engine/pipelines/pipelines.mjs',
+  'engine/pipelines/handlers.mjs',
 ]
 export const ENGINE_FILES_DRIVERS = [
   'engine/drivers/claude.mjs',

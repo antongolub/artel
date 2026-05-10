@@ -1,9 +1,9 @@
-// Unit tests for engine/util/pipelines.mjs — parser/validator/resolver (V3.1).
+// Unit tests for engine/pipelines/pipelines.mjs — parser/validator/resolver (V3.1).
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import * as pipelinesModule from '../../engine/util/pipelines.mjs'
+import * as pipelinesModule from '../../engine/pipelines/pipelines.mjs'
 import { cleanupTempRoots, createTempRepo } from '../_helpers.js'
 
 const { validatePipeline, loadPipelineFile, resolveNext, listPipelineFiles, pipelinePath, pipelinesDir } = pipelinesModule as {

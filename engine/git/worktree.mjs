@@ -16,14 +16,13 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-
-const WORKTREES_REL = ['.artel', '.worktrees']
+import { pathsFor } from '../config/env.mjs'
 
 // Resolve where a branch's worktree lives. Slashes in branch names
 // (`implementer/task-x`) become directory nesting — that's fine; git
 // handles it. Caller mkdir-p's parents.
 export const worktreeDir = (projectDir, branch) =>
-  join(projectDir, ...WORKTREES_REL, branch)
+  join(pathsFor(projectDir).worktreesDir, branch)
 
 const gitText = (gitImpl, args) => {
   const r = gitImpl(args)

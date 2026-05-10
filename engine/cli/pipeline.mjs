@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
-import { appendWorkloadEvent } from '../util/audit.mjs'
+import { appendWorkloadEvent } from '../core/audit.mjs'
 import {
   aggregateDisposition,
   aggregateForJoin,
@@ -37,11 +37,14 @@ import {
   renderTemplate,
   resolveNext,
   validatePipeline,
-} from '../util/pipelines.mjs'
+} from '../pipelines/pipelines.mjs'
 import { dispatchLifecycle } from '../core/dispatch_lifecycle.mjs'
-import { runHandler } from '../util/handlers.mjs'
+import { runHandler } from '../pipelines/handlers.mjs'
 import { uuidv7 } from '../util/ids.mjs'
-import { PROJECT_DIR, dim, bold, cyan, green, yellow, red, die } from '../util/cli.mjs'
+import { chalk, die } from '../util/chalk.mjs'
+import { config, dispatchEnv } from '../config/env.mjs'
+
+const { projectDir: PROJECT_DIR } = config
 
 // V3.6 — pretty-print one predicate for `show`. Recurses through
 // compound shapes (not/and/or). Atomic shape covers all of
@@ -68,25 +71,25 @@ const renderPredicate = (pred) => {
 const j = JSON.stringify
 const HANDLER_META = {
   'builtin.exec': {
-    walkerHint: (n) => `${dim('cmd=')}${j(n.cmd)}`,
+    walkerHint: (n) => `${chalk.dim('cmd=')}${j(n.cmd)}`,
     showHint:   (n) => ` cmd=${j(n.cmd)}${n.timeout_ms ? ` timeout_ms=${n.timeout_ms}` : ''}`,
     startSpec:  (n) => ({ cmd: n.cmd, ...(n.timeout_ms != null ? { timeout_ms: n.timeout_ms } : {}) }),
     durSuffix:  (_, ec) => `exit=${ec}`,
   },
   'builtin.assert': {
-    walkerHint: (n) => `${dim('if=')}${renderPredicate(n.if)}`,
+    walkerHint: (n) => `${chalk.dim('if=')}${renderPredicate(n.if)}`,
     showHint:   (n) => ` if(${renderPredicate(n.if)})${n.message ? ` message=${j(n.message)}` : ''}`,
     startSpec:  (n) => ({ predicate: n.if, ...(n.message ? { message_template: n.message } : {}) }),
     durSuffix:  () => null,
   },
   'builtin.set_attr': {
-    walkerHint: (n) => [n.set && `${dim('set=')}${j(n.set)}`, n.unset && `${dim('unset=')}${j(n.unset)}`].filter(Boolean).join(' '),
+    walkerHint: (n) => [n.set && `${chalk.dim('set=')}${j(n.set)}`, n.unset && `${chalk.dim('unset=')}${j(n.unset)}`].filter(Boolean).join(' '),
     showHint:   (n) => `${n.set ? ` set=${j(n.set)}` : ''}${n.unset ? ` unset=${j(n.unset)}` : ''}`,
     startSpec:  (n) => ({ ...(n.set ? { set: n.set } : {}), ...(n.unset ? { unset: n.unset } : {}) }),
     durSuffix:  () => null,
   },
   'builtin.git_tag': {
-    walkerHint: (n) => `${dim('name=')}${j(n.name)}${n.target ? ` ${dim('target=')}${j(n.target)}` : ''}`,
+    walkerHint: (n) => `${chalk.dim('name=')}${j(n.name)}${n.target ? ` ${chalk.dim('target=')}${j(n.target)}` : ''}`,
     showHint:   (n) => ` name=${j(n.name)}${n.lightweight === true ? ' lightweight' : ` message=${j(n.message)}`}${n.target ? ` target=${j(n.target)}` : ''}`,
     startSpec:  (n) => ({ name: n.name, ...(n.message != null ? { message: n.message } : {}), ...(n.target != null ? { target: n.target } : {}), annotated: n.lightweight !== true }),
     durSuffix:  (r) => r.tag_name ? `tag=${r.tag_name}` : null,
@@ -144,7 +147,7 @@ if (sub === 'register') {
     edge_count: def.edges.length,
   })
 
-  console.error(`${green('✓')} pipeline '${def.id}' v${def.version} registered → ${target}`)
+  console.error(`${chalk.green('✓')} pipeline '${def.id}' v${def.version} registered → ${target}`)
   process.exit(0)
 }
 
@@ -182,17 +185,17 @@ if (sub === 'list') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel pipeline list')} ${dim(`— ${pipelinesDir(PROJECT_DIR)}`)}\n`)
+  console.log(`\n${chalk.bold('artel pipeline list')} ${chalk.dim(`— ${pipelinesDir(PROJECT_DIR)}`)}\n`)
   if (!pipelines.length) {
-    console.log(`  ${dim('(no pipelines registered — try: artel pipeline register <file>)')}`)
+    console.log(`  ${chalk.dim('(no pipelines registered — try: artel pipeline register <file>)')}`)
   } else {
     for (const p of pipelines) {
       if (p.error) {
-        console.log(`  ${red('!')} ${cyan(p.id)} ${dim('— parse error:')} ${p.error}`)
+        console.log(`  ${chalk.red('!')} ${chalk.cyan(p.id)} ${chalk.dim('— parse error:')} ${p.error}`)
         continue
       }
-      const desc = p.description ? ` ${dim('—')} ${dim(p.description)}` : ''
-      console.log(`  ${cyan(p.id.padEnd(28))} ${dim(`v${p.version}`)} ${dim(`(${p.node_count} nodes, ${p.edge_count} edges)`)}${desc}`)
+      const desc = p.description ? ` ${chalk.dim('—')} ${chalk.dim(p.description)}` : ''
+      console.log(`  ${chalk.cyan(p.id.padEnd(28))} ${chalk.dim(`v${p.version}`)} ${chalk.dim(`(${p.node_count} nodes, ${p.edge_count} edges)`)}${desc}`)
     }
   }
   console.log()
@@ -225,39 +228,39 @@ if (sub === 'show') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel pipeline show')} ${cyan(def.id)} ${dim(`v${def.version}`)}\n`)
-  if (def.description) console.log(`  ${dim(def.description)}\n`)
-  console.log(`  ${dim('entry:')} ${cyan(def.entry)}\n`)
-  console.log(`  ${bold('Nodes')}`)
+  console.log(`\n${chalk.bold('artel pipeline show')} ${chalk.cyan(def.id)} ${chalk.dim(`v${def.version}`)}\n`)
+  if (def.description) console.log(`  ${chalk.dim(def.description)}\n`)
+  console.log(`  ${chalk.dim('entry:')} ${chalk.cyan(def.entry)}\n`)
+  console.log(`  ${chalk.bold('Nodes')}`)
   for (const [nid, node] of Object.entries(def.nodes)) {
     if (node.type === 'dispatch') {
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('dispatch')} role=${node.role}${node.engine ? ` engine=${node.engine}` : ''}${node.model ? ` model=${node.model}` : ''}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`)
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('dispatch')} role=${node.role}${node.engine ? ` engine=${node.engine}` : ''}${node.model ? ` model=${node.model}` : ''}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`)
     } else if (node.type === 'terminal') {
-      const colour = node.final_state === 'completed' ? green
-        : node.final_state === 'aborted' ? yellow : red
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('terminal')} → ${colour(node.final_state)}`)
+      const colour = node.final_state === 'completed' ? chalk.green
+        : node.final_state === 'aborted' ? chalk.yellow : chalk.red
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('terminal')} → ${colour(node.final_state)}`)
     } else if (node.type === 'parallel') {
       const join = node.join || 'all-complete'
       const kSuffix = join === 'k-of-n' ? ` k=${node.k}` : ''
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('parallel')} branches=[${node.branches.join(', ')}] join=${join}${kSuffix}`)
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('parallel')} branches=[${node.branches.join(', ')}] join=${join}${kSuffix}`)
     } else if (node.type === 'condition') {
       // V3.6 — recursive renderer covers atomic (equals/ne/in/exists/
       // gt/gte/lt/lte) and compound (not/and/or) shapes.
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
     } else if (node.type === 'handler') {
       const detail = HANDLER_META[node.handler]?.showHint(node) || ''
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('handler')} ${node.handler}${detail}`)
     } else if (node.type === 'subpipeline') {
       // V3.10.a — show the child pipeline_id + attrs spec
       // (templates unrendered). V3.10.c — `inherit` flag.
       const attrsDetail = node.attrs ? ` attrs=${JSON.stringify(node.attrs)}` : ''
       const inheritDetail = node.inherit_attrs === true ? ' inherit_attrs' : ''
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('subpipeline')} pipeline_id=${cyan(node.pipeline_id)}${inheritDetail}${attrsDetail}`)
+      console.log(`    ${chalk.cyan(nid.padEnd(20))} ${chalk.dim('subpipeline')} pipeline_id=${chalk.cyan(node.pipeline_id)}${inheritDetail}${attrsDetail}`)
     }
   }
-  console.log(`\n  ${bold('Edges')}`)
+  console.log(`\n  ${chalk.bold('Edges')}`)
   for (const e of def.edges) {
-    console.log(`    ${cyan(e.from)} ${dim('--')} on_${e.on_disposition} ${dim('->')} ${cyan(e.to)}`)
+    console.log(`    ${chalk.cyan(e.from)} ${chalk.dim('--')} on_${e.on_disposition} ${chalk.dim('->')} ${chalk.cyan(e.to)}`)
   }
   console.log()
   process.exit(0)
@@ -332,7 +335,7 @@ if (sub === 'run') {
     ...(values['parent-node'] ? { parent_pipeline_node_id: values['parent-node'] } : {}),
   })
 
-  console.error(`${bold('▶')} pipeline ${cyan(def.id)} v${def.version} run=${dim(runId.slice(-12))} prefix=${dim(taskPrefix)}`)
+  console.error(`${chalk.bold('▶')} pipeline ${chalk.cyan(def.id)} v${def.version} run=${chalk.dim(runId.slice(-12))} prefix=${chalk.dim(taskPrefix)}`)
 
   let nodeId = def.entry
   let lastDisposition = null
@@ -371,7 +374,7 @@ if (sub === 'run') {
       ? `${taskPrefix}-${parallelOf}-${id}`
       : `${taskPrefix}-${id}`
     const node = def.nodes[id]
-    console.error(`${bold('◆')} ${cyan(id)} ${dim('→')} dispatch role=${node.role}${node.engine ? ` engine=${node.engine}` : ''} task=${dim(taskSlug)}`)
+    console.error(`${chalk.bold('◆')} ${chalk.cyan(id)} ${chalk.dim('→')} dispatch role=${node.role}${node.engine ? ` engine=${node.engine}` : ''} task=${chalk.dim(taskSlug)}`)
     // V3.5 — render `{{ attr }}` substitutions in the prompt against
     // the same merged attrs blob that flows through as `task_attrs`.
     // Built once here so the rendered prompt and the passed-through
@@ -433,7 +436,7 @@ if (sub === 'run') {
     }
     const meta = HANDLER_META[node.handler]
     const hint = meta?.walkerHint(node) || ''
-    console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${hint ? ' ' + hint : ''}`)
+    console.error(`${chalk.bold('●')} ${chalk.cyan(id)} ${chalk.dim('→')} handler ${node.handler}${hint ? ' ' + hint : ''}`)
     const handlerId = uuidv7()
     // Common identifiers in every pipeline_handler.* event payload
     // for this step; spread into both start and end (success+catch).
@@ -457,7 +460,7 @@ if (sub === 'run') {
       const ec = result.exitCode == null ? '?' : result.exitCode
       const suffix = meta?.durSuffix(result, ec)
       const durLabel = suffix ? `${suffix}, ${result.durationMs}ms` : `${result.durationMs}ms`
-      console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
+      console.error(`  ${chalk.dim('disposition:')} ${result.disposition} ${chalk.dim(`(${durLabel})`)}${result.error ? ` ${chalk.dim('error:')} ${result.error}` : ''}`)
       appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
         ...evBase,
         disposition: result.disposition,
@@ -534,7 +537,7 @@ if (sub === 'run') {
     }
     const childRunId = uuidv7()
     const childChain = [...parentChain, def.id].join(',')
-    console.error(`${bold('▦')} ${cyan(id)} ${dim('→')} subpipeline ${cyan(node.pipeline_id)} ${dim(`run=${childRunId.slice(-12)}`)}${node.attrs ? ` ${dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
+    console.error(`${chalk.bold('▦')} ${chalk.cyan(id)} ${chalk.dim('→')} subpipeline ${chalk.cyan(node.pipeline_id)} ${chalk.dim(`run=${childRunId.slice(-12)}`)}${node.attrs ? ` ${chalk.dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
     // V3.10.e — observability event around the spawn. Mirrors the
     // V3.7.b pipeline_handler.* shape: subpipeline_id is a fresh
     // UUIDv7 join key; child_run_id + child_pipeline_id record the
@@ -605,7 +608,7 @@ if (sub === 'run') {
     }
     const disposition = childExit === 0 ? 'success' : 'error'
     const durationMs = Date.now() - Date.parse(startedAt)
-    console.error(`  ${dim('disposition:')} ${disposition} ${dim(`(child exit=${childExit})`)}`)
+    console.error(`  ${chalk.dim('disposition:')} ${disposition} ${chalk.dim(`(child exit=${childExit})`)}`)
     appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.end', {
       ...evBase,
       disposition,
@@ -643,7 +646,7 @@ if (sub === 'run') {
     const node = def.nodes[nodeId]
     if (node.type === 'terminal') {
       finalState = node.final_state
-      console.error(`${bold('■')} terminal ${cyan(nodeId)} → ${node.final_state === 'completed' ? green : node.final_state === 'aborted' ? yellow : red}(${node.final_state})`)
+      console.error(`${chalk.bold('■')} terminal ${chalk.cyan(nodeId)} → ${node.final_state === 'completed' ? chalk.green : node.final_state === 'aborted' ? chalk.yellow : chalk.red}(${node.final_state})`)
       break
     }
 
@@ -666,10 +669,9 @@ if (sub === 'run') {
       // dispatch to isolate via worktree (otherwise the child's
       // `git checkout -B` would race against sibling branches'
       // operations on the parent's main checkout).
-      const forceWorktree = process.env.ARTEL_PIPELINE_FORCE_WORKTREE === '1'
       const result = await runDispatchNode(nodeId, null, {
         signal: runAbort.signal,
-        useWorktree: forceWorktree,
+        useWorktree: dispatchEnv().pipelineForceWorktree,
       })
       if (result.__error) {
         abortReason = `dispatch threw at node '${nodeId}': ${result.__error}`
@@ -690,7 +692,7 @@ if (sub === 'run') {
       // worst-of-children aggregate.
       const join = node.join || 'all-complete'
       const quorum = quorumOf(node)
-      console.error(`${bold('▥')} ${cyan(nodeId)} ${dim('→')} parallel branches=[${node.branches.join(', ')}] join=${join}${join === 'k-of-n' ? ` k=${node.k}` : ''} ${dim('(concurrent worktrees)')}`)
+      console.error(`${chalk.bold('▥')} ${chalk.cyan(nodeId)} ${chalk.dim('→')} parallel branches=[${node.branches.join(', ')}] join=${join}${join === 'k-of-n' ? ` k=${node.k}` : ''} ${chalk.dim('(concurrent worktrees)')}`)
 
       const aborts = node.branches.map(() => new AbortController())
       // V3.8 — operator cancel cascades into every branch. If
@@ -733,7 +735,7 @@ if (sub === 'run') {
           parallelAbort = `branch '${r.branchId}' threw: ${r.result.__error}`
           break
         }
-        console.error(`  ${dim('branch')} ${cyan(r.branchId)} ${dim('disposition:')} ${r.result.disposition}`)
+        console.error(`  ${chalk.dim('branch')} ${chalk.cyan(r.branchId)} ${chalk.dim('disposition:')} ${r.result.disposition}`)
         if (r.result.disposition === 'success') succeeded++
       }
 
@@ -759,13 +761,13 @@ if (sub === 'run') {
           if (t.status !== 'fulfilled') continue
           const { index, result } = t.value
           settledByIndex[index] = result
-          console.error(`  ${dim('branch')} ${cyan(node.branches[index])} ${dim('disposition:')} ${result.disposition}${result.disposition === 'cancelled' ? dim(' (cancelled — quorum met)') : ''}`)
+          console.error(`  ${chalk.dim('branch')} ${chalk.cyan(node.branches[index])} ${chalk.dim('disposition:')} ${result.disposition}${result.disposition === 'cancelled' ? chalk.dim(' (cancelled — quorum met)') : ''}`)
         }
       }
 
       const dispositions = settledByIndex.map((r) => (r ? r.disposition : 'cancelled'))
       stepDisposition = aggregateForJoin(dispositions, join, node.k)
-      console.error(`  ${dim('aggregate:')} ${stepDisposition} ${dim('(' + join + ': ' + succeeded + '/' + quorum + ' succeeded, ' + dispositions.length + ' branches)')}`)
+      console.error(`  ${chalk.dim('aggregate:')} ${stepDisposition} ${chalk.dim('(' + join + ': ' + succeeded + '/' + quorum + ' succeeded, ' + dispositions.length + ' branches)')}`)
       // V3.8 — if cancel fired during the parallel block, the
       // branches settled (cancelled / error / partial success) but
       // the run as a whole is aborted. Set the outcome here rather
@@ -789,7 +791,7 @@ if (sub === 'run') {
       }
       const matched = evaluatePredicate(node.if, attrs)
       const branchTaken = matched ? node.then : node.else
-      console.error(`${bold('?')} ${cyan(nodeId)} ${dim('→')} condition ${dim('→')} ${matched ? green('then') : yellow('else')} ${dim('→')} ${cyan(branchTaken)}`)
+      console.error(`${chalk.bold('?')} ${chalk.cyan(nodeId)} ${chalk.dim('→')} condition ${chalk.dim('→')} ${matched ? chalk.green('then') : chalk.yellow('else')} ${chalk.dim('→')} ${chalk.cyan(branchTaken)}`)
       // Conditions don't generate a step disposition — short-circuit
       // straight to the chosen target.
       nodeId = branchTaken
@@ -838,7 +840,7 @@ if (sub === 'run') {
       finalState = 'failed'
       break
     }
-    console.error(`  ${dim('disposition:')} ${stepDisposition} ${dim('→')} ${cyan(next)}`)
+    console.error(`  ${chalk.dim('disposition:')} ${stepDisposition} ${chalk.dim('→')} ${chalk.cyan(next)}`)
     nodeId = next
   }
 
@@ -861,9 +863,9 @@ if (sub === 'run') {
   })
 
   if (abortReason) {
-    console.error(`${red('✗')} pipeline run ${dim(runId.slice(-12))} ${red(finalState)}: ${abortReason}`)
+    console.error(`${chalk.red('✗')} pipeline run ${chalk.dim(runId.slice(-12))} ${chalk.red(finalState)}: ${abortReason}`)
   } else {
-    console.error(`${green('✓')} pipeline run ${dim(runId.slice(-12))} ${green(finalState)}`)
+    console.error(`${chalk.green('✓')} pipeline run ${chalk.dim(runId.slice(-12))} ${chalk.green(finalState)}`)
   }
   process.exit(finalState === 'completed' ? 0 : 1)
 }
@@ -906,7 +908,7 @@ if (sub === 'cancel') {
   const sentinel = pipelineCancelPath(PROJECT_DIR, fullRunId)
   writeFileSync(sentinel, '')
 
-  console.error(`${yellow('⚑')} cancel signal sent for run ${dim(fullRunId.slice(-12))} ${dim(`→ ${sentinel}`)}`)
+  console.error(`${chalk.yellow('⚑')} cancel signal sent for run ${chalk.dim(fullRunId.slice(-12))} ${chalk.dim(`→ ${sentinel}`)}`)
   process.exit(0)
 }
 
@@ -939,14 +941,14 @@ if (sub === 'runs') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel pipeline runs')} ${dim(`— ${runs.length} ${values.pipeline ? `for ${values.pipeline}` : 'most recent'}`)}\n`)
+  console.log(`\n${chalk.bold('artel pipeline runs')} ${chalk.dim(`— ${runs.length} ${values.pipeline ? `for ${values.pipeline}` : 'most recent'}`)}\n`)
   if (!runs.length) {
-    console.log(`  ${dim('(no runs yet — try: artel pipeline run <id>)')}`)
+    console.log(`  ${chalk.dim('(no runs yet — try: artel pipeline run <id>)')}`)
     console.log()
     process.exit(0)
   }
   const fmtDur = (ms) => {
-    if (ms == null) return dim('—')
+    if (ms == null) return chalk.dim('—')
     if (ms < 1000) return `${ms}ms`
     if (ms < 60000) return `${Math.round(ms / 1000)}s`
     if (ms < 3600000) return `${Math.round(ms / 60000)}m`
@@ -954,18 +956,18 @@ if (sub === 'runs') {
   }
   for (const r of runs) {
     const stateColour =
-      r.final_state === 'completed' ? green
-      : r.final_state === 'aborted' ? yellow
-      : r.final_state ? red
-      : dim
-    const state = r.final_state ? stateColour(r.final_state) : dim('in-flight')
+      r.final_state === 'completed' ? chalk.green
+      : r.final_state === 'aborted' ? chalk.yellow
+      : r.final_state ? chalk.red
+      : chalk.dim
+    const state = r.final_state ? stateColour(r.final_state) : chalk.dim('in-flight')
     const when = (r.started_at || '').replace('T', ' ').slice(0, 19) + 'Z'
     const tail = r.run_id.slice(-8)
     // V3.10.b — annotate child runs with the parent's tail
     // fragment so operators can spot composition relationships at a
     // glance. Two-space indent for the row keeps alignment.
-    const parentHint = r.parent_run_id ? ` ${dim(`↳ child of ${r.parent_run_id.slice(-8)}`)}` : ''
-    console.log(`  ${dim(when)}  ${cyan(tail)}  ${cyan(r.pipeline_id?.padEnd(20) || '?'.padEnd(20))} ${state.padEnd(20)} ${dim(fmtDur(r.duration_ms).padStart(6))} ${r.last_node ? dim(`→ ${r.last_node}`) : ''}${parentHint}`)
+    const parentHint = r.parent_run_id ? ` ${chalk.dim(`↳ child of ${r.parent_run_id.slice(-8)}`)}` : ''
+    console.log(`  ${chalk.dim(when)}  ${chalk.cyan(tail)}  ${chalk.cyan(r.pipeline_id?.padEnd(20) || '?'.padEnd(20))} ${state.padEnd(20)} ${chalk.dim(fmtDur(r.duration_ms).padStart(6))} ${r.last_node ? chalk.dim(`→ ${r.last_node}`) : ''}${parentHint}`)
   }
   console.log()
   process.exit(0)
@@ -1005,53 +1007,53 @@ if (sub === 'status') {
     process.exit(0)
   }
 
-  console.log(`\n${bold('artel pipeline status')} ${cyan(detail.run_id)}\n`)
-  console.log(`  ${dim('pipeline:'.padEnd(14))} ${cyan(detail.pipeline_id)} ${dim('v' + detail.pipeline_version)}`)
-  console.log(`  ${dim('entry:'.padEnd(14))}    ${cyan(detail.entry_node)}`)
-  console.log(`  ${dim('started:'.padEnd(14))}  ${detail.started_at?.replace('T', ' ').slice(0, 19) || '?'} UTC`)
+  console.log(`\n${chalk.bold('artel pipeline status')} ${chalk.cyan(detail.run_id)}\n`)
+  console.log(`  ${chalk.dim('pipeline:'.padEnd(14))} ${chalk.cyan(detail.pipeline_id)} ${chalk.dim('v' + detail.pipeline_version)}`)
+  console.log(`  ${chalk.dim('entry:'.padEnd(14))}    ${chalk.cyan(detail.entry_node)}`)
+  console.log(`  ${chalk.dim('started:'.padEnd(14))}  ${detail.started_at?.replace('T', ' ').slice(0, 19) || '?'} UTC`)
   if (detail.ended_at) {
     const colour =
-      detail.final_state === 'completed' ? green
-      : detail.final_state === 'aborted' ? yellow : red
-    console.log(`  ${dim('ended:'.padEnd(14))}    ${detail.ended_at.replace('T', ' ').slice(0, 19)} UTC ${dim(`(duration ${detail.duration_ms ?? '?'}ms)`)}`)
-    console.log(`  ${dim('final state:'.padEnd(14))} ${colour(detail.final_state || '?')}`)
-    if (detail.last_node) console.log(`  ${dim('last node:'.padEnd(14))}  ${cyan(detail.last_node)} ${dim(`disposition=${detail.last_disposition || '?'}`)}`)
-    if (detail.abort_reason) console.log(`  ${dim('abort:'.padEnd(14))}    ${red(detail.abort_reason)}`)
+      detail.final_state === 'completed' ? chalk.green
+      : detail.final_state === 'aborted' ? chalk.yellow : chalk.red
+    console.log(`  ${chalk.dim('ended:'.padEnd(14))}    ${detail.ended_at.replace('T', ' ').slice(0, 19)} UTC ${chalk.dim(`(duration ${detail.duration_ms ?? '?'}ms)`)}`)
+    console.log(`  ${chalk.dim('final state:'.padEnd(14))} ${colour(detail.final_state || '?')}`)
+    if (detail.last_node) console.log(`  ${chalk.dim('last node:'.padEnd(14))}  ${chalk.cyan(detail.last_node)} ${chalk.dim(`disposition=${detail.last_disposition || '?'}`)}`)
+    if (detail.abort_reason) console.log(`  ${chalk.dim('abort:'.padEnd(14))}    ${chalk.red(detail.abort_reason)}`)
   } else {
-    console.log(`  ${dim('ended:'.padEnd(14))}    ${yellow('still in flight')}`)
+    console.log(`  ${chalk.dim('ended:'.padEnd(14))}    ${chalk.yellow('still in flight')}`)
   }
 
-  console.log(`\n  ${bold('Steps')} ${dim(`(${detail.steps.length})`)}`)
+  console.log(`\n  ${chalk.bold('Steps')} ${chalk.dim(`(${detail.steps.length})`)}`)
   if (!detail.steps.length) {
-    console.log(`    ${dim('(no steps recorded yet)')}`)
+    console.log(`    ${chalk.dim('(no steps recorded yet)')}`)
   } else {
     for (const s of detail.steps) {
       const dispoColour =
-        s.disposition === 'success' ? green
-        : s.disposition === 'parked' ? yellow
-        : s.disposition === 'timeout' || s.disposition === 'error' ? red
-        : dim
-      const dispo = s.disposition ? dispoColour(s.disposition) : dim('in-flight')
+        s.disposition === 'success' ? chalk.green
+        : s.disposition === 'parked' ? chalk.yellow
+        : s.disposition === 'timeout' || s.disposition === 'error' ? chalk.red
+        : chalk.dim
+      const dispo = s.disposition ? dispoColour(s.disposition) : chalk.dim('in-flight')
       if (s.kind === 'handler') {
         // V3.7.b — handler row. Mirrors dispatch column layout but
         // role/engine slots become handler / cmd-fragment so the
         // alignment stays. cmd is truncated to keep the row scannable.
         const cmdFrag = s.cmd ? (s.cmd.length > 26 ? s.cmd.slice(0, 25) + '…' : s.cmd) : ''
-        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim((cmdFrag || '').padEnd(28))} ${dim('handler'.padEnd(12))} ${dim((s.handler || '').replace(/^builtin\./, '').padEnd(8))} ${dispo}`)
+        console.log(`    ${chalk.cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${chalk.dim((cmdFrag || '').padEnd(28))} ${chalk.dim('handler'.padEnd(12))} ${chalk.dim((s.handler || '').replace(/^builtin\./, '').padEnd(8))} ${dispo}`)
       } else if (s.kind === 'subpipeline') {
         // V3.10.e — subpipeline row. Surfaces the child pipeline
         // id + run-id fragment so operators can
         // `artel pipeline status <child-fragment>` for drilldown.
         const childTail = s.child_run_id ? s.child_run_id.slice(-12) : '?'
-        const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
-        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim((s.child_pipeline_id || '').padEnd(28))} ${dim('subpipeline'.padEnd(12))} ${dim((childTail || '').padEnd(12))} ${dispo}${parallelHint}`)
+        const parallelHint = s.parallel_of ? ` ${chalk.dim('(parallel of ' + s.parallel_of + ')')}` : ''
+        console.log(`    ${chalk.cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${chalk.dim((s.child_pipeline_id || '').padEnd(28))} ${chalk.dim('subpipeline'.padEnd(12))} ${chalk.dim((childTail || '').padEnd(12))} ${dispo}${parallelHint}`)
       } else {
-        const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
-        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
+        const parallelHint = s.parallel_of ? ` ${chalk.dim('(parallel of ' + s.parallel_of + ')')}` : ''
+        console.log(`    ${chalk.cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${chalk.dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${chalk.dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
       }
     }
   }
-  console.log(`\n  ${dim(`drilldown: artel logs <task> | artel pipeline status <child-run>`)}\n`)
+  console.log(`\n  ${chalk.dim(`drilldown: artel logs <task> | artel pipeline status <child-run>`)}\n`)
   process.exit(0)
 }
 
