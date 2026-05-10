@@ -1429,6 +1429,93 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(hEnd.error).toMatch(/render of \.set\['phase'\] failed:.*ghost/)
   })
 
+  it('builtin.set_attr dotted-path key + unset reach downstream dispatch (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut-nested', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          // Dotted set + unset coexist; templates work in nested values.
+          set: { 'flags.deployed': true, 'config.run': 'r-{{ pipeline_run_id }}' },
+          unset: ['todo'],
+        },
+        impl: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'deployed={{ flags.deployed }} run={{ config.run }}',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'mut-nested', '--task-prefix', 'mn',
+      // todo gets unset by tag step; without it, downstream wouldn't see todo.
+      '--attrs', '{"todo":"throwaway"}',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    // Downstream dispatch's task_attrs reflects nested mutation + unset
+    const meta = JSON.parse(readFileSync(
+      join(root, '.artel', '.dispatches', 'mn-impl.meta'), 'utf8',
+    ))
+    expect(meta.taskAttrs.flags).toEqual({ deployed: true })
+    expect(meta.taskAttrs.config).toMatchObject({ run: expect.stringMatching(/^r-[0-9a-f-]{36}$/) })
+    // todo was removed
+    expect(meta.taskAttrs).not.toHaveProperty('todo')
+
+    // Rendered prompt sees the nested attrs (via V3.5 dotted-path
+    // templating).
+    const prompt = readFileSync(
+      join(root, '.artel', '.dispatches', 'mn-impl.prompt'), 'utf8',
+    )
+    expect(prompt).toMatch(/^deployed=true run=r-[0-9a-f-]{36}$/)
+
+    // Events carry set + unset snapshots
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart.set).toEqual({ 'flags.deployed': true, 'config.run': 'r-{{ pipeline_run_id }}' })
+    expect(hStart.unset).toEqual(['todo'])
+    expect(hEnd.unset_resolved).toEqual(['todo'])
+    expect(hEnd.set_resolved['flags.deployed']).toBe(true)
+  })
+
+  it('builtin.set_attr unset-only flow ({} attrs handled gracefully) (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: ['some_key'],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    const evts = events(root)
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('success')
+    expect(hEnd.unset_resolved).toEqual(['some_key'])
+    // No set_resolved when set is empty/absent
+    expect(hEnd.set_resolved).toBeUndefined()
+  })
+
   it('show renders builtin.set_attr with set spec', () => {
     const root = createTempRepo()
     installAll(root)
@@ -1440,6 +1527,20 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
     expect(r.status).toBe(0)
     expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"phase":"reviewed","count":7\}/)
+  })
+
+  it('show renders builtin.set_attr with set + unset (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { 'flags.deployed': true },
+      unset: ['todo'],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"flags\.deployed":true\}\s+unset=\["todo"\]/)
   })
 
   it('parallel branches: handler.exec + handler.assert + dispatch (V3.7.e)', () => {

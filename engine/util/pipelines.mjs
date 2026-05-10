@@ -362,33 +362,55 @@ export const validatePipeline = (def, source = '<inline>') => {
           throw new Error(`${source}: handler node '${nid}' .message must be a string (got: ${typeof node.message})`)
         }
       }
-      // V3.7.d — builtin.set_attr: requires .set (non-empty object).
-      // Top-level keys only (no dotted paths in V3.7.d — walker has
-      // no writePath helper). Values must be scalar (string | number
-      // | boolean) or null; objects / arrays rejected (no obvious
-      // merge semantics, and templates only apply to strings).
-      // Reserved pipeline-injected keys rejected for clarity (they
-      // can't actually be overridden — walker respreads them per
-      // step — but accepting them invites confusion).
+      // V3.7.d — builtin.set_attr writes scalar values into run
+      // attrs. V3.7.d.b — dotted-path keys (`'flags.deployed'`) for
+      // nested mutation; optional `unset` array of dotted-paths to
+      // remove. At least one of `set` / `unset` must be present.
+      // Reserved pipeline-injected keys rejected at the top-level
+      // segment (the walker respreads them per step regardless,
+      // but accepting them invites confusion); nested under another
+      // top key is fine (`'flags.pipeline_run_id'` etc).
       if (node.handler === 'builtin.set_attr') {
-        if (!node.set || typeof node.set !== 'object' || Array.isArray(node.set)) {
-          throw new Error(`${source}: handler node '${nid}' (builtin.set_attr) requires .set as an object`)
+        const hasSet = node.set != null
+        const hasUnset = node.unset != null
+        if (!hasSet && !hasUnset) {
+          throw new Error(`${source}: handler node '${nid}' (builtin.set_attr) requires .set and/or .unset`)
         }
-        const keys = Object.keys(node.set)
-        if (keys.length === 0) {
-          throw new Error(`${source}: handler node '${nid}' .set must be non-empty`)
+        if (hasSet) {
+          if (typeof node.set !== 'object' || Array.isArray(node.set)) {
+            throw new Error(`${source}: handler node '${nid}' (builtin.set_attr) requires .set as an object`)
+          }
+          const keys = Object.keys(node.set)
+          if (keys.length === 0 && !hasUnset) {
+            throw new Error(`${source}: handler node '${nid}' .set must be non-empty (or supply .unset)`)
+          }
+          for (const key of keys) {
+            const topSeg = key.split('.')[0]
+            if (RESERVED_ATTR_KEYS.has(topSeg)) {
+              throw new Error(`${source}: handler node '${nid}' .set cannot override pipeline-injected key '${topSeg}' (reserved: ${[...RESERVED_ATTR_KEYS].join(', ')})`)
+            }
+            if (!key) {
+              throw new Error(`${source}: handler node '${nid}' .set has empty key`)
+            }
+            const v = node.set[key]
+            const t = typeof v
+            if (v === null || t === 'string' || t === 'number' || t === 'boolean') continue
+            throw new Error(`${source}: handler node '${nid}' .set['${key}'] must be a scalar (string | number | boolean) or null (got: ${Array.isArray(v) ? 'array' : t})`)
+          }
         }
-        for (const key of keys) {
-          if (RESERVED_ATTR_KEYS.has(key)) {
-            throw new Error(`${source}: handler node '${nid}' .set cannot override pipeline-injected key '${key}' (reserved: ${[...RESERVED_ATTR_KEYS].join(', ')})`)
+        if (hasUnset) {
+          if (!Array.isArray(node.unset) || node.unset.length === 0) {
+            throw new Error(`${source}: handler node '${nid}' .unset must be a non-empty array of dotted-path strings`)
           }
-          if (key.includes('.')) {
-            throw new Error(`${source}: handler node '${nid}' .set key '${key}' must be top-level (dotted-path keys deferred to V3.7.d+)`)
+          for (const path of node.unset) {
+            if (typeof path !== 'string' || !path) {
+              throw new Error(`${source}: handler node '${nid}' .unset entries must be non-empty strings (got: ${JSON.stringify(path)})`)
+            }
+            const topSeg = path.split('.')[0]
+            if (RESERVED_ATTR_KEYS.has(topSeg)) {
+              throw new Error(`${source}: handler node '${nid}' .unset cannot remove pipeline-injected key '${topSeg}' (reserved: ${[...RESERVED_ATTR_KEYS].join(', ')})`)
+            }
           }
-          const v = node.set[key]
-          const t = typeof v
-          if (v === null || t === 'string' || t === 'number' || t === 'boolean') continue
-          throw new Error(`${source}: handler node '${nid}' .set['${key}'] must be a scalar (string | number | boolean) or null (got: ${Array.isArray(v) ? 'array' : t})`)
         }
       }
     }
@@ -474,6 +496,62 @@ const readPath = (obj, path) => {
     cur = cur[seg]
   }
   return cur
+}
+
+// V3.7.d.b — mutate `obj` so the dotted `path` resolves to `value`.
+// Creates intermediate objects as needed; replaces non-object
+// intermediates (numbers, strings, arrays) with a fresh object —
+// the caller said "write here", we honour it. Top-level path =
+// shallow `obj[path] = value`. Used by `setAttrBuiltin` to build
+// the merge-blob from dotted `set` keys.
+export const writePath = (obj, path, value) => {
+  const segments = path.split('.')
+  let cur = obj
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i]
+    if (cur[seg] == null || typeof cur[seg] !== 'object' || Array.isArray(cur[seg])) {
+      cur[seg] = {}
+    }
+    cur = cur[seg]
+  }
+  cur[segments[segments.length - 1]] = value
+}
+
+// V3.7.d.b — remove the value at the dotted `path`. No-op when an
+// intermediate segment is missing (the key was already absent).
+// Used by the walker to apply `unset` from `setAttrBuiltin`.
+export const deletePath = (obj, path) => {
+  const segments = path.split('.')
+  let cur = obj
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i]
+    if (cur == null || typeof cur !== 'object') return
+    cur = cur[seg]
+  }
+  if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
+    delete cur[segments[segments.length - 1]]
+  }
+}
+
+// V3.7.d.b — recursive deep merge. Copies own enumerable props of
+// `source` into `target`. Plain-object values nested-merge; arrays
+// + scalars overwrite. Mutates `target`. Used by the walker to
+// apply `setAttrBuiltin`'s nested `result.attrs` over `userAttrs`
+// without clobbering siblings ({ flags: { staged: true } } merging
+// `{ flags: { deployed: true } }` should yield `{ flags: { staged:
+// true, deployed: true } }`, not `{ flags: { deployed: true } }`).
+export const deepMergeAttrs = (target, source) => {
+  for (const key of Object.keys(source)) {
+    const sv = source[key]
+    const tv = target[key]
+    if (sv && typeof sv === 'object' && !Array.isArray(sv)
+        && tv && typeof tv === 'object' && !Array.isArray(tv)) {
+      deepMergeAttrs(tv, sv)
+    } else {
+      target[key] = sv
+    }
+  }
+  return target
 }
 
 // V3.2.b + V3.6 — evaluate a condition node's `.if` predicate against

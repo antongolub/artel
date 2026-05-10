@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.9.b)** | `[done]` | Cumulative through V3.9.b: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + all-complete join (V3.2.a), `condition` pure routing (V3.2.b), git-worktree isolation + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` joins with cancellation (V3.3.c), `runs` / `status` observability (V3.4.a), `{{ template }}` substitution (V3.5), compound + comparison predicates (V3.6), `handler` nodes (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel` via sentinel-file polling (V3.8), `artel sweep` prunes stale cancel sentinels (V3.8.b), per-node `timeout_ms` on dispatch (V3.9), suffix syntax (`'500ms'` / `'60s'` / `'5m'` / `'2h'` / `'1d'`) for `timeout_ms` shared between dispatch + handler.exec + dispatchLifecycle env fallback via single `parseDuration` parser (V3.9.b). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. Parallel branches accept dispatch + handler (exec / assert); set_attr rejected. `builtin.exec` + `dispatch` both honour `AbortSignal` with SIGTERM → grace → SIGKILL. Walker creates master `runAbort` AbortController + 500ms-poll watcher; cascades into linear + per-branch controllers. Sweep prunes terminated-run cancel sentinels (in-flight protected). CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. `parseDuration` accepts plain ms or `<n><suffix>`; rejects internal whitespace, fractionals, non-positive, malformed. 607 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, dotted-path / deletion in set_attr, set_attr in branches with merge contract. |
+| V3 | **Pipelines (V3.1–V3.9.b + V3.7.d.b)** | `[done]` | Cumulative: linear `dispatch` + `terminal` (V3.1), `parallel` + all-complete join (V3.2.a), `condition` (V3.2.b), git-worktrees + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` cancellation (V3.3.c), `runs` / `status` (V3.4.a), `{{ template }}` (V3.5), compound + comparison predicates (V3.6), `handler` nodes + `builtin.exec` (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` flat (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel` (V3.8), sweep prunes cancel sentinels (V3.8.b), per-node `timeout_ms` on dispatch (V3.9), suffix syntax for `timeout_ms` via shared `parseDuration` (V3.9.b), `set_attr` dotted-path keys + `unset` field with deep merge contract (V3.7.d.b). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. `set_attr.set` accepts dotted paths (`'flags.deployed'`); validator rejects reserved top-segment, non-scalar values, missing-both-set-and-unset; handler builds nested form via `writePath` and walker `deepMergeAttrs`-merges over `userAttrs` preserving sibling keys; `unset: [<path>, ...]` removes via `deletePath`. set + unset events carry both verbatim + post-template (`set_resolved`, `unset_resolved`). Parallel branches accept dispatch + handler (exec / assert); set_attr still rejected. `parseDuration` accepts ms or `<n><suffix>`. CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. 634 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, set_attr in branches with merge contract. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,45 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-10** — V3.7.d.b — `set_attr` dotted-path keys + `unset`.
+  Closes two deferred items from V3.7.d. New shape: keys in
+  `node.set` can be dotted paths (`'flags.deployed': true`,
+  `'config.timeout.ms': 30000`) for nested mutation; new optional
+  `node.unset` is an array of dotted-path strings to remove. At
+  least one of `set` / `unset` is required (validator rejects
+  empty-and-both-missing). Top-segment of any path still rejected
+  if it's a reserved pipeline-injected key (`pipeline_run_id`
+  etc.) — nested under another top key (`'flags.pipeline_run_id'`)
+  is fine. New helpers exported from `engine/util/pipelines.mjs`:
+  `writePath(obj, path, value)` (creates intermediate objects,
+  overwrites scalar/array intermediates with fresh object —
+  caller's intent honoured), `deletePath(obj, path)` (no-ops on
+  missing intermediate; only removes leaf), `deepMergeAttrs(target,
+  source)` (recursive merge of plain objects; arrays + scalars
+  overwrite). `setAttrBuiltin` (`engine/util/handlers.mjs`) now
+  builds nested `result.attrs` via `writePath` after V3.5 template
+  rendering of string values; flat `set_resolved` view returned
+  alongside for events; `result.unsets` mirrors `node.unset`.
+  Walker (`runHandlerNode`) deep-merges `result.attrs` into
+  `userAttrs` (instead of shallow `Object.assign` — siblings under
+  shared top key preserved) and applies `result.unsets` via
+  `deletePath`. Atomicity preserved: template error → no partial
+  mutation. Event payloads: `pipeline_handler.start` snapshots
+  `set` + `unset` verbatim (templates unrendered);
+  `pipeline_handler.end` carries `set_resolved` (when non-empty) +
+  `unset_resolved` (when non-empty). `show` renders both.
+  Parallel-branch rejection unchanged (concurrent userAttrs writes
+  still race). Back-compat: existing flat-set pipelines work
+  identically — `Object.assign` semantics fall out of deep-merge
+  for flat sources. 634 tests green (27 new — 14 unit pipelines
+  on writePath / deletePath / deepMergeAttrs + dotted-key validator
+  + unset validator + reserved-top-segment + nested-vs-toplevel +
+  set/unset shape variations, 7 unit handlers on nested mutation /
+  unset-only / set-only / both / template rendering in nested
+  values, 3 e2e on dotted+unset reaching downstream dispatch via
+  .meta + rendered prompt + events / unset-only flow / show
+  rendering with both fields; 2 existing tests updated for new
+  validator messages).
 - **2026-05-10** — V3.9.b — suffix syntax for `timeout_ms`.
   Pipelines can now write `timeout_ms: '60s'` / `'5m'` / `'2h'` /
   `'1d'` instead of raw milliseconds. Same parser handles dispatch

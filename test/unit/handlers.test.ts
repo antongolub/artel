@@ -289,4 +289,67 @@ describe('builtin.set_attr (V3.7.d)', () => {
     )
     expect(r.attrs.x).toBe('{{ z }}')
   })
+
+  // V3.7.d.b — dotted-path keys + unset.
+  it('builds nested attrs from dotted-path keys (V3.7.d.b)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: { 'flags.deployed': true, 'flags.staged': false, top: 'x' },
+      },
+      { attrs: {} },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.attrs).toEqual({
+      flags: { deployed: true, staged: false },
+      top: 'x',
+    })
+    // set_resolved keeps the flat post-template view for events
+    expect(r.set_resolved).toEqual({
+      'flags.deployed': true, 'flags.staged': false, top: 'x',
+    })
+  })
+
+  it('returns unsets when node.unset is set (V3.7.d.b)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: { phase: 'next' },
+        unset: ['flags.staged', 'tmp'],
+      },
+      { attrs: { phase: 'prev', flags: { staged: true } } },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.attrs).toEqual({ phase: 'next' })
+    expect(r.unsets).toEqual(['flags.staged', 'tmp'])
+  })
+
+  it('handles set-only / unset-only / both shapes (V3.7.d.b)', async () => {
+    // unset only
+    const r1 = await runHandler(
+      { handler: 'builtin.set_attr', unset: ['phase'] },
+      { attrs: { phase: 'x' } },
+    )
+    expect(r1.disposition).toBe('success')
+    expect(r1.attrs).toEqual({})
+    expect(r1.unsets).toEqual(['phase'])
+
+    // set only
+    const r2 = await runHandler(
+      { handler: 'builtin.set_attr', set: { phase: 'x' } },
+      { attrs: {} },
+    )
+    expect(r2.unsets).toEqual([])
+  })
+
+  it('renders templates in dotted-key values (V3.7.d.b)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: { 'config.run_id': 'r-{{ pipeline_run_id }}' },
+      },
+      { attrs: { pipeline_run_id: 'abc' } },
+    )
+    expect(r.attrs).toEqual({ config: { run_id: 'r-abc' } })
+  })
 })

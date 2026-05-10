@@ -652,16 +652,16 @@ describe('handler node validation (V3.7.a)', () => {
     }))).not.toThrow()
   })
 
-  it('rejects builtin.set_attr without .set', () => {
+  it('rejects builtin.set_attr without .set and .unset', () => {
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.set_attr',
-    }))).toThrow(/requires \.set as an object/)
+    }))).toThrow(/requires \.set and\/or \.unset/)
   })
 
-  it('rejects builtin.set_attr with empty .set', () => {
+  it('rejects builtin.set_attr with empty .set and no .unset', () => {
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.set_attr', set: {},
-    }))).toThrow(/\.set must be non-empty/)
+    }))).toThrow(/\.set must be non-empty.*or supply \.unset/)
   })
 
   it('rejects builtin.set_attr with array .set', () => {
@@ -692,11 +692,54 @@ describe('handler node validation (V3.7.a)', () => {
     }))).toThrow(/cannot override pipeline-injected key 'pipeline_run_id'/)
   })
 
-  it('rejects builtin.set_attr with dotted-path key (deferred)', () => {
+  it('accepts dotted-path keys in .set (V3.7.d.b)', () => {
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.set_attr',
-      set: { 'flags.deployed': true },
-    }))).toThrow(/key 'flags\.deployed' must be top-level/)
+      set: { 'flags.deployed': true, 'config.timeout.ms': 30000 },
+    }))).not.toThrow()
+  })
+
+  it('accepts .unset (V3.7.d.b) without .set', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: ['phase', 'flags.staged'],
+    }))).not.toThrow()
+  })
+
+  it('accepts both .set and .unset together (V3.7.d.b)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'deployed' },
+      unset: ['flags.staged'],
+    }))).not.toThrow()
+  })
+
+  it('rejects empty .unset array (V3.7.d.b)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: [],
+    }))).toThrow(/\.unset must be a non-empty array/)
+  })
+
+  it('rejects non-string entries in .unset (V3.7.d.b)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: ['phase', 42 as never],
+    }))).toThrow(/\.unset entries must be non-empty strings/)
+  })
+
+  it('rejects .unset removing pipeline-injected key (V3.7.d.b)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: ['pipeline_run_id'],
+    }))).toThrow(/\.unset cannot remove pipeline-injected key 'pipeline_run_id'/)
+  })
+
+  it('rejects dotted .set whose top segment is reserved (V3.7.d.b)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { 'pipeline_run_id.fake': 'x' },
+    }))).toThrow(/cannot override pipeline-injected key 'pipeline_run_id'/)
   })
 
   it('handler.exec + handler.assert allowed as parallel branches (V3.7.e)', () => {
@@ -1089,6 +1132,114 @@ describe('listPipelineRuns / pipelineRunDetail (V3.4.a)', () => {
     expect(detail.steps[0].disposition).toBe('timeout')
     expect(detail.steps[0].signal).toBe('SIGTERM')
     expect(detail.steps[0].timeout_ms).toBe(100)
+  })
+})
+
+describe('writePath / deletePath / deepMergeAttrs (V3.7.d.b)', () => {
+  const { writePath, deletePath, deepMergeAttrs } = pipelinesModule as {
+    writePath: (obj: Record<string, unknown>, path: string, value: unknown) => void
+    deletePath: (obj: Record<string, unknown>, path: string) => void
+    deepMergeAttrs: (target: Record<string, unknown>, source: Record<string, unknown>) => Record<string, unknown>
+  }
+
+  describe('writePath', () => {
+    it('writes top-level keys', () => {
+      const obj = {} as Record<string, unknown>
+      writePath(obj, 'phase', 'reviewed')
+      expect(obj).toEqual({ phase: 'reviewed' })
+    })
+
+    it('creates intermediate objects for nested paths', () => {
+      const obj = {} as Record<string, unknown>
+      writePath(obj, 'flags.deployed', true)
+      expect(obj).toEqual({ flags: { deployed: true } })
+
+      writePath(obj, 'config.timeout.ms', 30000)
+      expect(obj).toEqual({
+        flags: { deployed: true },
+        config: { timeout: { ms: 30000 } },
+      })
+    })
+
+    it('preserves siblings under shared top key', () => {
+      const obj = { flags: { staged: true } } as Record<string, unknown>
+      writePath(obj, 'flags.deployed', true)
+      expect(obj).toEqual({ flags: { staged: true, deployed: true } })
+    })
+
+    it('overwrites scalar/array intermediate with fresh object', () => {
+      const obj = { flags: 'broken' } as Record<string, unknown>
+      writePath(obj, 'flags.deployed', true)
+      expect(obj).toEqual({ flags: { deployed: true } })
+
+      const arr = { tags: ['a', 'b'] } as Record<string, unknown>
+      writePath(arr, 'tags.first', 'x')
+      expect(arr).toEqual({ tags: { first: 'x' } })
+    })
+
+    it('overwrites a leaf value', () => {
+      const obj = { phase: 'reviewing' } as Record<string, unknown>
+      writePath(obj, 'phase', 'reviewed')
+      expect(obj.phase).toBe('reviewed')
+    })
+  })
+
+  describe('deletePath', () => {
+    it('removes a top-level key', () => {
+      const obj = { phase: 'reviewed', count: 7 } as Record<string, unknown>
+      deletePath(obj, 'phase')
+      expect(obj).toEqual({ count: 7 })
+    })
+
+    it('removes a nested key without disturbing siblings', () => {
+      const obj = { flags: { staged: true, deployed: true } } as Record<string, unknown>
+      deletePath(obj, 'flags.staged')
+      expect(obj).toEqual({ flags: { deployed: true } })
+    })
+
+    it('no-ops when an intermediate is missing', () => {
+      const obj = { phase: 'x' } as Record<string, unknown>
+      expect(() => deletePath(obj, 'flags.deployed')).not.toThrow()
+      expect(obj).toEqual({ phase: 'x' })
+    })
+
+    it('no-ops on missing leaf', () => {
+      const obj = { flags: { staged: true } } as Record<string, unknown>
+      deletePath(obj, 'flags.missing')
+      expect(obj).toEqual({ flags: { staged: true } })
+    })
+  })
+
+  describe('deepMergeAttrs', () => {
+    it('shallow merges flat objects (back-compat with V3.7.d)', () => {
+      const t = { phase: 'old' } as Record<string, unknown>
+      deepMergeAttrs(t, { phase: 'new', count: 5 })
+      expect(t).toEqual({ phase: 'new', count: 5 })
+    })
+
+    it('preserves siblings under shared nested key', () => {
+      const t = { flags: { staged: true } } as Record<string, unknown>
+      deepMergeAttrs(t, { flags: { deployed: true } })
+      expect(t).toEqual({ flags: { staged: true, deployed: true } })
+    })
+
+    it('overwrites arrays (no concat)', () => {
+      const t = { tags: ['a', 'b'] } as Record<string, unknown>
+      deepMergeAttrs(t, { tags: ['c'] })
+      expect(t).toEqual({ tags: ['c'] })
+    })
+
+    it('overwrites scalars with objects when source nests', () => {
+      const t = { flags: false } as Record<string, unknown>
+      deepMergeAttrs(t, { flags: { deployed: true } })
+      expect(t).toEqual({ flags: { deployed: true } })
+    })
+
+    it('returns the target for chaining', () => {
+      const t = {} as Record<string, unknown>
+      const r = deepMergeAttrs(t, { x: 1 })
+      expect(r).toBe(t)
+    })
   })
 })
 

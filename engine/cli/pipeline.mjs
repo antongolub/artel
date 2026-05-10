@@ -21,6 +21,8 @@ import { appendWorkloadEvent } from '../util/audit.mjs'
 import {
   aggregateDisposition,
   aggregateForJoin,
+  deepMergeAttrs,
+  deletePath,
   evaluatePredicate,
   listPipelineFiles,
   listPipelineRuns,
@@ -230,7 +232,7 @@ if (sub === 'show') {
         : node.handler === 'builtin.assert'
           ? ` if(${renderPredicate(node.if)})${node.message ? ` message=${JSON.stringify(node.message)}` : ''}`
         : node.handler === 'builtin.set_attr'
-          ? ` set=${JSON.stringify(node.set)}`
+          ? `${node.set ? ` set=${JSON.stringify(node.set)}` : ''}${node.unset ? ` unset=${JSON.stringify(node.unset)}` : ''}`
         : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     }
@@ -383,10 +385,16 @@ if (sub === 'run') {
       pipeline_node_id: id,
       ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
     }
+    const setAttrDetail = () => {
+      const parts = []
+      if (node.set) parts.push(`${dim('set=')}${JSON.stringify(node.set)}`)
+      if (node.unset) parts.push(`${dim('unset=')}${JSON.stringify(node.unset)}`)
+      return parts.length ? ' ' + parts.join(' ') : ''
+    }
     const detail =
       node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
       node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
-      node.handler === 'builtin.set_attr' ? ` ${dim('set=')}${JSON.stringify(node.set)}` :
+      node.handler === 'builtin.set_attr' ? setAttrDetail() :
       ''
     console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${detail}`)
     const handlerId = uuidv7()
@@ -406,7 +414,12 @@ if (sub === 'run') {
         ...(node.message ? { message_template: node.message } : {}),
       } : {}),
       ...(node.handler === 'builtin.set_attr' ? {
-        set: node.set,
+        // V3.7.d.b — set + unset are both optional but at least
+        // one is required (validator-enforced). Snapshot what's
+        // present; templates are unrendered here, end event
+        // carries set_resolved.
+        ...(node.set ? { set: node.set } : {}),
+        ...(node.unset ? { unset: node.unset } : {}),
       } : {}),
     })
     try {
@@ -433,13 +446,26 @@ if (sub === 'run') {
         signal: result.signal ?? null,
         duration_ms: result.durationMs,
         ...(result.error ? { error: result.error } : {}),
-        ...(result.set_resolved ? { set_resolved: result.set_resolved } : {}),
+        ...(result.set_resolved && Object.keys(result.set_resolved).length
+          ? { set_resolved: result.set_resolved } : {}),
+        ...(Array.isArray(result.unsets) && result.unsets.length
+          ? { unset_resolved: result.unsets } : {}),
       })
       // Apply mutation only at top level — parallel branches don't
-      // run set_attr (validator rejects it). Defensive guard preserves
-      // the rule even if the validator ever changes.
-      if (parallelOf == null && result.disposition === 'success' && result.attrs) {
-        Object.assign(userAttrs, result.attrs)
+      // run set_attr (validator rejects it). Defensive guard
+      // preserves the rule even if the validator ever changes.
+      // V3.7.d.b — `result.attrs` is the nested form (built via
+      // writePath); deepMergeAttrs preserves siblings under shared
+      // top keys. `result.unsets` is dotted-path strings; deletePath
+      // removes each. set + unset both apply on success — no partial
+      // (handler returned atomically).
+      if (parallelOf == null && result.disposition === 'success') {
+        if (result.attrs && Object.keys(result.attrs).length) {
+          deepMergeAttrs(userAttrs, result.attrs)
+        }
+        if (Array.isArray(result.unsets)) {
+          for (const path of result.unsets) deletePath(userAttrs, path)
+        }
       }
       return result
     } catch (err) {

@@ -1107,15 +1107,19 @@ ci_check:
   `pipeline_handler.end` event's `error` field on failure.
   Bad templates render as `[message render failed: ...]` rather
   than crashing the walker. Pure function — no spawn, no I/O.
-- `builtin.set_attr` (V3.7.d) — mutate run attrs that flow
-  downstream. `node.set` is a flat `{ key: scalar | null }` map;
+- `builtin.set_attr` (V3.7.d + V3.7.d.b) — mutate run attrs that
+  flow downstream. `node.set` is `{ <dotted-path>: scalar | null }`;
   string values are V3.5 template-rendered against `ctx.attrs`
-  first. Returns `{ attrs }` so the walker shallow-merges into
-  `userAttrs`. Atomic: if any string template throws, no partial
-  mutation reaches the walker. Subsequent dispatches / conditions
-  / asserts see the new attrs. Reserved pipeline-injected keys
-  (`pipeline_run_id` etc.) rejected at register; dotted-path
-  keys deferred. Pure function — no spawn, no I/O.
+  first. `node.unset` is an array of dotted paths to remove. At
+  least one of `set` / `unset` is required. Handler builds the
+  nested form via `writePath`; walker `deepMergeAttrs`-merges the
+  result over `userAttrs` (siblings under shared top keys
+  preserved) and applies `unset` via `deletePath`. Atomic: if any
+  string template throws, no partial mutation reaches the walker.
+  Reserved pipeline-injected top segments
+  (`pipeline_run_id` / `pipeline_id` / `pipeline_node_id` /
+  `pipeline_parallel_of`) rejected; nested under another top key
+  is fine. Pure function — no spawn, no I/O.
 
 Adding a new builtin = registering its name in
 `VALID_HANDLERS` (`engine/util/pipelines.mjs`) + its implementation
@@ -1176,10 +1180,12 @@ it; `builtin.exec` ignores it.
 - `builtin.assert`: `.if` is a valid predicate (recursive shape
   check via `validatePredicateShape`); `.message` (if set) is a
   string
-- `builtin.set_attr`: `.set` is a non-empty flat object; values
-  are scalar (string | number | boolean) or null; keys are
-  top-level (no dots) and exclude reserved pipeline-injected
-  names
+- `builtin.set_attr`: at least one of `.set` / `.unset` required.
+  `.set` is an object of `{ <dotted-path>: scalar | null }`;
+  values are scalar (string | number | boolean) or null; top-segment
+  of any path excludes reserved pipeline-injected names. `.unset`
+  is a non-empty array of dotted-path strings; same reserved
+  top-segment rule applies
 
 **Observability (V3.7.b — landed):**
 
@@ -1268,10 +1274,6 @@ that lands. Same run_id can't collide because UUIDv7.
 
 - More handler builtins: `builtin.git_squash`, `builtin.git_merge`
   (V3.7.f+)
-- Dotted-path keys in `builtin.set_attr` (would need a writePath
-  helper for nested mutation)
-- `builtin.set_attr` deletion semantics (currently null sets to
-  null; an `unset` field could remove keys)
 - `builtin.set_attr` in parallel branches with explicit merge
   contract (e.g. last-write-wins ordered by branch index, or
   per-branch namespacing)

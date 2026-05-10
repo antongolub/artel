@@ -31,7 +31,7 @@
 // the validator rejects reserved keys for clarity.
 
 import { spawn } from 'node:child_process'
-import { evaluatePredicate, renderTemplate } from './pipelines.mjs'
+import { evaluatePredicate, renderTemplate, writePath } from './pipelines.mjs'
 import { parseDuration } from './proc.mjs'
 
 // builtin.exec: run a shell command via `bash -c`. Disposition is
@@ -172,23 +172,32 @@ const assertBuiltin = async (node, ctx) => {
 }
 
 // builtin.set_attr (V3.7.d): mutate run attrs that flow downstream.
-// `node.set` is a flat object of { key: scalar | null }; string
-// values get V3.5 template-rendered against `ctx.attrs` before
-// merge. Validator already enforced the shape (top-level keys,
-// scalar/null values, no reserved-key overrides).
+// V3.7.d.b: keys can be dotted paths for nested mutation; optional
+// `unset` array of dotted paths removes keys. String values still
+// V3.5 template-rendered against `ctx.attrs` first; validator
+// already enforced shape (scalar/null, non-reserved top segment,
+// at least one of set/unset).
 //
 // Atomic: all values are computed first, then returned together.
 // If any string value's template render throws (missing attr,
 // non-scalar value), disposition flips to error and no partial
 // mutation reaches the walker.
+//
+// Returns:
+//   - `attrs` (nested object built via writePath) for deepMergeAttrs
+//   - `set_resolved` (flat post-template view) for the end event
+//   - `unsets` (verbatim copy of node.unset) for the walker to
+//     `deletePath` against userAttrs
 const setAttrBuiltin = async (node, ctx) => {
   const start = Date.now()
   const attrs = ctx.attrs || {}
-  const resolved = {}
-  for (const [key, raw] of Object.entries(node.set)) {
+  const resolved = {}     // nested form, ready for deepMergeAttrs
+  const setResolved = {}  // flat post-template view for the event
+  for (const [key, raw] of Object.entries(node.set || {})) {
+    let val = raw
     if (typeof raw === 'string') {
       try {
-        resolved[key] = renderTemplate(raw, attrs)
+        val = renderTemplate(raw, attrs)
       } catch (err) {
         return {
           disposition: 'error',
@@ -196,15 +205,16 @@ const setAttrBuiltin = async (node, ctx) => {
           error: `set_attr: render of .set['${key}'] failed: ${err.message}`,
         }
       }
-    } else {
-      resolved[key] = raw
     }
+    setResolved[key] = val
+    writePath(resolved, key, val)
   }
   return {
     disposition: 'success',
     durationMs: Date.now() - start,
-    attrs: resolved,    // walker merges over userAttrs
-    set_resolved: resolved, // for the end-event payload
+    attrs: resolved,         // walker deep-merges over userAttrs
+    set_resolved: setResolved,
+    unsets: Array.isArray(node.unset) ? [...node.unset] : [],
   }
 }
 
