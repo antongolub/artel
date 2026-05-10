@@ -26,9 +26,8 @@ artel is the experiment that probes that question.
   runtime, in-memory actors — different design point. artel runs
   each dispatch as a separate OS process and coordinates through
   files and events.
-- **Production tooling.** Schema and APIs change. Federation,
-  repository abstraction, queue graph, pipelines — reserved in
-  schema, not implemented.
+- **Production tooling.** Schema and APIs change. Federation +
+  repository abstraction reserved in schema, not implemented.
 
 ## Design principles
 
@@ -83,7 +82,7 @@ artel <init | probe | run | spawn | status | logs | events | replay | trust | qu
 | `replay <task | dispatch-id>` | re-run a past dispatch on the same or a different engine |
 | `trust` | inspect / manage agent identities, credentials, SSH keys, encryption |
 | `queue` | inspect / mutate `.artel/QUEUE.md` + edges — `list / add / move / done / rm / link / unlink / ready / graph` |
-| `pipeline` | declarative flows — `register / list / show / run` |
+| `pipeline` | declarative multi-step flows — `register / list / show / run / runs / status / cancel` |
 | `sweep` | prune old `.dispatches/` artefacts (keeps active + newest `--keep`) |
 | `checkpoint` | sub-role self-report between phases |
 
@@ -125,6 +124,47 @@ node $ARTEL_HOME/engine/cli/artel.mjs init --name my-cluster
 A copy-and-go template lives in [`examples/quickstart/`](./examples/quickstart/)
 — minimal `package.json`, `.gitignore`, `.artel/QUEUE.md` skeleton,
 plus a walkthrough of init → probe → spawn → status → logs → replay.
+
+### Optional: pipelines for multi-step flows
+
+Chain dispatches into declarative flows. 6 node types
+(`dispatch` / `parallel` / `condition` / `handler` /
+`subpipeline` / `terminal`); routing by disposition through
+`on_disposition` edges; `{{ template }}` substitution against
+run attrs; full lifecycle observable in `events.jsonl`.
+
+```yaml
+# .artel/pipelines/review.json — register, run, observe
+review:
+  type: parallel              # fan-out, first success wins
+  branches: [code, security, docs]
+  join: any-complete
+
+approve:
+  type: handler               # inline guard, no LLM
+  handler: builtin.assert
+  if: { attr: env, equals: prod }
+  message: "deploy of {{ env }} requires env=prod"
+
+deploy:
+  type: dispatch              # the LLM-driven step
+  role: implementer
+  prompt: "deploy {{ feature }}"
+  timeout_ms: '5m'            # suffix syntax: ms / s / m / h / d
+```
+
+```bash
+artel pipeline register pipelines/release.json
+artel pipeline run release --attrs '{"feature":"auth","env":"prod"}'
+artel pipeline runs                        # newest-first list
+artel pipeline status <run-id-fragment>    # per-step timeline
+artel pipeline cancel <run-id-fragment>    # abort in-flight
+```
+
+Handler builtins: `builtin.exec` (bash), `builtin.assert`
+(predicate guard), `builtin.set_attr` (mutate run attrs),
+`builtin.git_tag`. Subpipelines compose flows with cycle
+detection + parent-cancel cascade.
 
 ### Optional: truststore for agent identity + secrets
 
