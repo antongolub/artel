@@ -13,7 +13,7 @@ import {
 afterEach(cleanupTempRoots)
 
 const installEvents = (root: string) =>
-  installEngineRuntime(root, ['engine/cli/events.mjs'])
+  installEngineRuntime(root, ['engine/cli/events.mjs', 'engine/util/cli.mjs'])
 
 const writeFixture = (root: string) => {
   mkdirSync(join(root, '.artel'), { recursive: true })

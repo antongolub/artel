@@ -8,20 +8,11 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { parseArgs } from 'node:util'
+import { PROJECT_DIR, bold, dim, cyan, yellow, green, red } from '../util/cli.mjs'
 
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
 const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const bold = (s) => c('1', s)
-const dim = (s) => c('2', s)
-const cyan = (s) => c('36', s)
-const yellow = (s) => c('33', s)
-const green = (s) => c('32', s)
-const red = (s) => c('31', s)
 
 const usage = (code = 2) => {
   console.error(`\

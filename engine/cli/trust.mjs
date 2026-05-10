@@ -39,18 +39,7 @@ import {
 } from '../util/trust.mjs'
 import { generateMasterKey, loadMasterKey, masterKeyPath } from '../util/crypto.mjs'
 import { appendInfraEvent } from '../util/audit.mjs'
-
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const bold = (s) => c('1', s)
-const cyan = (s) => c('36', s)
-const green = (s) => c('32', s)
-const yellow = (s) => c('33', s)
-
-const die = (msg, code = 1) => { console.error(msg); process.exit(code) }
+import { PROJECT_DIR, dim, bold, cyan, green, yellow, die } from '../util/cli.mjs'
 
 const usage = (code = 2) => {
   console.error(`\

@@ -39,20 +39,13 @@ import { parseArgs } from 'node:util'
 import { appendInfraEvent } from '../util/audit.mjs'
 import { defaultGit, listWorktrees, removeWorktree } from '../util/worktree.mjs'
 import { listPipelineRuns, pipelineCancelsDir } from '../util/pipelines.mjs'
+import { PROJECT_DIR, dim, bold, green, yellow } from '../util/cli.mjs'
 
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
 const WORKTREES_DIR = join(PROJECT_ARTEL, '.worktrees')
 const PIPELINE_CANCELS_DIR = pipelineCancelsDir(PROJECT_DIR)
 const QUEUE_PATH = join(PROJECT_ARTEL, 'QUEUE.md')
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const bold = (s) => c('1', s)
-const green = (s) => c('32', s)
-const yellow = (s) => c('33', s)
 
 const usage = (code = 0) => {
   console.log(`\

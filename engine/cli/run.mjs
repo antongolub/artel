@@ -16,12 +16,12 @@ import { parseFrontmatter, normaliseFrontmatter } from '../util/frontmatter.mjs'
 import { expandSkills } from '../util/skills.mjs'
 import { validateRoleFrontmatter } from '../util/contract.mjs'
 import { listDrivers, loadDriver } from '../util/drivers.mjs'
+import { PROJECT_DIR, die } from '../util/cli.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PLATFORM_DIR = join(here, '..', '..')
 const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
 const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_SKILLS_DIR = join(PROJECT_DIR, '.artel', 'skills')
 
 const listDir = (dir, ext) =>
@@ -51,8 +51,6 @@ ${roles.length ? `Roles: ${roles.join(', ')}\n` : ''}\
 ${engines.length ? `Engines: ${engines.join(', ')}` : ''}`)
   process.exit(code)
 }
-
-const die = (msg, code = 1) => { console.error(msg); process.exit(code) }
 
 const OPTIONS = {
   engine: { type: 'string' },

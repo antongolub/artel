@@ -11,14 +11,7 @@
 
 import { parseArgs } from 'node:util'
 import { discoverDrivers } from '../util/drivers.mjs'
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const bold = (s) => c('1', s)
-const green = (s) => c('32', s)
-const yellow = (s) => c('33', s)
-const red = (s) => c('31', s)
+import { dim, bold, green, yellow, red } from '../util/cli.mjs'
 
 const usage = (code = 0) => {
   console.log(`\

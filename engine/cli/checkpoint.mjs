@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util'
 import { SCHEMA_VERSION, validateEventType } from '../core/schema.mjs'
 import { ensureClusterIdentity, instanceId } from '../core/cluster.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { PROJECT_DIR } from '../util/cli.mjs'
 
 const usage = (code = 2) => {
   console.error(`\
@@ -57,7 +58,7 @@ be invoked from within a dispatch.`)
   process.exit(2)
 }
 
-const projectArtelDir = join(process.env.ARTEL_PROJECT_DIR || process.cwd(), '.artel')
+const projectArtelDir = join(PROJECT_DIR, '.artel')
 const eventsPath = join(projectArtelDir, 'events.jsonl')
 const cluster = ensureClusterIdentity(projectArtelDir)
 

@@ -14,13 +14,13 @@ import { dirname, join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { PROJECT_DIR as projectDir } from '../util/cli.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // `here` is engine/cli/, so platform root is two levels up.
 const platformDir = dirname(dirname(here))
 const agentsDir = join(platformDir, 'agents')
 const driversDir = join(platformDir, 'engine', 'drivers')
-const projectDir = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const projectArtelDir = join(projectDir, '.artel')
 const queuePath = join(projectArtelDir, 'QUEUE.md')
 const dispatchDir = join(projectArtelDir, '.dispatches')

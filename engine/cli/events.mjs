@@ -9,17 +9,10 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+import { PROJECT_DIR, c, dim, cyan, yellow, green, red } from '../util/cli.mjs'
 
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const EVENTS_PATH = join(PROJECT_DIR, '.artel', 'events.jsonl')
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const cyan = (s) => c('36', s)
-const yellow = (s) => c('33', s)
-const green = (s) => c('32', s)
-const red = (s) => c('31', s)
+// `events` is the only CLI that needs magenta (control kind).
 const magenta = (s) => c('35', s)
 
 const usage = (code = 0) => {

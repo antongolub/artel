@@ -186,6 +186,7 @@ export const ENGINE_FILES_CORE = [
   'engine/core/queue_graph.mjs',
 ]
 export const ENGINE_FILES_UTIL = [
+  'engine/util/cli.mjs',
   'engine/util/ids.mjs',
   'engine/util/fs.mjs',
   'engine/util/frontmatter.mjs',

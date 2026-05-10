@@ -41,19 +41,7 @@ import {
 import { dispatchLifecycle } from '../core/dispatch_lifecycle.mjs'
 import { runHandler } from '../util/handlers.mjs'
 import { uuidv7 } from '../util/ids.mjs'
-
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const bold = (s) => c('1', s)
-const cyan = (s) => c('36', s)
-const green = (s) => c('32', s)
-const yellow = (s) => c('33', s)
-const red = (s) => c('31', s)
-
-const die = (msg, code = 1) => { console.error(msg); process.exit(code) }
+import { PROJECT_DIR, dim, bold, cyan, green, yellow, red, die } from '../util/cli.mjs'
 
 // V3.6 — pretty-print one predicate for `show`. Recurses through
 // compound shapes (not/and/or). Atomic shape covers all of
@@ -70,6 +58,39 @@ const renderPredicate = (pred) => {
   if (!op) return '?'
   const opVal = op === 'in' ? `[${pred.in.join(', ')}]` : JSON.stringify(pred[op])
   return `${pred.attr} ${op} ${opVal}`
+}
+
+// Per-builtin presentation. Adding a builtin = one entry here +
+// one line in handlers.mjs#BUILTINS. Walker uses `walkerHint`
+// (stderr live progress), `startSpec` (snapshot in
+// pipeline_handler.start), and `durSuffix` (extra context in the
+// disposition log line). `show` uses `showHint`.
+const j = JSON.stringify
+const HANDLER_META = {
+  'builtin.exec': {
+    walkerHint: (n) => `${dim('cmd=')}${j(n.cmd)}`,
+    showHint:   (n) => ` cmd=${j(n.cmd)}${n.timeout_ms ? ` timeout_ms=${n.timeout_ms}` : ''}`,
+    startSpec:  (n) => ({ cmd: n.cmd, ...(n.timeout_ms != null ? { timeout_ms: n.timeout_ms } : {}) }),
+    durSuffix:  (_, ec) => `exit=${ec}`,
+  },
+  'builtin.assert': {
+    walkerHint: (n) => `${dim('if=')}${renderPredicate(n.if)}`,
+    showHint:   (n) => ` if(${renderPredicate(n.if)})${n.message ? ` message=${j(n.message)}` : ''}`,
+    startSpec:  (n) => ({ predicate: n.if, ...(n.message ? { message_template: n.message } : {}) }),
+    durSuffix:  () => null,
+  },
+  'builtin.set_attr': {
+    walkerHint: (n) => [n.set && `${dim('set=')}${j(n.set)}`, n.unset && `${dim('unset=')}${j(n.unset)}`].filter(Boolean).join(' '),
+    showHint:   (n) => `${n.set ? ` set=${j(n.set)}` : ''}${n.unset ? ` unset=${j(n.unset)}` : ''}`,
+    startSpec:  (n) => ({ ...(n.set ? { set: n.set } : {}), ...(n.unset ? { unset: n.unset } : {}) }),
+    durSuffix:  () => null,
+  },
+  'builtin.git_tag': {
+    walkerHint: (n) => `${dim('name=')}${j(n.name)}${n.target ? ` ${dim('target=')}${j(n.target)}` : ''}`,
+    showHint:   (n) => ` name=${j(n.name)}${n.lightweight === true ? ' lightweight' : ` message=${j(n.message)}`}${n.target ? ` target=${j(n.target)}` : ''}`,
+    startSpec:  (n) => ({ name: n.name, ...(n.message != null ? { message: n.message } : {}), ...(n.target != null ? { target: n.target } : {}), annotated: n.lightweight !== true }),
+    durSuffix:  (r) => r.tag_name ? `tag=${r.tag_name}` : null,
+  },
 }
 
 const usage = (code = 2) => {
@@ -224,19 +245,7 @@ if (sub === 'show') {
       // gt/gte/lt/lte) and compound (not/and/or) shapes.
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('condition')} if(${renderPredicate(node.if)}) then=${node.then} else=${node.else}`)
     } else if (node.type === 'handler') {
-      // V3.7.a/c — render builtin name + key fields. `cmd` quoted as
-      // JSON so spaces / quotes round-trip readably; assert prints
-      // the predicate via the same renderPredicate as condition.
-      const detail =
-        node.handler === 'builtin.exec'
-          ? ` cmd=${JSON.stringify(node.cmd)}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`
-        : node.handler === 'builtin.assert'
-          ? ` if(${renderPredicate(node.if)})${node.message ? ` message=${JSON.stringify(node.message)}` : ''}`
-        : node.handler === 'builtin.set_attr'
-          ? `${node.set ? ` set=${JSON.stringify(node.set)}` : ''}${node.unset ? ` unset=${JSON.stringify(node.unset)}` : ''}`
-        : node.handler === 'builtin.git_tag'
-          ? ` name=${JSON.stringify(node.name)}${node.lightweight === true ? ' lightweight' : ` message=${JSON.stringify(node.message)}`}${node.target ? ` target=${JSON.stringify(node.target)}` : ''}`
-        : ''
+      const detail = HANDLER_META[node.handler]?.showHint(node) || ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     } else if (node.type === 'subpipeline') {
       // V3.10.a — show the child pipeline_id + attrs spec
@@ -422,52 +431,22 @@ if (sub === 'run') {
       pipeline_node_id: id,
       ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
     }
-    const setAttrDetail = () => {
-      const parts = []
-      if (node.set) parts.push(`${dim('set=')}${JSON.stringify(node.set)}`)
-      if (node.unset) parts.push(`${dim('unset=')}${JSON.stringify(node.unset)}`)
-      return parts.length ? ' ' + parts.join(' ') : ''
-    }
-    const detail =
-      node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
-      node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
-      node.handler === 'builtin.set_attr' ? setAttrDetail() :
-      node.handler === 'builtin.git_tag' ? ` ${dim('name=')}${JSON.stringify(node.name)}${node.target ? ` ${dim('target=')}${JSON.stringify(node.target)}` : ''}` :
-      ''
-    console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${detail}`)
+    const meta = HANDLER_META[node.handler]
+    const hint = meta?.walkerHint(node) || ''
+    console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${hint ? ' ' + hint : ''}`)
     const handlerId = uuidv7()
-    appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
+    // Common identifiers in every pipeline_handler.* event payload
+    // for this step; spread into both start and end (success+catch).
+    const evBase = {
       handler_id: handlerId,
       handler: node.handler,
       pipeline_run_id: runId,
       pipeline_id: def.id,
       pipeline_node_id: id,
       ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
-      ...(node.handler === 'builtin.exec' ? {
-        cmd: node.cmd,
-        ...(node.timeout_ms != null ? { timeout_ms: node.timeout_ms } : {}),
-      } : {}),
-      ...(node.handler === 'builtin.assert' ? {
-        predicate: node.if,
-        ...(node.message ? { message_template: node.message } : {}),
-      } : {}),
-      ...(node.handler === 'builtin.set_attr' ? {
-        // V3.7.d.b — set + unset are both optional but at least
-        // one is required (validator-enforced). Snapshot what's
-        // present; templates are unrendered here, end event
-        // carries set_resolved.
-        ...(node.set ? { set: node.set } : {}),
-        ...(node.unset ? { unset: node.unset } : {}),
-      } : {}),
-      ...(node.handler === 'builtin.git_tag' ? {
-        // V3.7.f — name / message / target snapshotted verbatim
-        // (templates unrendered); end event carries tag_name +
-        // target (resolved).
-        name: node.name,
-        ...(node.message != null ? { message: node.message } : {}),
-        ...(node.target != null ? { target: node.target } : {}),
-        annotated: node.lightweight !== true,
-      } : {}),
+    }
+    appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.start', {
+      ...evBase, ...(meta?.startSpec(node) || {}),
     })
     try {
       const result = await runHandler(node, {
@@ -476,20 +455,11 @@ if (sub === 'run') {
         abortSignal: opts.signal || null,
       })
       const ec = result.exitCode == null ? '?' : result.exitCode
-      const durLabel =
-        node.handler === 'builtin.assert' || node.handler === 'builtin.set_attr'
-          ? `${result.durationMs}ms`
-        : node.handler === 'builtin.git_tag'
-          ? `${result.tag_name ? `tag=${result.tag_name}, ` : ''}${result.durationMs}ms`
-          : `exit=${ec}, ${result.durationMs}ms`
+      const suffix = meta?.durSuffix(result, ec)
+      const durLabel = suffix ? `${suffix}, ${result.durationMs}ms` : `${result.durationMs}ms`
       console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
       appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
-        handler_id: handlerId,
-        handler: node.handler,
-        pipeline_run_id: runId,
-        pipeline_id: def.id,
-        pipeline_node_id: id,
-        ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+        ...evBase,
         disposition: result.disposition,
         exit_code: result.exitCode ?? null,
         signal: result.signal ?? null,
@@ -504,14 +474,11 @@ if (sub === 'run') {
         ...(result.target != null ? { target_resolved: result.target } : {}),
         ...(typeof result.annotated === 'boolean' ? { annotated: result.annotated } : {}),
       })
-      // Apply mutation only at top level — parallel branches don't
-      // run set_attr (validator rejects it). Defensive guard
-      // preserves the rule even if the validator ever changes.
-      // V3.7.d.b — `result.attrs` is the nested form (built via
-      // writePath); deepMergeAttrs preserves siblings under shared
-      // top keys. `result.unsets` is dotted-path strings; deletePath
-      // removes each. set + unset both apply on success — no partial
-      // (handler returned atomically).
+      // V3.7.d.b mutation: deep-merge result.attrs (nested form via
+      // writePath) over userAttrs preserving siblings; apply unsets
+      // via deletePath. Top-level only — set_attr is validator-
+      // rejected in parallel branches; defensive guard preserves
+      // the rule if validator changes.
       if (parallelOf == null && result.disposition === 'success') {
         if (result.attrs && Object.keys(result.attrs).length) {
           deepMergeAttrs(userAttrs, result.attrs)
@@ -523,14 +490,7 @@ if (sub === 'run') {
       return result
     } catch (err) {
       appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
-        handler_id: handlerId,
-        handler: node.handler,
-        pipeline_run_id: runId,
-        pipeline_id: def.id,
-        pipeline_node_id: id,
-        ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
-        disposition: 'error',
-        error: err.message,
+        ...evBase, disposition: 'error', error: err.message,
       })
       return { __error: err.message, node: id }
     }
@@ -582,7 +542,8 @@ if (sub === 'run') {
     // surface subpipeline steps in `status`.
     const subpipelineId = uuidv7()
     const startedAt = new Date().toISOString()
-    appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.start', {
+    // Identifiers shared by both pipeline_subpipeline.* events.
+    const evBase = {
       subpipeline_id: subpipelineId,
       pipeline_run_id: runId,
       pipeline_id: def.id,
@@ -590,6 +551,9 @@ if (sub === 'run') {
       ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
       child_run_id: childRunId,
       child_pipeline_id: node.pipeline_id,
+    }
+    appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.start', {
+      ...evBase,
       ...(node.attrs ? { attrs: node.attrs } : {}),
       ...(node.inherit_attrs === true ? { inherit_attrs: true } : {}),
     })
@@ -643,13 +607,7 @@ if (sub === 'run') {
     const durationMs = Date.now() - Date.parse(startedAt)
     console.error(`  ${dim('disposition:')} ${disposition} ${dim(`(child exit=${childExit})`)}`)
     appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.end', {
-      subpipeline_id: subpipelineId,
-      pipeline_run_id: runId,
-      pipeline_id: def.id,
-      pipeline_node_id: id,
-      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
-      child_run_id: childRunId,
-      child_pipeline_id: node.pipeline_id,
+      ...evBase,
       disposition,
       exit_code: childExit,
       duration_ms: Number.isFinite(durationMs) ? durationMs : null,

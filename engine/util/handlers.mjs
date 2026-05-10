@@ -31,111 +31,32 @@
 // step regardless, so a builtin can't actually override them — but
 // the validator rejects reserved keys for clarity.
 
-import { spawn } from 'node:child_process'
 import { evaluatePredicate, renderTemplate, writePath } from './pipelines.mjs'
-import { parseDuration } from './proc.mjs'
+import { parseDuration, spawnCancellable } from './proc.mjs'
 
-// builtin.exec: run a shell command via `bash -c`. Disposition is
-// `success` on exit 0, `error` on non-zero, `timeout` if
-// `node.timeout_ms` elapses, `cancelled` if `ctx.abortSignal` fires
-// (V3.7.e — for handlers in parallel branches that lose a race).
-// stdout/stderr go straight to the parent's tty — operator sees the
-// command output inline with the walker's progress.
+// builtin.exec — run `bash -c <cmd>`; stdio inherited so the operator
+// sees command output inline with the walker. Disposition mapping:
+// success on exit 0, error on non-zero, timeout if node.timeout_ms
+// elapses, cancelled if ctx.abortSignal fires. Cancel takes
+// precedence (intentional teardown beats budget exhaustion).
 //
-// `bash -c` so quoting / piping / && in the cmd just works the way
-// operators expect. The trade-off: no shell-injection guard. Handler
-// cmds come from the pipeline definition file, which the operator
-// authored — same trust model as a Makefile or package.json script.
-//
-// Cancel mechanics: SIGTERM immediately, then SIGKILL after
-// `cancelGraceMs` (default 5000) if the child hasn't exited.
-// Matches V3.3.c dispatch cancel semantics.
+// `bash -c` so quoting / piping / && just work as operators expect.
+// Trust model: cmds come from the pipeline definition the operator
+// authored — same as a Makefile target.
 const EXEC_CANCEL_GRACE_MS = 5000
 
-const execBuiltin = (node, ctx) => new Promise((resolve) => {
-  const start = Date.now()
-  const child = spawn('bash', ['-c', node.cmd], {
+const execBuiltin = async (node, ctx) => {
+  const r = await spawnCancellable('bash', ['-c', node.cmd], {
     cwd: ctx.projectDir,
-    stdio: 'inherit',
-    env: process.env,
+    timeoutMs: parseDuration(node.timeout_ms),
+    signal: ctx.abortSignal,
+    cancelGraceMs: EXEC_CANCEL_GRACE_MS,
   })
-
-  let timedOut = false
-  let cancelled = false
-  let timeoutHandle = null
-  let killHandle = null
-  let abortHandler = null
-
-  const cleanup = () => {
-    if (timeoutHandle) clearTimeout(timeoutHandle)
-    if (killHandle) clearTimeout(killHandle)
-    if (ctx.abortSignal && abortHandler) {
-      ctx.abortSignal.removeEventListener('abort', abortHandler)
-    }
-  }
-
-  // V3.9.b — accept number (ms) or suffix-string. Validator already
-  // enforced the shape at register; parseDuration here turns
-  // either form into ms. null → no timeout.
-  const timeoutMs = parseDuration(node.timeout_ms)
-  if (timeoutMs) {
-    timeoutHandle = setTimeout(() => {
-      timedOut = true
-      try { child.kill('SIGTERM') } catch {}
-    }, timeoutMs)
-  }
-
-  if (ctx.abortSignal) {
-    const triggerAbort = () => {
-      if (cancelled) return
-      cancelled = true
-      try { child.kill('SIGTERM') } catch {}
-      // SIGKILL backstop if the child ignores SIGTERM.
-      killHandle = setTimeout(() => {
-        try { child.kill('SIGKILL') } catch {}
-      }, EXEC_CANCEL_GRACE_MS)
-    }
-    if (ctx.abortSignal.aborted) {
-      triggerAbort()
-    } else {
-      abortHandler = triggerAbort
-      ctx.abortSignal.addEventListener('abort', abortHandler, { once: true })
-    }
-  }
-
-  child.on('error', (err) => {
-    cleanup()
-    resolve({
-      disposition: 'error',
-      exitCode: null,
-      signal: null,
-      durationMs: Date.now() - start,
-      error: err.message,
-    })
-  })
-
-  child.on('exit', (code, signal) => {
-    cleanup()
-    const durationMs = Date.now() - start
-    // Cancel takes precedence over timeout if both fire — a race
-    // where the abort beats the timeout still resolves to
-    // `cancelled` (it's the explicit-intent disposition).
-    if (cancelled) {
-      resolve({ disposition: 'cancelled', exitCode: code, signal, durationMs })
-      return
-    }
-    if (timedOut) {
-      resolve({ disposition: 'timeout', exitCode: code, signal, durationMs })
-      return
-    }
-    resolve({
-      disposition: code === 0 ? 'success' : 'error',
-      exitCode: code,
-      signal,
-      durationMs,
-    })
-  })
-})
+  if (r.error) return { disposition: 'error', exitCode: null, signal: null, durationMs: r.durationMs, error: r.error.message }
+  if (r.cancelled) return { disposition: 'cancelled', exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs }
+  if (r.timedOut)  return { disposition: 'timeout',   exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs }
+  return { disposition: r.exitCode === 0 ? 'success' : 'error', exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs }
+}
 
 // builtin.assert (V3.7.c): evaluate `node.if` (V3.6 predicate
 // vocabulary — atomic or compound, recursive) against `ctx.attrs`.
@@ -237,23 +158,17 @@ const setAttrBuiltin = async (node, ctx) => {
   }
 }
 
-// builtin.git_tag (V3.7.f): tag a commit in ctx.projectDir.
-// Annotated by default (`message` required); pass `lightweight:
-// true` to create a non-annotated tag without a message. `name` /
-// `message` / optional `target` are V3.5 template-rendered against
-// ctx.attrs. Disposition: success on git exit 0; error on duplicate
-// tag, malformed name, missing target ref, or template render
-// failure (validator already caught structural issues).
+// builtin.git_tag (V3.7.f) — tag a commit in ctx.projectDir.
+// Annotated by default (`message` required); `lightweight: true`
+// skips the message. `name` / `message` / `target` (default HEAD)
+// V3.5-templated. Stderr captured for forensics; first line lands
+// in event.error on failure (duplicate tag, missing ref, etc.).
 //
-// Stderr is captured (not inherited) so the failure reason flows
-// into the pipeline_handler.end event's `error` field for
-// forensics. Stdout is ignored (git tag is silent on success).
-//
-// V3.7.f.b — honours ctx.abortSignal. On abort: SIGTERM the git
-// child; disposition resolves to `cancelled`. No grace window —
-// `git tag` is ms-scale; SIGTERM is sufficient. Cancel takes
-// precedence over the natural exit if both fire close together.
-const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
+// V3.7.f.b — short-circuits before spawn on a pre-aborted signal so
+// the op is guaranteed side-effect-free. Mid-flight aborts SIGTERM
+// the git child but git may race ahead and write the tag anyway;
+// disposition still `cancelled` in that case.
+const gitTagBuiltin = async (node, ctx) => {
   const start = Date.now()
   const attrs = ctx.attrs || {}
   let name, message, target
@@ -262,102 +177,31 @@ const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
     if (node.message != null) message = renderTemplate(node.message, attrs)
     if (node.target != null) target = renderTemplate(node.target, attrs)
   } catch (err) {
-    resolve({
-      disposition: 'error',
-      durationMs: Date.now() - start,
-      error: `git_tag: template render failed: ${err.message}`,
-    })
-    return
+    return { disposition: 'error', durationMs: Date.now() - start, error: `git_tag: template render failed: ${err.message}` }
   }
-  // V3.7.f.b — short-circuit pre-aborted: don't spawn at all, so
-  // the operation is guaranteed side-effect-free. The post-spawn
-  // abort handler below covers mid-flight aborts (where git may
-  // race ahead of SIGTERM and complete the tag write — disposition
-  // is still `cancelled` in that case, but the tag persists).
   if (ctx.abortSignal?.aborted) {
-    resolve({
-      disposition: 'cancelled', exitCode: null, signal: null,
-      durationMs: Date.now() - start, tag_name: name,
-    })
-    return
+    return { disposition: 'cancelled', exitCode: null, signal: null, durationMs: Date.now() - start, tag_name: name }
   }
   const args = ['-C', ctx.projectDir, 'tag']
-  if (node.lightweight !== true) {
-    args.push('-a', name, '-m', message)
-  } else {
-    args.push(name)
-  }
+  if (node.lightweight !== true) args.push('-a', name, '-m', message)
+  else args.push(name)
   if (target) args.push(target)
 
-  const child = spawn('git', args, {
+  const r = await spawnCancellable('git', args, {
     cwd: ctx.projectDir,
     stdio: ['ignore', 'ignore', 'pipe'],
-    env: process.env,
+    captureStderr: true,
+    signal: ctx.abortSignal,
   })
-  let stderr = ''
-  child.stderr?.on('data', (d) => { stderr += d.toString() })
-
-  let cancelled = false
-  let abortHandler = null
-  const cleanup = () => {
-    if (ctx.abortSignal && abortHandler) {
-      ctx.abortSignal.removeEventListener('abort', abortHandler)
-    }
+  if (r.error) return { disposition: 'error', exitCode: null, durationMs: r.durationMs, error: `git_tag: spawn failed: ${r.error.message}`, tag_name: name }
+  if (r.cancelled) return { disposition: 'cancelled', exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs, tag_name: name }
+  if (r.exitCode === 0) {
+    return { disposition: 'success', exitCode: 0, signal: r.signal, durationMs: r.durationMs, tag_name: name, target: target || null, annotated: node.lightweight !== true }
   }
-  if (ctx.abortSignal) {
-    const triggerAbort = () => {
-      if (cancelled) return
-      cancelled = true
-      try { child.kill('SIGTERM') } catch {}
-    }
-    if (ctx.abortSignal.aborted) {
-      triggerAbort()
-    } else {
-      abortHandler = triggerAbort
-      ctx.abortSignal.addEventListener('abort', abortHandler, { once: true })
-    }
-  }
-
-  child.on('error', (err) => {
-    cleanup()
-    resolve({
-      disposition: 'error',
-      exitCode: null,
-      durationMs: Date.now() - start,
-      error: `git_tag: spawn failed: ${err.message}`,
-      tag_name: name,
-    })
-  })
-  child.on('exit', (code, signal) => {
-    cleanup()
-    const durationMs = Date.now() - start
-    // Cancel takes precedence over the exit code regardless —
-    // intentional teardown beats whatever git happened to return.
-    if (cancelled) {
-      resolve({
-        disposition: 'cancelled', exitCode: code, signal, durationMs,
-        tag_name: name,
-      })
-      return
-    }
-    if (code === 0) {
-      resolve({
-        disposition: 'success', exitCode: 0, signal, durationMs,
-        tag_name: name, target: target || null,
-        annotated: node.lightweight !== true,
-      })
-      return
-    }
-    // First-line of stderr is git's diagnostic (e.g. "fatal: tag
-    // 'foo' already exists"). Capped to keep events readable.
-    const firstLine = (stderr || '').split('\n')[0].slice(0, 200)
-    resolve({
-      disposition: 'error', exitCode: code, signal, durationMs,
-      error: `git_tag: ${firstLine || `git exit ${code}`}`,
-      tag_name: name,
-    })
-  })
-})
+  // First-line of git's diagnostic; capped to keep events readable.
+  const firstLine = (r.stderr || '').split('\n')[0].slice(0, 200)
+  return { disposition: 'error', exitCode: r.exitCode, signal: r.signal, durationMs: r.durationMs, error: `git_tag: ${firstLine || `git exit ${r.exitCode}`}`, tag_name: name }
+}
 
 const BUILTINS = {
   'builtin.exec': execBuiltin,

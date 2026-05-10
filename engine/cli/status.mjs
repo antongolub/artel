@@ -18,30 +18,19 @@ import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { PROJECT_DIR, bold, dim, cyan, yellow, green, red } from '../util/cli.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // `here` is engine/cli/, so platform root is two levels up.
 const PLATFORM_DIR = dirname(dirname(here))
-// Project paths: each consuming repo holds its own .artel/ runtime. Resolve
-// from cwd (or env override) — never from `here`, since one platform serves
-// many projects.
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
+// Project paths: each consuming repo holds its own .artel/ runtime. Resolved
+// in util/cli.mjs from cwd (or env override) — never from `here`, since one
+// platform serves many projects.
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const PROJECT_NAME = basename(PROJECT_DIR)
 const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
 const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
 const DAYS = 7
-
-// --- formatting ---
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const bold = (s) => c('1', s)
-const dim = (s) => c('2', s)
-const cyan = (s) => c('36', s)
-const yellow = (s) => c('33', s)
-const green = (s) => c('32', s)
-const red = (s) => c('31', s)
 
 const fmt = (n) => {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
