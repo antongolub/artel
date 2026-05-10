@@ -16,6 +16,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { appendWorkloadEvent } from '../util/audit.mjs'
 import {
@@ -237,6 +238,11 @@ if (sub === 'show') {
           ? ` name=${JSON.stringify(node.name)}${node.lightweight === true ? ' lightweight' : ` message=${JSON.stringify(node.message)}`}${node.target ? ` target=${JSON.stringify(node.target)}` : ''}`
         : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
+    } else if (node.type === 'subpipeline') {
+      // V3.10.a — show the child pipeline_id + attrs spec
+      // (templates unrendered).
+      const attrsDetail = node.attrs ? ` attrs=${JSON.stringify(node.attrs)}` : ''
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('subpipeline')} pipeline_id=${cyan(node.pipeline_id)}${attrsDetail}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
@@ -257,6 +263,10 @@ if (sub === 'run') {
       options: {
         attrs: { type: 'string' },
         'task-prefix': { type: 'string' },
+        // V3.10.a — set when this run is a subpipeline child; the
+        // values land in pipeline_run.started for trace correlation.
+        'parent-run': { type: 'string' },
+        'parent-node': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
       allowPositionals: true,
@@ -286,6 +296,9 @@ if (sub === 'run') {
     pipeline_id: def.id,
     pipeline_version: def.version,
     entry_node: def.entry,
+    // V3.10.a — child-of-subpipeline correlation
+    ...(values['parent-run'] ? { parent_pipeline_run_id: values['parent-run'] } : {}),
+    ...(values['parent-node'] ? { parent_pipeline_node_id: values['parent-node'] } : {}),
   })
 
   console.error(`${bold('▶')} pipeline ${cyan(def.id)} v${def.version} run=${dim(runId.slice(-12))} prefix=${dim(taskPrefix)}`)
@@ -680,8 +693,63 @@ if (sub === 'run') {
         break
       }
       stepDisposition = result.disposition
+    } else if (node.type === 'subpipeline') {
+      // V3.10.a — composition. Child runs as a subprocess via the
+      // same `pipeline run` CLI; child's `pipeline_run.started`
+      // event records `parent_pipeline_run_id` +
+      // `parent_pipeline_node_id` for trace correlation. Parent's
+      // step disposition derives from the child's exit code:
+      // 0 → success, non-0 → error. Templates render in `attrs`
+      // values against the parent's merged attrs blob.
+      const childPath = pipelinePath(PROJECT_DIR, node.pipeline_id)
+      if (!existsSync(childPath)) {
+        abortReason = `subpipeline '${nodeId}': child pipeline '${node.pipeline_id}' not registered`
+        finalState = 'failed'
+        break
+      }
+      const parentScope = {
+        ...userAttrs,
+        pipeline_run_id: runId,
+        pipeline_id: def.id,
+        pipeline_node_id: nodeId,
+      }
+      let childAttrs = {}
+      let renderError = null
+      if (node.attrs) {
+        for (const [k, raw] of Object.entries(node.attrs)) {
+          try {
+            childAttrs[k] = typeof raw === 'string' ? renderTemplate(raw, parentScope) : raw
+          } catch (err) {
+            renderError = `attrs['${k}']: ${err.message}`
+            break
+          }
+        }
+      }
+      if (renderError) {
+        abortReason = `subpipeline '${nodeId}': template render failed: ${renderError}`
+        finalState = 'failed'
+        break
+      }
+      console.error(`${bold('▦')} ${cyan(nodeId)} ${dim('→')} subpipeline ${cyan(node.pipeline_id)}${node.attrs ? ` ${dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
+      const childArgs = [
+        process.argv[1], 'run', node.pipeline_id,
+        '--parent-run', runId,
+        '--parent-node', nodeId,
+      ]
+      if (node.attrs && Object.keys(childAttrs).length) {
+        childArgs.push('--attrs', JSON.stringify(childAttrs))
+      }
+      const childExit = await new Promise((resolve) => {
+        const child = spawn(process.argv0, childArgs, {
+          cwd: PROJECT_DIR, stdio: 'inherit', env: process.env,
+        })
+        child.on('error', () => resolve(-1))
+        child.on('exit', (code) => resolve(code ?? -1))
+      })
+      stepDisposition = childExit === 0 ? 'success' : 'error'
+      console.error(`  ${dim('disposition:')} ${stepDisposition} ${dim(`(child exit=${childExit})`)}`)
     } else {
-      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.7.a supports: dispatch | parallel | condition | handler | terminal)`
+      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.10.a supports: dispatch | parallel | condition | handler | subpipeline | terminal)`
       finalState = 'failed'
       break
     }

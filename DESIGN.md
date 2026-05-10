@@ -621,6 +621,15 @@ without breaking the events vocabulary). Versioned. Lifecycle:
 - `terminal` — sink with `final_state: completed | failed | aborted | superseded`
 - `parallel` (V3.2.a) — fan-out + all-complete join (see §11.2)
 - `condition` (V3.2.b) — pure routing on `task_attrs` predicate (see §11.3)
+- `handler` (V3.7.a) — built-in platform action (see §11.8)
+- `subpipeline` (V3.10.a) — composition: invokes another registered
+  pipeline as a subprocess via the same `pipeline run` CLI. Child's
+  `pipeline_run.started` event carries `parent_pipeline_run_id` +
+  `parent_pipeline_node_id` for trace correlation. Child exit code
+  → parent step disposition (0=success, else=error). `attrs`
+  V3.5-templated against parent scope. Self-recursion rejected at
+  register; arbitrary-depth cycles + parent-cancel cascade deferred
+  to V3.10.b.
 
 **Edges:** `{ from, on_disposition, to }`. `on_disposition` ∈
 `success | parked | timeout | error | *`. Resolution is
@@ -1285,6 +1294,8 @@ that lands. Same run_id can't collide because UUIDv7.
 
 ### 11.10 Open
 
+- `subpipeline` arbitrary-depth cycle detection + parent-cancel
+  cascade to child run via V3.8 sentinel write (V3.10.b)
 - More handler builtins: `builtin.git_squash`, `builtin.git_merge`
   (need merge-conflict + worktree-target design)
 - `builtin.git_tag` abort-during-spawn (currently ignores

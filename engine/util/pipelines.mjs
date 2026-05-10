@@ -75,7 +75,7 @@ export const pipelineCancelPath = (projectDir, runId) =>
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/i
 
 export const VALID_NODE_TYPES = new Set([
-  'dispatch', 'terminal', 'parallel', 'condition', 'handler',
+  'dispatch', 'terminal', 'parallel', 'condition', 'handler', 'subpipeline',
 ])
 
 // V3.7.a — handler node builtins. The walker dispatches handler
@@ -440,6 +440,24 @@ export const validatePipeline = (def, source = '<inline>') => {
           if (typeof node.target !== 'string' || !node.target.trim()) {
             throw new Error(`${source}: handler node '${nid}' .target must be a non-empty string when set`)
           }
+        }
+      }
+    } else if (node.type === 'subpipeline') {
+      // V3.10.a — composition. `pipeline_id` references another
+      // registered pipeline, validated lazily at run time (the
+      // child def may not be loaded yet at parent register time).
+      // Optional `attrs` becomes the child run's userAttrs blob;
+      // string values get V3.5 template-rendered against the
+      // parent's merged attrs at dispatch time.
+      if (typeof node.pipeline_id !== 'string' || !SLUG_RE.test(node.pipeline_id)) {
+        throw new Error(`${source}: subpipeline node '${nid}' .pipeline_id must be a slug (got: ${node.pipeline_id})`)
+      }
+      if (node.pipeline_id === def.id) {
+        throw new Error(`${source}: subpipeline node '${nid}' .pipeline_id '${node.pipeline_id}' is the parent itself (self-recursion)`)
+      }
+      if (node.attrs != null) {
+        if (typeof node.attrs !== 'object' || Array.isArray(node.attrs)) {
+          throw new Error(`${source}: subpipeline node '${nid}' .attrs must be a plain object`)
         }
       }
     }

@@ -61,8 +61,8 @@ describe('validatePipeline', () => {
 
   it('rejects unknown node types', () => {
     const def = minimalPipeline()
-    def.nodes.first = { type: 'subpipeline' as 'dispatch', role: 'r', prompt: 'p' }
-    expect(() => validatePipeline(def)).toThrow(/invalid type 'subpipeline'/)
+    def.nodes.first = { type: 'pause' as 'dispatch', role: 'r', prompt: 'p' }
+    expect(() => validatePipeline(def)).toThrow(/invalid type 'pause'/)
   })
 
   it('rejects dispatch nodes missing role / prompt', () => {
@@ -537,6 +537,53 @@ describe('condition predicate vocabulary (V3.6) — compounds + comparisons', ()
       // type-strict — number 1 !== string '1'
       expect(evaluatePredicate({ attr: 'x', ne: 1 }, { x: '1' })).toBe(true)
     })
+  })
+})
+
+describe('subpipeline node validation (V3.10.a)', () => {
+  const withSubpipeline = (overrides: object) => ({
+    id: 'parent', version: 1, entry: 'sub',
+    nodes: {
+      sub: { type: 'subpipeline', pipeline_id: 'child', ...overrides },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'sub', on_disposition: 'success', to: 'done' },
+      { from: 'sub', on_disposition: '*', to: 'done' },
+    ],
+  })
+
+  it('accepts a well-formed subpipeline node', () => {
+    expect(() => validatePipeline(withSubpipeline({}))).not.toThrow()
+  })
+
+  it('accepts subpipeline with attrs object', () => {
+    expect(() => validatePipeline(withSubpipeline({
+      attrs: { target: '{{ pipeline_run_id }}', mode: 'fast' },
+    }))).not.toThrow()
+  })
+
+  it('rejects subpipeline without pipeline_id', () => {
+    const def = withSubpipeline({})
+    delete (def.nodes.sub as { pipeline_id?: string }).pipeline_id
+    expect(() => validatePipeline(def)).toThrow(/\.pipeline_id must be a slug/)
+  })
+
+  it('rejects subpipeline with non-slug pipeline_id', () => {
+    expect(() => validatePipeline(withSubpipeline({ pipeline_id: 'bad slug!' })))
+      .toThrow(/\.pipeline_id must be a slug/)
+  })
+
+  it('rejects self-recursion (pipeline_id === parent.id)', () => {
+    expect(() => validatePipeline(withSubpipeline({ pipeline_id: 'parent' })))
+      .toThrow(/is the parent itself \(self-recursion\)/)
+  })
+
+  it('rejects subpipeline with non-object attrs', () => {
+    expect(() => validatePipeline(withSubpipeline({ attrs: 'not-an-object' as never })))
+      .toThrow(/\.attrs must be a plain object/)
+    expect(() => validatePipeline(withSubpipeline({ attrs: ['a'] as never })))
+      .toThrow(/\.attrs must be a plain object/)
   })
 })
 

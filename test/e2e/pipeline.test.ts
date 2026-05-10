@@ -1903,6 +1903,150 @@ describe('artel pipeline cancel — operator cancel of in-flight run (V3.8)', ()
   }, 30000)
 })
 
+describe('artel pipeline run — subpipeline composition (V3.10.a)', () => {
+  // Two pipelines: parent calls child via subpipeline node. Child
+  // is a regular linear pipeline. Verify child's pipeline_run.*
+  // events carry parent_pipeline_run_id + parent_pipeline_node_id;
+  // child's exit code → parent's step disposition.
+
+  const childDef = {
+    id: 'child-flow', version: 1, entry: 'work',
+    nodes: {
+      work: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: '{{ greeting }}' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'work', on_disposition: 'success', to: 'done' },
+      { from: 'work', on_disposition: '*', to: 'fail' },
+    ],
+  }
+
+  const parentDef = (overrides = {}) => ({
+    id: 'parent-flow', version: 1, entry: 'sub',
+    nodes: {
+      sub: {
+        type: 'subpipeline', pipeline_id: 'child-flow',
+        attrs: { greeting: 'hi from parent {{ pipeline_run_id }}' },
+        ...overrides,
+      },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'sub', on_disposition: 'success', to: 'done' },
+      { from: 'sub', on_disposition: '*', to: 'fail' },
+    ],
+  })
+
+  it('child run succeeds; parent step→success; child events link to parent (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+
+    // Two pipeline_run.started events — parent + child — distinguishable
+    // by pipeline_id.
+    const starts = evts.filter((e) => e.type === 'pipeline_run.started')
+    expect(starts).toHaveLength(2)
+    const parentStart = starts.find((e) => e.pipeline_id === 'parent-flow')
+    const childStart = starts.find((e) => e.pipeline_id === 'child-flow')
+    expect(parentStart).toBeDefined()
+    expect(childStart).toBeDefined()
+
+    // Child's start event links to parent
+    expect(childStart.parent_pipeline_run_id).toBe(parentStart.pipeline_run_id)
+    expect(childStart.parent_pipeline_node_id).toBe('sub')
+    // Parent's start has no parent
+    expect(parentStart.parent_pipeline_run_id).toBeUndefined()
+
+    // Both runs ended completed
+    const ends = evts.filter((e) => e.type === 'pipeline_run.ended')
+    expect(ends).toHaveLength(2)
+    for (const e of ends) expect(e.final_state).toBe('completed')
+
+    // Child dispatched its `work` node — verify the templated prompt
+    // received `pipeline_run_id` from the PARENT's run id (template
+    // rendering happens against the parent scope before child spawn).
+    const childRunId = childStart.pipeline_run_id
+    const dispatchStart = evts.find((e) => e.type === 'dispatch.start' && e.task_attrs?.pipeline_run_id === childRunId)
+    expect(dispatchStart).toBeDefined()
+    expect(dispatchStart.task_attrs.greeting).toMatch(/^hi from parent [0-9a-f-]{36}$/)
+  })
+
+  it('child run fails → parent step disposition error → wildcard edge (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Child that doesn't have a `success` edge from work — exits failed.
+    const failingChild = {
+      ...childDef, id: 'failing-child', entry: 'work',
+      edges: [{ from: 'work', on_disposition: '*', to: 'fail' }],
+    }
+    const parent = {
+      ...parentDef(),
+      nodes: {
+        ...parentDef().nodes,
+        sub: { type: 'subpipeline', pipeline_id: 'failing-child', attrs: { greeting: 'x' } },
+      },
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'fc.json', failingChild)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    // Stub that exits non-zero → child's work disposition: error → fail terminal
+    const stub = ['#!/usr/bin/env node', 'process.exit(7)', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ends = events(root).filter((e) => e.type === 'pipeline_run.ended')
+    const parentEnd = ends.find((e) => e.pipeline_id === 'parent-flow')
+    const childEnd = ends.find((e) => e.pipeline_id === 'failing-child')
+    expect(childEnd.final_state).toBe('failed')
+    expect(parentEnd).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'error',
+    })
+  })
+
+  it('subpipeline pointing at unregistered child fails fast', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const parent = parentDef({ pipeline_id: 'no-such-child' })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/child pipeline 'no-such-child' not registered/)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+  })
+
+  it('show renders subpipeline row with attrs (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'parent-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/sub\s+subpipeline\s+pipeline_id=child-flow\s+attrs=\{"greeting":"hi from parent \{\{ pipeline_run_id \}\}"\}/)
+  })
+})
+
 describe('artel pipeline run — dispatch node timeout_ms (V3.9)', () => {
   // dispatch node carries an optional timeout_ms that flows into
   // dispatchLifecycle as `timeoutMs`. When the engine stub hangs
