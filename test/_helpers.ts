@@ -70,6 +70,13 @@ export const execGit = (cwd: string, args: string[]) =>
 
 const initRepo = (cwd: string) => {
   execGit(cwd, ['init', '-b', 'master'])
+  // Local user.name/user.email so git operations spawned by the
+  // platform-under-test (e.g. `git tag -a` via builtin.git_tag in
+  // V3.7.f) have committer info. Without this, CI images that lack
+  // global git config fail with "Author identity unknown" — locally
+  // ~/.gitconfig usually masks the issue.
+  execGit(cwd, ['config', 'user.name', 'Test'])
+  execGit(cwd, ['config', 'user.email', 'test@example.com'])
   execGit(cwd, ['add', '.'])
   const tree = execGit(cwd, ['write-tree'])
   const commit = execGit(cwd, ['commit-tree', tree, '-m', 'init'])
