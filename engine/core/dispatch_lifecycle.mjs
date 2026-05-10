@@ -21,6 +21,7 @@ import { gitContext, gitDelta } from '../util/git.mjs'
 import { listDrivers } from '../util/drivers.mjs'
 import { identityEnv, resolveIdentity, resolveRequires } from '../util/trust.mjs'
 import { createWorktreeForBranch, removeWorktree } from '../util/worktree.mjs'
+import { parseDuration } from '../util/proc.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
@@ -151,14 +152,9 @@ const checkDispatchPolicy = (parentRoleName, requestedRole, agentsDir) => {
   }
 }
 
-const parseTimeoutMs = (raw, label) => {
-  if (raw === undefined || raw === null || raw === '') return null
-  const value = Number(raw)
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${label} must be a positive integer, got: ${raw}`)
-  }
-  return value
-}
+// V3.9.b — delegate to the shared parser so number + suffix-string
+// values are handled identically here and in pipelines / handlers.
+const parseTimeoutMs = (raw, label) => parseDuration(raw, label)
 
 const normalizeTimeoutMs = (timeoutMs) =>
   parseTimeoutMs(timeoutMs ?? process.env.ARTEL_DISPATCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')

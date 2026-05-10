@@ -648,7 +648,8 @@ some-step:
   sandbox: workspace-write  # optional sandbox tier
   tools: 'Bash,Edit,Write'  # optional allowed-tools list
   permission-mode: acceptEdits  # optional permission mode
-  timeout_ms: 60000         # V3.9 — optional per-node budget
+  timeout_ms: 60000         # V3.9 — optional per-node budget (ms)
+  # or suffix-string (V3.9.b): timeout_ms: '60s' / '5m' / '2h' / '1d'
   prompt: '...'             # required, V3.5 templates supported
 ```
 
@@ -659,6 +660,22 @@ machinery is V3.3.c's existing path. Useful for parallel branches
 that need different per-branch budgets, or top-level dispatches
 that should bound their runtime independently of the global
 default.
+
+**Suffix syntax (V3.9.b).** `timeout_ms` accepts either a positive
+integer (interpreted as ms) or a string in the form
+`<n>(ms|s|m|h|d)?`:
+- `60000` or `'60000'` or `'60000ms'` — 60 seconds
+- `'60s'` — 60 seconds
+- `'5m'` — 5 minutes
+- `'2h'` — 2 hours
+- `'1d'` — 1 day
+
+Same shape applies to `handler.exec.timeout_ms` and to
+`ARTEL_DISPATCH_TIMEOUT_MS` env (handled by the shared
+`parseDuration` parser in `engine/util/proc.mjs`). Internal
+whitespace (`'60 s'`) is rejected; leading/trailing whitespace is
+trimmed. Fractional / zero / negative / `Infinity` / `NaN`
+rejected at register.
 
 **Run** is synchronous: walk node-by-node, dispatch each `dispatch`
 inline, pick next via `resolveNext`, stop on `terminal` or

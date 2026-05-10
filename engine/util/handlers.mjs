@@ -32,6 +32,7 @@
 
 import { spawn } from 'node:child_process'
 import { evaluatePredicate, renderTemplate } from './pipelines.mjs'
+import { parseDuration } from './proc.mjs'
 
 // builtin.exec: run a shell command via `bash -c`. Disposition is
 // `success` on exit 0, `error` on non-zero, `timeout` if
@@ -72,11 +73,15 @@ const execBuiltin = (node, ctx) => new Promise((resolve) => {
     }
   }
 
-  if (node.timeout_ms) {
+  // V3.9.b — accept number (ms) or suffix-string. Validator already
+  // enforced the shape at register; parseDuration here turns
+  // either form into ms. null → no timeout.
+  const timeoutMs = parseDuration(node.timeout_ms)
+  if (timeoutMs) {
     timeoutHandle = setTimeout(() => {
       timedOut = true
       try { child.kill('SIGTERM') } catch {}
-    }, node.timeout_ms)
+    }, timeoutMs)
   }
 
   if (ctx.abortSignal) {

@@ -1820,6 +1820,103 @@ describe('artel pipeline run — dispatch node timeout_ms (V3.9)', () => {
     expect(r.stdout).toMatch(/d\s+dispatch\s+role=implementer\s+engine=claude\s+timeout_ms=60000/)
   })
 
+  it('suffix-string timeout_ms flows through walker for dispatch + handler.exec (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'suffix-flow', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'do',
+          timeout_ms: '500ms',          // V3.9.b: string with suffix
+        },
+        h: {
+          type: 'handler', handler: 'builtin.exec',
+          // Plain sleep — bash's default SIGTERM handler terminates
+          // the shell directly, so the timeout disposition resolves
+          // immediately. (Adding a `trap "..." TERM` would block the
+          // signal until sleep returns; bash queues SIGTERM during
+          // the sleep wait. V3.7.e cancel grace handles that case
+          // via SIGKILL backstop in parallel branches, but linear
+          // exec with timeout_ms only delivers SIGTERM.)
+          cmd: 'sleep 30',
+          timeout_ms: '300ms',          // V3.9.b: tighter via suffix
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'h' },
+        { from: 'd', on_disposition: '*', to: 'h' },
+        { from: 'h', on_disposition: 'timeout', to: 'fail' },
+        { from: 'h', on_disposition: '*', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'suffix-flow', '--task-prefix', 'sf'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    // dispatch finishes ~immediately; handler.exec hits its 300ms
+    // budget → timeout edge → fail terminal.
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'timeout',
+    })
+  }, 15000)
+
+  it('register accepts suffix-string timeout_ms (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'sf-ok', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: '5m',
+        },
+        h: {
+          type: 'handler', handler: 'builtin.exec', cmd: 'true',
+          timeout_ms: '60s',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'h' },
+        { from: 'h', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'sf-ok.json', def)])
+    expect(r.status).toBe(0)
+  })
+
+  it('register rejects malformed suffix-string timeout_ms (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'sf-bad', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: '60sec',   // bad suffix
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'sf-bad.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive integer ms or string with suffix/)
+  })
+
   it('register rejects dispatch with non-positive timeout_ms', () => {
     const root = createTempRepo()
     installAll(root)
@@ -1837,6 +1934,6 @@ describe('artel pipeline run — dispatch node timeout_ms (V3.9)', () => {
     const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
       writePipelineFile(root, 'broken.json', def)])
     expect(r.status).not.toBe(0)
-    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive finite number/)
+    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive integer ms or string with suffix/)
   })
 })

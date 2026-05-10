@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.9)** | `[done]` | Cumulative through V3.9: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + worst-of-children all-complete join (V3.2.a), `condition` pure routing (V3.2.b), git-worktree isolation + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` joins with first-success cancellation (V3.3.c), `artel pipeline runs` / `status` observability (V3.4.a), `{{ dotted.path }}` prompt template substitution (V3.5), recursive predicate vocabulary (V3.6), `handler` node type (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel <run-id>` via sentinel-file polling (V3.8), `artel sweep` prunes stale `.pipeline-cancels/` sentinels (V3.8.b), per-node `timeout_ms` on `dispatch` plumbed through `dispatchLifecycle` for branch-level + top-level budgets (V3.9). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. Parallel branches accept dispatch + handler (exec / assert); set_attr rejected. `builtin.exec` + `dispatch` both honour `AbortSignal` with SIGTERM → grace → SIGKILL. Walker creates a master `runAbort` AbortController + 500ms-poll watcher; on detection cascades into linear dispatch / handler signals + every per-branch parallel controller. Sweep extended: `cluster.swept` event gains `pipeline_cancels_removed` count; in-flight sentinels never swept; JSON output includes `pipeline_cancels_swept` array. CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. Per-node `timeout_ms` falls back to `ARTEL_DISPATCH_TIMEOUT_MS` env / built-in default when absent; back-compat preserved. 593 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, dotted-path / deletion in set_attr, set_attr in branches with merge contract. |
+| V3 | **Pipelines (V3.1–V3.9.b)** | `[done]` | Cumulative through V3.9.b: linear `dispatch` + `terminal` (V3.1), `parallel` fan-out + all-complete join (V3.2.a), `condition` pure routing (V3.2.b), git-worktree isolation + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` joins with cancellation (V3.3.c), `runs` / `status` observability (V3.4.a), `{{ template }}` substitution (V3.5), compound + comparison predicates (V3.6), `handler` nodes (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel` via sentinel-file polling (V3.8), `artel sweep` prunes stale cancel sentinels (V3.8.b), per-node `timeout_ms` on dispatch (V3.9), suffix syntax (`'500ms'` / `'60s'` / `'5m'` / `'2h'` / `'1d'`) for `timeout_ms` shared between dispatch + handler.exec + dispatchLifecycle env fallback via single `parseDuration` parser (V3.9.b). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. Parallel branches accept dispatch + handler (exec / assert); set_attr rejected. `builtin.exec` + `dispatch` both honour `AbortSignal` with SIGTERM → grace → SIGKILL. Walker creates master `runAbort` AbortController + 500ms-poll watcher; cascades into linear + per-branch controllers. Sweep prunes terminated-run cancel sentinels (in-flight protected). CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. `parseDuration` accepts plain ms or `<n><suffix>`; rejects internal whitespace, fractionals, non-positive, malformed. 607 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, dotted-path / deletion in set_attr, set_attr in branches with merge contract. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,35 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-10** — V3.9.b — suffix syntax for `timeout_ms`.
+  Pipelines can now write `timeout_ms: '60s'` / `'5m'` / `'2h'` /
+  `'1d'` instead of raw milliseconds. Same parser handles dispatch
+  nodes, `handler.exec` nodes, and `dispatchLifecycle`'s env-var /
+  built-in default fallback — single source of truth means
+  validator's accept-set matches what the runtime parses. New
+  `parseDuration(raw, label?)` exported from `engine/util/proc.mjs`:
+  accepts `null`/`undefined`/`''` → returns null; positive integer
+  → ms; string of `<n>` (digits only, ms) or `<n><suffix>` (suffix
+  ∈ {`ms`, `s`, `m`, `h`, `d`}). Rejects zero / negative /
+  fractional / `Infinity` / `NaN` / non-string-non-number /
+  malformed strings (`'60sec'`, `'60x'`) / internal whitespace
+  (`'60 s'`); accepts leading/trailing whitespace via `.trim()`.
+  `dispatch_lifecycle.mjs#parseTimeoutMs` collapsed to a thin
+  delegator. Pipelines validator's dispatch + handler.exec
+  `timeout_ms` checks delegate to `parseDuration`; error format
+  unified to `"<label> must be a positive integer ms or string
+  with suffix (ms|s|m|h|d), got: <value>"`. `handler.exec` runtime
+  re-parses at execution time (validator + runtime in lockstep).
+  607 tests green (14 new — 10 unit on parseDuration covering null
+  passthrough / number passthrough / 5 suffixes / bare-number
+  string / trim / fractional+zero+negative rejection / malformed /
+  Infinity+NaN / non-types / labeled errors, 1 unit pipelines for
+  dispatch suffix accept, 3 e2e covering suffix flows through
+  walker for both dispatch + handler.exec + register accepts +
+  rejects malformed). Existing V3.7.a + V3.9 validator tests
+  updated (5 regex updates) for new error format; one V3.9 test
+  case (`'60s'` was previously expected to throw) repurposed into
+  a positive case under V3.9.b.
 - **2026-05-10** — V3.9 — node-level `timeout_ms` on dispatch nodes.
   Closes the "branch-level timeout budgets" backlog item via the
   broader gap it pointed at: `dispatch` nodes had no per-node

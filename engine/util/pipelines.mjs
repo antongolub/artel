@@ -47,6 +47,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { parseDuration } from './proc.mjs'
 
 const PIPELINES_DIR_REL = ['.artel', 'pipelines']
 
@@ -252,10 +253,13 @@ export const validatePipeline = (def, source = '<inline>') => {
       // that need different per-branch budgets, and for gating long
       // dispatches at the pipeline level rather than relying on the
       // global default.
+      // V3.9.b — accepts number (ms) or string with suffix
+      // (`'500ms'` / `'60s'` / `'5m'` / `'2h'` / `'1d'`); shared
+      // parser via `parseDuration` so validator + runtime stay in
+      // lockstep.
       if (node.timeout_ms != null) {
-        if (typeof node.timeout_ms !== 'number' || node.timeout_ms <= 0 || !Number.isFinite(node.timeout_ms)) {
-          throw new Error(`${source}: dispatch node '${nid}' .timeout_ms must be a positive finite number (got: ${node.timeout_ms})`)
-        }
+        try { parseDuration(node.timeout_ms, `dispatch node '${nid}' .timeout_ms`) }
+        catch (err) { throw new Error(`${source}: ${err.message}`) }
       }
     } else if (node.type === 'terminal') {
       if (!VALID_FINAL_STATES.has(node.final_state)) {
@@ -338,10 +342,11 @@ export const validatePipeline = (def, source = '<inline>') => {
         if (typeof node.cmd !== 'string' || !node.cmd.trim()) {
           throw new Error(`${source}: handler node '${nid}' (builtin.exec) requires .cmd as a non-empty string`)
         }
+        // V3.9.b — same parser as dispatch.timeout_ms; accepts
+        // number (ms) or suffix-string ('60s' / '5m' / '2h' / '1d').
         if (node.timeout_ms != null) {
-          if (typeof node.timeout_ms !== 'number' || node.timeout_ms <= 0 || !Number.isFinite(node.timeout_ms)) {
-            throw new Error(`${source}: handler node '${nid}' .timeout_ms must be a positive finite number (got: ${node.timeout_ms})`)
-          }
+          try { parseDuration(node.timeout_ms, `handler node '${nid}' .timeout_ms`) }
+          catch (err) { throw new Error(`${source}: ${err.message}`) }
         }
       }
       // V3.7.c — builtin.assert: requires .if predicate (same shape

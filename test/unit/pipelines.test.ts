@@ -124,7 +124,7 @@ describe('validatePipeline', () => {
   })
 })
 
-describe('dispatch node timeout_ms validation (V3.9)', () => {
+describe('dispatch node timeout_ms validation (V3.9 + V3.9.b)', () => {
   const withTimeout = (timeoutMs: unknown) => {
     const def = minimalPipeline() as Record<string, unknown> & { nodes: Record<string, Record<string, unknown>> }
     def.nodes.first.timeout_ms = timeoutMs
@@ -136,28 +136,38 @@ describe('dispatch node timeout_ms validation (V3.9)', () => {
     expect(() => validatePipeline(withTimeout(1))).not.toThrow()
   })
 
+  it('accepts string with suffix ms / s / m / h / d (V3.9.b)', () => {
+    for (const v of ['500ms', '60s', '5m', '2h', '1d', '60', '60000']) {
+      expect(() => validatePipeline(withTimeout(v))).not.toThrow()
+    }
+    // Whitespace tolerance.
+    expect(() => validatePipeline(withTimeout(' 60s '))).not.toThrow()
+  })
+
   it('accepts dispatch node without timeout_ms (back-compat)', () => {
     expect(() => validatePipeline(minimalPipeline())).not.toThrow()
   })
 
   it('rejects zero / negative timeout_ms', () => {
     expect(() => validatePipeline(withTimeout(0))).toThrow(
-      /\.timeout_ms must be a positive finite number/,
+      /\.timeout_ms must be a positive integer ms or string with suffix/,
     )
     expect(() => validatePipeline(withTimeout(-1000))).toThrow(
-      /\.timeout_ms must be a positive finite number/,
+      /\.timeout_ms must be a positive integer ms or string with suffix/,
     )
   })
 
-  it('rejects non-numeric / Infinity / NaN', () => {
-    expect(() => validatePipeline(withTimeout('60s'))).toThrow(
-      /\.timeout_ms must be a positive finite number/,
-    )
+  it('rejects malformed strings + Infinity + NaN', () => {
+    for (const v of ['invalid', '60x', '60 sec', '5 m', '-60s', '0s']) {
+      expect(() => validatePipeline(withTimeout(v))).toThrow(
+        /\.timeout_ms must be a positive integer ms or string with suffix/,
+      )
+    }
     expect(() => validatePipeline(withTimeout(Infinity))).toThrow(
-      /\.timeout_ms must be a positive finite number/,
+      /\.timeout_ms must be a positive integer ms or string with suffix/,
     )
     expect(() => validatePipeline(withTimeout(NaN))).toThrow(
-      /\.timeout_ms must be a positive finite number/,
+      /\.timeout_ms must be a positive integer ms or string with suffix/,
     )
   })
 
@@ -581,13 +591,13 @@ describe('handler node validation (V3.7.a)', () => {
   it('rejects builtin.exec with non-positive timeout_ms', () => {
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: 0,
-    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+    }))).toThrow(/\.timeout_ms must be a positive integer ms or string with suffix/)
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: -100,
-    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+    }))).toThrow(/\.timeout_ms must be a positive integer ms or string with suffix/)
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.exec', cmd: 'true', timeout_ms: 'soon' as never,
-    }))).toThrow(/\.timeout_ms must be a positive finite number/)
+    }))).toThrow(/\.timeout_ms must be a positive integer ms or string with suffix/)
   })
 
   it('handler nodes participate in reachability', () => {
