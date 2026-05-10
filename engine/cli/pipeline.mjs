@@ -233,6 +233,8 @@ if (sub === 'show') {
           ? ` if(${renderPredicate(node.if)})${node.message ? ` message=${JSON.stringify(node.message)}` : ''}`
         : node.handler === 'builtin.set_attr'
           ? `${node.set ? ` set=${JSON.stringify(node.set)}` : ''}${node.unset ? ` unset=${JSON.stringify(node.unset)}` : ''}`
+        : node.handler === 'builtin.git_tag'
+          ? ` name=${JSON.stringify(node.name)}${node.lightweight === true ? ' lightweight' : ` message=${JSON.stringify(node.message)}`}${node.target ? ` target=${JSON.stringify(node.target)}` : ''}`
         : ''
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     }
@@ -395,6 +397,7 @@ if (sub === 'run') {
       node.handler === 'builtin.exec' ? ` ${dim('cmd=')}${JSON.stringify(node.cmd)}` :
       node.handler === 'builtin.assert' ? ` ${dim('if=')}${renderPredicate(node.if)}` :
       node.handler === 'builtin.set_attr' ? setAttrDetail() :
+      node.handler === 'builtin.git_tag' ? ` ${dim('name=')}${JSON.stringify(node.name)}${node.target ? ` ${dim('target=')}${JSON.stringify(node.target)}` : ''}` :
       ''
     console.error(`${bold('●')} ${cyan(id)} ${dim('→')} handler ${node.handler}${detail}`)
     const handlerId = uuidv7()
@@ -421,6 +424,15 @@ if (sub === 'run') {
         ...(node.set ? { set: node.set } : {}),
         ...(node.unset ? { unset: node.unset } : {}),
       } : {}),
+      ...(node.handler === 'builtin.git_tag' ? {
+        // V3.7.f — name / message / target snapshotted verbatim
+        // (templates unrendered); end event carries tag_name +
+        // target (resolved).
+        name: node.name,
+        ...(node.message != null ? { message: node.message } : {}),
+        ...(node.target != null ? { target: node.target } : {}),
+        annotated: node.lightweight !== true,
+      } : {}),
     })
     try {
       const result = await runHandler(node, {
@@ -432,6 +444,8 @@ if (sub === 'run') {
       const durLabel =
         node.handler === 'builtin.assert' || node.handler === 'builtin.set_attr'
           ? `${result.durationMs}ms`
+        : node.handler === 'builtin.git_tag'
+          ? `${result.tag_name ? `tag=${result.tag_name}, ` : ''}${result.durationMs}ms`
           : `exit=${ec}, ${result.durationMs}ms`
       console.error(`  ${dim('disposition:')} ${result.disposition} ${dim(`(${durLabel})`)}${result.error ? ` ${dim('error:')} ${result.error}` : ''}`)
       appendWorkloadEvent(PROJECT_DIR, 'pipeline_handler.end', {
@@ -450,6 +464,10 @@ if (sub === 'run') {
           ? { set_resolved: result.set_resolved } : {}),
         ...(Array.isArray(result.unsets) && result.unsets.length
           ? { unset_resolved: result.unsets } : {}),
+        // V3.7.f — git_tag forensics
+        ...(result.tag_name != null ? { tag_name: result.tag_name } : {}),
+        ...(result.target != null ? { target_resolved: result.target } : {}),
+        ...(typeof result.annotated === 'boolean' ? { annotated: result.annotated } : {}),
       })
       // Apply mutation only at top level — parallel branches don't
       // run set_attr (validator rejects it). Defensive guard

@@ -102,8 +102,14 @@ export const VALID_NODE_TYPES = new Set([
 // `pipeline_parallel_of`) are respread per step, so user `set`
 // overriding them is benign — but rejecting at validator level keeps
 // intent clear.
+//
+// V3.7.f adds `builtin.git_tag` — tags a commit in PROJECT_DIR.
+// Annotated by default (requires `message`); pass `lightweight: true`
+// to skip the message and create a non-annotated tag. `name` /
+// `message` / optional `target` (defaults to HEAD) are V3.5
+// template-rendered against ctx.attrs.
 export const VALID_HANDLERS = new Set([
-  'builtin.exec', 'builtin.assert', 'builtin.set_attr',
+  'builtin.exec', 'builtin.assert', 'builtin.set_attr', 'builtin.git_tag',
 ])
 
 const RESERVED_ATTR_KEYS = new Set([
@@ -410,6 +416,29 @@ export const validatePipeline = (def, source = '<inline>') => {
             if (RESERVED_ATTR_KEYS.has(topSeg)) {
               throw new Error(`${source}: handler node '${nid}' .unset cannot remove pipeline-injected key '${topSeg}' (reserved: ${[...RESERVED_ATTR_KEYS].join(', ')})`)
             }
+          }
+        }
+      }
+      // V3.7.f — builtin.git_tag: annotated by default; lightweight
+      // skips the message. name + message + optional target are
+      // V3.5 templated at runtime. Validator only checks shape;
+      // git itself rejects malformed tag names + duplicates.
+      if (node.handler === 'builtin.git_tag') {
+        if (typeof node.name !== 'string' || !node.name.trim()) {
+          throw new Error(`${source}: handler node '${nid}' (builtin.git_tag) requires .name as a non-empty string`)
+        }
+        const lightweight = node.lightweight === true
+        if (!lightweight) {
+          if (typeof node.message !== 'string' || !node.message.trim()) {
+            throw new Error(`${source}: handler node '${nid}' (builtin.git_tag) requires .message as a non-empty string (or set .lightweight: true)`)
+          }
+        }
+        if (node.lightweight != null && typeof node.lightweight !== 'boolean') {
+          throw new Error(`${source}: handler node '${nid}' .lightweight must be a boolean (got: ${typeof node.lightweight})`)
+        }
+        if (node.target != null) {
+          if (typeof node.target !== 'string' || !node.target.trim()) {
+            throw new Error(`${source}: handler node '${nid}' .target must be a non-empty string when set`)
           }
         }
       }

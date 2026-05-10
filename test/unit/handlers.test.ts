@@ -353,3 +353,101 @@ describe('builtin.set_attr (V3.7.d)', () => {
     expect(r.attrs).toEqual({ config: { run_id: 'r-abc' } })
   })
 })
+
+describe('builtin.git_tag (V3.7.f)', () => {
+  // Spawns real git to verify the tag actually lands. Each test
+  // gets a fresh ephemeral repo with one commit on `main`.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
+
+  const initRepo = () => {
+    const root = mktmp()
+    spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: root })
+    spawnSync('git', ['config', 'user.email', 't@t.t'], { cwd: root })
+    spawnSync('git', ['config', 'user.name', 't'], { cwd: root })
+    spawnSync('git', ['commit', '--allow-empty', '-m', 'initial', '-q'], { cwd: root })
+    return root
+  }
+
+  const tags = (root: string) =>
+    spawnSync('git', ['tag', '-l'], { cwd: root, encoding: 'utf8' })
+      .stdout.trim().split('\n').filter(Boolean)
+
+  it('creates an annotated tag at HEAD on success', async () => {
+    const root = initRepo()
+    const r = await runHandler(
+      { handler: 'builtin.git_tag', name: 'v1.0', message: 'release one' },
+      { projectDir: root, attrs: {} },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.tag_name).toBe('v1.0')
+    expect(r.annotated).toBe(true)
+    expect(tags(root)).toEqual(['v1.0'])
+  })
+
+  it('creates a lightweight tag (no message)', async () => {
+    const root = initRepo()
+    const r = await runHandler(
+      { handler: 'builtin.git_tag', name: 'lw', lightweight: true },
+      { projectDir: root, attrs: {} },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.annotated).toBe(false)
+    expect(tags(root)).toEqual(['lw'])
+  })
+
+  it('renders templates in name + message + target', async () => {
+    const root = initRepo()
+    const r = await runHandler(
+      {
+        handler: 'builtin.git_tag',
+        name: 'v{{ version }}',
+        message: 'release {{ version }}',
+      },
+      { projectDir: root, attrs: { version: '2.5' } },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.tag_name).toBe('v2.5')
+    expect(tags(root)).toEqual(['v2.5'])
+  })
+
+  it('errors on duplicate tag (git rejects)', async () => {
+    const root = initRepo()
+    spawnSync('git', ['tag', 'v1.0'], { cwd: root })
+    const r = await runHandler(
+      { handler: 'builtin.git_tag', name: 'v1.0', message: 'r' },
+      { projectDir: root, attrs: {} },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/git_tag:.*already exists/)
+    expect(r.tag_name).toBe('v1.0')
+  })
+
+  it('errors on missing target ref', async () => {
+    const root = initRepo()
+    const r = await runHandler(
+      {
+        handler: 'builtin.git_tag', name: 'v1.0', message: 'r',
+        target: 'no-such-branch',
+      },
+      { projectDir: root, attrs: {} },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/git_tag:/)
+  })
+
+  it('errors when template render fails (no partial side-effect)', async () => {
+    const root = initRepo()
+    const r = await runHandler(
+      {
+        handler: 'builtin.git_tag',
+        name: 'v{{ ghost }}', message: 'r',
+      },
+      { projectDir: root, attrs: {} },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/template render failed:.*ghost/)
+    // No tag was created
+    expect(tags(root)).toEqual([])
+  })
+})

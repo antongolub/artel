@@ -735,6 +735,53 @@ describe('handler node validation (V3.7.a)', () => {
     }))).toThrow(/\.unset cannot remove pipeline-injected key 'pipeline_run_id'/)
   })
 
+  it('accepts a well-formed builtin.git_tag (annotated, V3.7.f)', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'release 1.0',
+    }))).not.toThrow()
+  })
+
+  it('accepts builtin.git_tag with lightweight: true and no message', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', lightweight: true,
+    }))).not.toThrow()
+  })
+
+  it('accepts builtin.git_tag with optional target', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'r', target: 'main',
+    }))).not.toThrow()
+  })
+
+  it('rejects builtin.git_tag without name', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag', message: 'r',
+    }))).toThrow(/requires \.name as a non-empty string/)
+  })
+
+  it('rejects builtin.git_tag without message and without lightweight', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag', name: 'v1.0',
+    }))).toThrow(/requires \.message as a non-empty string \(or set \.lightweight: true\)/)
+  })
+
+  it('rejects builtin.git_tag with non-boolean lightweight', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v', message: 'r', lightweight: 'yes' as never,
+    }))).toThrow(/\.lightweight must be a boolean/)
+  })
+
+  it('rejects builtin.git_tag with empty target', () => {
+    expect(() => validatePipeline(withHandler({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v', message: 'r', target: '',
+    }))).toThrow(/\.target must be a non-empty string when set/)
+  })
+
   it('rejects dotted .set whose top segment is reserved (V3.7.d.b)', () => {
     expect(() => validatePipeline(withHandler({
       type: 'handler', handler: 'builtin.set_attr',

@@ -1107,6 +1107,16 @@ ci_check:
   `pipeline_handler.end` event's `error` field on failure.
   Bad templates render as `[message render failed: ...]` rather
   than crashing the walker. Pure function — no spawn, no I/O.
+- `builtin.git_tag` (V3.7.f) — tag a commit in `ctx.projectDir`.
+  Annotated by default (`message` required); `lightweight: true`
+  skips the message. `name` / `message` / optional `target`
+  (defaults to HEAD) are V3.5 template-rendered against
+  `ctx.attrs`. Stderr captured for forensics; first-line of git's
+  diagnostic surfaces in `pipeline_handler.end.error` on failure
+  (duplicate tag, malformed name, missing target ref). Events
+  carry resolved `tag_name` + optional `target_resolved` +
+  `annotated` flag.
+
 - `builtin.set_attr` (V3.7.d + V3.7.d.b) — mutate run attrs that
   flow downstream. `node.set` is `{ <dotted-path>: scalar | null }`;
   string values are V3.5 template-rendered against `ctx.attrs`
@@ -1186,6 +1196,9 @@ it; `builtin.exec` ignores it.
   of any path excludes reserved pipeline-injected names. `.unset`
   is a non-empty array of dotted-path strings; same reserved
   top-segment rule applies
+- `builtin.git_tag`: `.name` is a non-empty string; `.message` is
+  a non-empty string unless `.lightweight: true`; `.lightweight`
+  is a boolean when set; `.target` is a non-empty string when set
 
 **Observability (V3.7.b — landed):**
 
@@ -1273,7 +1286,11 @@ that lands. Same run_id can't collide because UUIDv7.
 ### 11.10 Open
 
 - More handler builtins: `builtin.git_squash`, `builtin.git_merge`
-  (V3.7.f+)
+  (need merge-conflict + worktree-target design)
+- `builtin.git_tag` abort-during-spawn (currently ignores
+  ctx.abortSignal; tag creation is ms-scale so the cancel window
+  is tiny but parallel-branch quorum-met cancel could still strand
+  a git child briefly)
 - `builtin.set_attr` in parallel branches with explicit merge
   contract (e.g. last-write-wins ordered by branch index, or
   per-branch namespacing)

@@ -1529,6 +1529,101 @@ describe('artel pipeline run — handler nodes (V3.7.a)', () => {
     expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"phase":"reviewed","count":7\}/)
   })
 
+  it('builtin.git_tag tags HEAD on success; events carry tag_name + annotated (V3.7.f)', () => {
+    const root = createTempRepo()  // already a git repo with one commit
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v{{ version }}',
+      message: 'release {{ version }}',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"version":"3.7"}',
+    ])
+    expect(r.status).toBe(0)
+
+    // Tag landed in repo
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
+    const tags = spawnSync('git', ['tag', '-l'], { cwd: root, encoding: 'utf8' })
+      .stdout.trim().split('\n').filter(Boolean)
+    expect(tags).toContain('v3.7')
+
+    // Events carry forensics
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart).toMatchObject({
+      handler: 'builtin.git_tag',
+      name: 'v{{ version }}',           // unrendered snapshot
+      message: 'release {{ version }}',
+      annotated: true,
+    })
+    expect(hEnd).toMatchObject({
+      handler: 'builtin.git_tag',
+      disposition: 'success',
+      tag_name: 'v3.7',                  // resolved post-template
+      annotated: true,
+    })
+  })
+
+  it('builtin.git_tag duplicate-tag failure surfaces in events (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Pre-create the tag so the handler hits a duplicate.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
+    spawnSync('git', ['tag', 'v1.0'], { cwd: root })
+
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'r',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+
+    const hEnd = events(root).find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toMatch(/git_tag:.*already exists/)
+    expect(hEnd.tag_name).toBe('v1.0')
+  })
+
+  it('show renders builtin.git_tag with name + message + target (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'release', target: 'main',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.git_tag\s+name="v1\.0"\s+message="release"\s+target="main"/)
+  })
+
+  it('register rejects builtin.git_tag without message and without lightweight (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag', name: 'v1',
+    })
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/requires \.message as a non-empty string \(or set \.lightweight: true\)/)
+  })
+
   it('show renders builtin.set_attr with set + unset (V3.7.d.b)', () => {
     const root = createTempRepo()
     installAll(root)

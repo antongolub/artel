@@ -1,4 +1,4 @@
-// Pipeline handler builtins (V3.7.a + V3.7.c + V3.7.d).
+// Pipeline handler builtins (V3.7.a + V3.7.c + V3.7.d + V3.7.f).
 //
 // Handlers are pipeline nodes that perform a platform action without
 // dispatching an LLM. They share the same edge-routing machinery as
@@ -19,8 +19,9 @@
 // that read from the run state use it; `builtin.exec` ignores it.
 //
 // V3.7.a shipped `builtin.exec`. V3.7.c added `builtin.assert`.
-// V3.7.d adds `builtin.set_attr`. `builtin.git_squash`,
-// `builtin.git_merge` deferred.
+// V3.7.d added `builtin.set_attr`. V3.7.f adds `builtin.git_tag`.
+// `builtin.git_squash`, `builtin.git_merge` deferred — they need
+// merge-conflict + worktree-target design.
 //
 // Mutation contract (V3.7.d): a builtin returns `{ ..., attrs: {…} }`
 // to ask the walker to merge new attrs into the run state.
@@ -218,10 +219,83 @@ const setAttrBuiltin = async (node, ctx) => {
   }
 }
 
+// builtin.git_tag (V3.7.f): tag a commit in ctx.projectDir.
+// Annotated by default (`message` required); pass `lightweight:
+// true` to create a non-annotated tag without a message. `name` /
+// `message` / optional `target` are V3.5 template-rendered against
+// ctx.attrs. Disposition: success on git exit 0; error on duplicate
+// tag, malformed name, missing target ref, or template render
+// failure (validator already caught structural issues).
+//
+// Stderr is captured (not inherited) so the failure reason flows
+// into the pipeline_handler.end event's `error` field for
+// forensics. Stdout is ignored (git tag is silent on success).
+const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
+  const start = Date.now()
+  const attrs = ctx.attrs || {}
+  let name, message, target
+  try {
+    name = renderTemplate(node.name, attrs)
+    if (node.message != null) message = renderTemplate(node.message, attrs)
+    if (node.target != null) target = renderTemplate(node.target, attrs)
+  } catch (err) {
+    resolve({
+      disposition: 'error',
+      durationMs: Date.now() - start,
+      error: `git_tag: template render failed: ${err.message}`,
+    })
+    return
+  }
+  const args = ['-C', ctx.projectDir, 'tag']
+  if (node.lightweight !== true) {
+    args.push('-a', name, '-m', message)
+  } else {
+    args.push(name)
+  }
+  if (target) args.push(target)
+
+  const child = spawn('git', args, {
+    cwd: ctx.projectDir,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: process.env,
+  })
+  let stderr = ''
+  child.stderr?.on('data', (d) => { stderr += d.toString() })
+  child.on('error', (err) => {
+    resolve({
+      disposition: 'error',
+      exitCode: null,
+      durationMs: Date.now() - start,
+      error: `git_tag: spawn failed: ${err.message}`,
+      tag_name: name,
+    })
+  })
+  child.on('exit', (code, signal) => {
+    const durationMs = Date.now() - start
+    if (code === 0) {
+      resolve({
+        disposition: 'success', exitCode: 0, signal, durationMs,
+        tag_name: name, target: target || null,
+        annotated: node.lightweight !== true,
+      })
+      return
+    }
+    // First-line of stderr is git's diagnostic (e.g. "fatal: tag
+    // 'foo' already exists"). Capped to keep events readable.
+    const firstLine = (stderr || '').split('\n')[0].slice(0, 200)
+    resolve({
+      disposition: 'error', exitCode: code, signal, durationMs,
+      error: `git_tag: ${firstLine || `git exit ${code}`}`,
+      tag_name: name,
+    })
+  })
+})
+
 const BUILTINS = {
   'builtin.exec': execBuiltin,
   'builtin.assert': assertBuiltin,
   'builtin.set_attr': setAttrBuiltin,
+  'builtin.git_tag': gitTagBuiltin,
 }
 
 // Run a handler node. `ctx.projectDir` is the project root —

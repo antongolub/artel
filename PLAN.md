@@ -47,7 +47,7 @@ implementations later requires no migration.
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
 | V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
-| V3 | **Pipelines (V3.1–V3.9.b + V3.7.d.b)** | `[done]` | Cumulative: linear `dispatch` + `terminal` (V3.1), `parallel` + all-complete join (V3.2.a), `condition` (V3.2.b), git-worktrees + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` cancellation (V3.3.c), `runs` / `status` (V3.4.a), `{{ template }}` (V3.5), compound + comparison predicates (V3.6), `handler` nodes + `builtin.exec` (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` flat (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel` (V3.8), sweep prunes cancel sentinels (V3.8.b), per-node `timeout_ms` on dispatch (V3.9), suffix syntax for `timeout_ms` via shared `parseDuration` (V3.9.b), `set_attr` dotted-path keys + `unset` field with deep merge contract (V3.7.d.b). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 3 handler builtins: `exec` / `assert` / `set_attr`. `set_attr.set` accepts dotted paths (`'flags.deployed'`); validator rejects reserved top-segment, non-scalar values, missing-both-set-and-unset; handler builds nested form via `writePath` and walker `deepMergeAttrs`-merges over `userAttrs` preserving sibling keys; `unset: [<path>, ...]` removes via `deletePath`. set + unset events carry both verbatim + post-template (`set_resolved`, `unset_resolved`). Parallel branches accept dispatch + handler (exec / assert); set_attr still rejected. `parseDuration` accepts ms or `<n><suffix>`. CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. 634 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, set_attr in branches with merge contract. |
+| V3 | **Pipelines (V3.1–V3.9.b + V3.7.d.b + V3.7.f)** | `[done]` | Cumulative: linear `dispatch` + `terminal` (V3.1), `parallel` + all-complete join (V3.2.a), `condition` (V3.2.b), git-worktrees + concurrent `parallel` (V3.3.a), `artel sweep` worktree prune (V3.3.b), `any-complete` / `k-of-n` cancellation (V3.3.c), `runs` / `status` (V3.4.a), `{{ template }}` (V3.5), compound + comparison predicates (V3.6), `handler` nodes + `builtin.exec` (V3.7.a), `pipeline_handler.*` events (V3.7.b), `builtin.assert` (V3.7.c), `builtin.set_attr` flat (V3.7.d), handlers in parallel branches (V3.7.e), `artel pipeline cancel` (V3.8), sweep prunes cancel sentinels (V3.8.b), per-node `timeout_ms` on dispatch (V3.9), suffix syntax for `timeout_ms` via shared `parseDuration` (V3.9.b), `set_attr` dotted-path keys + `unset` field with deep merge contract (V3.7.d.b). 5 node types: `dispatch` / `parallel` / `condition` / `handler` / `terminal`. 4 handler builtins: `exec` / `assert` / `set_attr` / `git_tag`. `set_attr.set` accepts dotted paths (`'flags.deployed'`); handler builds nested form via `writePath` and walker `deepMergeAttrs`-merges over `userAttrs`; `unset: [<path>, ...]` removes via `deletePath`. `git_tag` creates annotated (default) or lightweight tags at HEAD or a named target ref; templates render in `name`/`message`/`target`; events carry resolved `tag_name` + `annotated` flag. Parallel branches accept dispatch + handler (exec / assert / git_tag); set_attr still rejected. `parseDuration` accepts ms or `<n><suffix>`. CLI: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. 651 tests green. V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal` / `subpipeline`, set_attr in branches with merge contract. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
@@ -79,6 +79,37 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-10** — V3.7.f — `builtin.git_tag` handler. First concrete
+  git operation in the handler family. `node.name` (required) and
+  `node.message` (required unless `lightweight: true`) and optional
+  `node.target` (defaults to HEAD) are V3.5 template-rendered
+  against ctx.attrs at runtime. Spawns `git -C <projectDir> tag`
+  with `-a <name> -m <message>` for annotated (default) or just
+  `<name>` for lightweight; appends `<target>` ref when set. Stderr
+  captured (not inherited) so failure reasons surface in
+  `pipeline_handler.end` event's `error` field — git's first-line
+  diagnostic, capped to 200 chars. Disposition: success on git
+  exit 0; error on duplicate tag, malformed name, missing target
+  ref, template render failure. Events: `pipeline_handler.start`
+  snapshots `name` / `message` / `target` verbatim (templates
+  unrendered) plus `annotated: <bool>`; `pipeline_handler.end`
+  carries resolved `tag_name` + `target_resolved` (when set) +
+  `annotated` for forensics. Validator: name + message non-empty
+  string; lightweight is a boolean if set; target non-empty string
+  when set. `show` renders `name=<json> message=<json>` (or
+  `lightweight`) + optional `target=<json>`. Allowed in parallel
+  branches by validator (tag names are independent — no shared
+  mutable state at the userAttrs level), but abort signal not yet
+  wired to the spawned `git` (tags complete in ms, cancel window
+  tiny). 651 tests green (17 new — 7 unit pipelines validator
+  covering shape: name+message / lightweight-no-message / target /
+  missing-name / missing-message / non-bool-lightweight / empty-
+  target, 6 unit handlers (with real `git init` per test) covering
+  annotated success / lightweight success / template rendering /
+  duplicate tag error / missing-target-ref / template-render-
+  failure-leaves-no-tag, 4 e2e covering tag-lands-in-repo + events
+  resolved / duplicate-tag failure path / show rendering with
+  target / register error path).
 - **2026-05-10** — V3.7.d.b — `set_attr` dotted-path keys + `unset`.
   Closes two deferred items from V3.7.d. New shape: keys in
   `node.set` can be dotted paths (`'flags.deployed': true`,
