@@ -2292,6 +2292,69 @@ describe('artel pipeline run — subpipeline composition (V3.10.a)', () => {
     expect(dispatchStart.task_attrs.parent_only).toBeUndefined()
   })
 
+  it('subpipeline emits start/end events; status renders subpipeline step (V3.10.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+
+    const evts = events(root)
+    const sStart = evts.find((e) => e.type === 'pipeline_subpipeline.start')
+    const sEnd = evts.find((e) => e.type === 'pipeline_subpipeline.end')
+    expect(sStart).toBeDefined()
+    expect(sEnd).toBeDefined()
+    // Start event carries the snapshot
+    expect(sStart).toMatchObject({
+      kind: 'workload',
+      pipeline_node_id: 'sub',
+      child_pipeline_id: 'child-flow',
+      attrs: { greeting: 'hi from parent {{ pipeline_run_id }}' },
+    })
+    expect(sStart.subpipeline_id).toBeTruthy()
+    expect(sStart.child_run_id).toBeTruthy()
+    // End event carries the resolved disposition + duration
+    expect(sEnd).toMatchObject({
+      subpipeline_id: sStart.subpipeline_id,
+      child_run_id: sStart.child_run_id,
+      child_pipeline_id: 'child-flow',
+      disposition: 'success',
+      exit_code: 0,
+    })
+    expect(typeof sEnd.duration_ms).toBe('number')
+
+    // status --json on parent: subpipeline step appears alongside
+    // any dispatch/handler steps.
+    const parentEnded = evts.find((e) => e.type === 'pipeline_run.ended' && e.pipeline_id === 'parent-flow')
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', parentEnded.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; node_id: string; child_run_id?: string;
+        child_pipeline_id?: string; disposition: string }>
+    }
+    const subStep = det.steps.find((s) => s.kind === 'subpipeline')
+    expect(subStep).toBeDefined()
+    expect(subStep!).toMatchObject({
+      kind: 'subpipeline', node_id: 'sub',
+      child_pipeline_id: 'child-flow',
+      disposition: 'success',
+    })
+    expect(subStep!.child_run_id).toBe(sStart.child_run_id)
+
+    // Plain text status: subpipeline row visible with child_pipeline_id
+    // + run-id fragment.
+    const st = runNode(root, ['engine/cli/pipeline.mjs', 'status', parentEnded.pipeline_run_id])
+    expect(st.status).toBe(0)
+    expect(st.stdout).toMatch(/sub\s+child-flow\s+subpipeline\s+\S{12}\s+success/)
+  })
+
   it('runs annotates child runs with parent fragment (V3.10.b)', () => {
     const root = createTempRepo()
     installAll(root)

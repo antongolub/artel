@@ -178,6 +178,7 @@ Pipeline:
 pipeline.registered/updated/deregistered      (definition catalog)
 pipeline_run.started/advanced/paused/resumed/completed/failed/aborted
 pipeline_handler.start/end                    (V3.7.b — handler step lifecycle)
+pipeline_subpipeline.start/end                (V3.10.e — subpipeline step lifecycle)
 ```
 
 ### 4.6 Signal kind

@@ -29,6 +29,7 @@ export const RESERVED_TYPE_PREFIXES = {
     'pipeline.',
     'pipeline_run.',
     'pipeline_handler.',
+    'pipeline_subpipeline.',
     // legacy (one cycle)
     'claim',
     'release',

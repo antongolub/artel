@@ -925,6 +925,34 @@ export const pipelineRunDetail = (projectDir, runId) => {
         if (e.error != null) step.error = e.error
       }
     }
+    // V3.10.e — subpipeline start/end. Keyed by subpipeline_id;
+    // step carries child_run_id + child_pipeline_id for drilldown
+    // (operator can `artel pipeline status <child_run_id>`).
+    if (e.type === 'pipeline_subpipeline.start' || e.type === 'pipeline_subpipeline.end') {
+      if (e.pipeline_run_id !== runId) continue
+      const sid = e.subpipeline_id
+      if (!sid) continue
+      const key = `subpipeline:${sid}`
+      let step = stepsByKey.get(key)
+      if (!step) {
+        step = { kind: 'subpipeline', subpipeline_id: sid }
+        stepsByKey.set(key, step)
+      }
+      if (e.type === 'pipeline_subpipeline.start') {
+        step.node_id = e.pipeline_node_id || null
+        step.child_run_id = e.child_run_id
+        step.child_pipeline_id = e.child_pipeline_id
+        step.started_at = e.at
+        if (e.pipeline_parallel_of) step.parallel_of = e.pipeline_parallel_of
+        if (e.attrs != null) step.attrs = e.attrs
+        if (e.inherit_attrs != null) step.inherit_attrs = e.inherit_attrs
+      } else {
+        step.completed_at = e.at
+        step.disposition = e.disposition
+        if (e.exit_code != null) step.exit_code = e.exit_code
+        if (e.duration_ms != null) step.duration_ms = e.duration_ms
+      }
+    }
   }
   const steps = [...stepsByKey.values()].sort(
     (a, b) => (a.started_at || '').localeCompare(b.started_at || ''),

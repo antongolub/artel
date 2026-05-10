@@ -575,6 +575,24 @@ if (sub === 'run') {
     const childRunId = uuidv7()
     const childChain = [...parentChain, def.id].join(',')
     console.error(`${bold('▦')} ${cyan(id)} ${dim('→')} subpipeline ${cyan(node.pipeline_id)} ${dim(`run=${childRunId.slice(-12)}`)}${node.attrs ? ` ${dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
+    // V3.10.e — observability event around the spawn. Mirrors the
+    // V3.7.b pipeline_handler.* shape: subpipeline_id is a fresh
+    // UUIDv7 join key; child_run_id + child_pipeline_id record the
+    // child this step launched. pipelineRunDetail uses these to
+    // surface subpipeline steps in `status`.
+    const subpipelineId = uuidv7()
+    const startedAt = new Date().toISOString()
+    appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.start', {
+      subpipeline_id: subpipelineId,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+      child_run_id: childRunId,
+      child_pipeline_id: node.pipeline_id,
+      ...(node.attrs ? { attrs: node.attrs } : {}),
+      ...(node.inherit_attrs === true ? { inherit_attrs: true } : {}),
+    })
     const childArgs = [
       process.argv[1], 'run', node.pipeline_id,
       '--run-id', childRunId,
@@ -622,7 +640,20 @@ if (sub === 'run') {
       opts.signal.removeEventListener('abort', abortHandler)
     }
     const disposition = childExit === 0 ? 'success' : 'error'
+    const durationMs = Date.now() - Date.parse(startedAt)
     console.error(`  ${dim('disposition:')} ${disposition} ${dim(`(child exit=${childExit})`)}`)
+    appendWorkloadEvent(PROJECT_DIR, 'pipeline_subpipeline.end', {
+      subpipeline_id: subpipelineId,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+      child_run_id: childRunId,
+      child_pipeline_id: node.pipeline_id,
+      disposition,
+      exit_code: childExit,
+      duration_ms: Number.isFinite(durationMs) ? durationMs : null,
+    })
     return { disposition, child_run_id: childRunId, child_pipeline_id: node.pipeline_id, exit_code: childExit }
   }
 
@@ -1049,13 +1080,20 @@ if (sub === 'status') {
         // alignment stays. cmd is truncated to keep the row scannable.
         const cmdFrag = s.cmd ? (s.cmd.length > 26 ? s.cmd.slice(0, 25) + '…' : s.cmd) : ''
         console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim((cmdFrag || '').padEnd(28))} ${dim('handler'.padEnd(12))} ${dim((s.handler || '').replace(/^builtin\./, '').padEnd(8))} ${dispo}`)
+      } else if (s.kind === 'subpipeline') {
+        // V3.10.e — subpipeline row. Surfaces the child pipeline
+        // id + run-id fragment so operators can
+        // `artel pipeline status <child-fragment>` for drilldown.
+        const childTail = s.child_run_id ? s.child_run_id.slice(-12) : '?'
+        const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
+        console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim((s.child_pipeline_id || '').padEnd(28))} ${dim('subpipeline'.padEnd(12))} ${dim((childTail || '').padEnd(12))} ${dispo}${parallelHint}`)
       } else {
         const parallelHint = s.parallel_of ? ` ${dim('(parallel of ' + s.parallel_of + ')')}` : ''
         console.log(`    ${cyan(s.node_id?.padEnd(14) || '?'.padEnd(14))} ${dim(s.task?.padEnd(28) || '')} ${s.role?.padEnd(12) || ''} ${dim(s.engine?.padEnd(8) || '')} ${dispo}${parallelHint}`)
       }
     }
   }
-  console.log(`\n  ${dim(`drilldown: artel logs <task>`)}\n`)
+  console.log(`\n  ${dim(`drilldown: artel logs <task> | artel pipeline status <child-run>`)}\n`)
   process.exit(0)
 }
 

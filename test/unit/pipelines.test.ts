@@ -1237,6 +1237,80 @@ describe('listPipelineRuns / pipelineRunDetail (V3.4.a)', () => {
     expect(detail.steps[0].signal).toBe('SIGTERM')
     expect(detail.steps[0].timeout_ms).toBe(100)
   })
+
+  // V3.10.e — pipelineRunDetail picks up subpipeline start/end and
+  // emits steps with kind='subpipeline' carrying child_run_id +
+  // child_pipeline_id for drilldown.
+  it('pipelineRunDetail joins subpipeline events into steps', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-10T10:00:00.000Z',
+        pipeline_run_id: 'sp-parent', pipeline_id: 'sp-flow' }),
+      baseEvent({ type: 'pipeline_subpipeline.start', at: '2026-05-10T10:00:01.000Z',
+        subpipeline_id: 's1',
+        pipeline_run_id: 'sp-parent', pipeline_id: 'sp-flow', pipeline_node_id: 'sub',
+        child_run_id: 'child-rid', child_pipeline_id: 'sub-flow',
+        attrs: { topic: 'auth' }, inherit_attrs: true }),
+      baseEvent({ type: 'pipeline_subpipeline.end', at: '2026-05-10T10:00:30.000Z',
+        subpipeline_id: 's1',
+        pipeline_run_id: 'sp-parent', pipeline_id: 'sp-flow', pipeline_node_id: 'sub',
+        child_run_id: 'child-rid', child_pipeline_id: 'sub-flow',
+        disposition: 'success', exit_code: 0, duration_ms: 29000 }),
+    ])
+    const detail = pipelineRunDetail(root, 'sp-parent') as {
+      steps: Array<{ kind: string; node_id: string; child_run_id: string;
+        child_pipeline_id: string; disposition: string; duration_ms: number;
+        attrs: object; inherit_attrs: boolean }>
+    }
+    expect(detail.steps).toHaveLength(1)
+    expect(detail.steps[0]).toMatchObject({
+      kind: 'subpipeline', node_id: 'sub',
+      child_run_id: 'child-rid', child_pipeline_id: 'sub-flow',
+      disposition: 'success', duration_ms: 29000,
+      attrs: { topic: 'auth' }, inherit_attrs: true,
+    })
+  })
+
+  it('pipelineRunDetail interleaves subpipeline + dispatch + handler by start time', () => {
+    const root = createTempRepo()
+    writeEvents(root, [
+      baseEvent({ type: 'pipeline_run.started', at: '2026-05-10T10:00:00.000Z',
+        pipeline_run_id: 'mix', pipeline_id: 'mix-flow' }),
+      // 1s: handler
+      baseEvent({ type: 'pipeline_handler.start', at: '2026-05-10T10:00:01.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'mix', pipeline_node_id: 'pre', cmd: 'true' }),
+      baseEvent({ type: 'pipeline_handler.end', at: '2026-05-10T10:00:02.000Z',
+        handler_id: 'h1', handler: 'builtin.exec',
+        pipeline_run_id: 'mix', pipeline_node_id: 'pre',
+        disposition: 'success', exit_code: 0 }),
+      // 3s: subpipeline
+      baseEvent({ type: 'pipeline_subpipeline.start', at: '2026-05-10T10:00:03.000Z',
+        subpipeline_id: 's1',
+        pipeline_run_id: 'mix', pipeline_node_id: 'sub',
+        child_run_id: 'c1', child_pipeline_id: 'sub-flow' }),
+      baseEvent({ type: 'pipeline_subpipeline.end', at: '2026-05-10T10:00:10.000Z',
+        subpipeline_id: 's1',
+        pipeline_run_id: 'mix', pipeline_node_id: 'sub',
+        child_run_id: 'c1', child_pipeline_id: 'sub-flow',
+        disposition: 'success', exit_code: 0 }),
+      // 11s: dispatch
+      baseEvent({ type: 'dispatch.start', at: '2026-05-10T10:00:11.000Z',
+        task: 'mix-impl', dispatch_id: 'd1', owner_role: 'implementer', engine: 'claude',
+        task_attrs: { pipeline_run_id: 'mix', pipeline_node_id: 'impl' } }),
+      baseEvent({ type: 'dispatch.end', at: '2026-05-10T10:00:30.000Z',
+        dispatch_id: 'd1', disposition: 'success',
+        task_attrs: { pipeline_run_id: 'mix', pipeline_node_id: 'impl' } }),
+    ])
+    const detail = pipelineRunDetail(root, 'mix') as {
+      steps: Array<{ kind: string; node_id: string }>
+    }
+    expect(detail.steps.map((s) => [s.kind, s.node_id])).toEqual([
+      ['handler', 'pre'],
+      ['subpipeline', 'sub'],
+      ['dispatch', 'impl'],
+    ])
+  })
 })
 
 describe('writePath / deletePath / deepMergeAttrs (V3.7.d.b)', () => {
