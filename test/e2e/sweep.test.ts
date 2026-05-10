@@ -243,3 +243,119 @@ describe('artel sweep — worktrees (V3.3.b)', () => {
     expect(existsSync(wtPath)).toBe(true)
   })
 })
+
+describe('artel sweep — pipeline-cancel sentinels (V3.8.b)', () => {
+  // Helpers to fabricate the events.jsonl + sentinel files the
+  // sweep command reads. We don't run a real pipeline here — sweep
+  // is a pure read of state, no orchestration involved.
+  const writeEvent = (root: string, evt: object) => {
+    const path = join(root, '.artel', 'events.jsonl')
+    mkdirSync(join(root, '.artel'), { recursive: true })
+    const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+    writeFileSync(path, existing + JSON.stringify(evt) + '\n')
+  }
+
+  const baseEvent = (overrides: object) => ({
+    schema: 'v1',
+    kind: 'workload',
+    id: '01934f00-aaaa-7bbb-8ccc-' + Math.random().toString(16).slice(2, 14).padStart(12, '0'),
+    cluster_id: '01934f00-aaaa-7bbb-8ccc-cccccccccccc',
+    instance_id: '01934f00-aaaa-7bbb-8ccc-iiiiiiiiiiii',
+    fence_token: 0,
+    ...overrides,
+  })
+
+  const writeSentinel = (root: string, runId: string, mtimeMs: number) => {
+    const dir = join(root, '.artel', '.pipeline-cancels')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, runId)
+    writeFileSync(path, '')
+    utimesSync(path, new Date(mtimeMs), new Date(mtimeMs))
+    return path
+  }
+
+  it('removes sentinel for terminated run past --older-than threshold', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const runId = '01934f00-stale-7777-8888-aaaaaaaaaaaa'
+    writeEvent(root, baseEvent({ type: 'pipeline_run.started',
+      at: ago(60 * 86400000), pipeline_run_id: runId, pipeline_id: 'flow' }))
+    writeEvent(root, baseEvent({ type: 'pipeline_run.ended',
+      at: ago(60 * 86400000 - 60_000),
+      pipeline_run_id: runId, pipeline_id: 'flow', final_state: 'aborted',
+      abort_reason: 'cancelled by operator: stale-7777-...' }))
+    const sentinelPath = writeSentinel(root, runId, Date.now() - 60 * 86400000)
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0'])
+    expect(r.status).toBe(0)
+    expect(existsSync(sentinelPath)).toBe(false)
+
+    const swept = events(root).find((e) => e.type === 'cluster.swept')
+    expect(swept.pipeline_cancels_removed).toBe(1)
+  })
+
+  it('keeps in-flight sentinel even when stale (live cancel signal)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const runId = '01934f00-flying-77-8888-bbbbbbbbbbbb'
+    // started but no .ended → in-flight
+    writeEvent(root, baseEvent({ type: 'pipeline_run.started',
+      at: ago(60 * 86400000), pipeline_run_id: runId, pipeline_id: 'flow' }))
+    const sentinelPath = writeSentinel(root, runId, Date.now() - 60 * 86400000)
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0'])
+    expect(r.status).toBe(0)
+    expect(existsSync(sentinelPath)).toBe(true)
+
+    const swept = events(root).find((e) => e.type === 'cluster.swept')
+    // Run-completed signal absent → sentinel held, no event emitted
+    // (no other things to sweep either)
+    expect(swept).toBeUndefined()
+  })
+
+  it('keeps fresh sentinel for terminated run (within --older-than)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const runId = '01934f00-fresh-77-8888-cccccccccccc'
+    writeEvent(root, baseEvent({ type: 'pipeline_run.started',
+      at: ago(60_000), pipeline_run_id: runId, pipeline_id: 'flow' }))
+    writeEvent(root, baseEvent({ type: 'pipeline_run.ended',
+      at: ago(30_000),
+      pipeline_run_id: runId, pipeline_id: 'flow', final_state: 'aborted' }))
+    // Sentinel mtime fresh (right now)
+    const sentinelPath = writeSentinel(root, runId, Date.now())
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0', '--older-than', '30d'])
+    expect(r.status).toBe(0)
+    expect(existsSync(sentinelPath)).toBe(true)
+  })
+
+  it('--dry-run preserves the sentinel; --json reports it as candidate', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const runId = '01934f00-dryrun-7-8888-dddddddddddd'
+    writeEvent(root, baseEvent({ type: 'pipeline_run.started',
+      at: ago(60 * 86400000), pipeline_run_id: runId, pipeline_id: 'flow' }))
+    writeEvent(root, baseEvent({ type: 'pipeline_run.ended',
+      at: ago(60 * 86400000 - 60_000),
+      pipeline_run_id: runId, pipeline_id: 'flow', final_state: 'completed' }))
+    const sentinelPath = writeSentinel(root, runId, Date.now() - 60 * 86400000)
+
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0', '--dry-run', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed.pipeline_cancels_swept).toHaveLength(1)
+    expect(parsed.pipeline_cancels_swept[0].run_id).toBe(runId)
+    expect(parsed.dry_run).toBe(true)
+    expect(existsSync(sentinelPath)).toBe(true)
+  })
+
+  it('handles missing .pipeline-cancels/ dir gracefully', () => {
+    const root = createTempRepo()
+    installAll(root)
+    // No sentinel dir created at all — sweep should noop on it.
+    const r = runNode(root, ['engine/cli/sweep.mjs', '--keep', '0'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/nothing to sweep/)
+  })
+})

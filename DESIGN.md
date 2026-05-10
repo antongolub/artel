@@ -833,10 +833,11 @@ checkout. Removing the worktree doesn't remove the branch.
 
 **Action for consumers.** Add `.artel/.worktrees/` to `.gitignore`.
 
-### 11.5 V3.3.b — sweep prune for worktrees (landed)
+### 11.5 V3.3.b + V3.8.b — sweep prune for worktrees + cancel sentinels (landed)
 
 `artel sweep` now prunes orphaned `.artel/.worktrees/<branch>/`
-directories alongside the existing `.artel/.dispatches/` cleanup.
+directories alongside the existing `.artel/.dispatches/` cleanup,
+and (V3.8.b) stale `.artel/.pipeline-cancels/<run-id>` sentinels.
 
 **Eligibility:**
 1. The directory matches a path in `git worktree list --porcelain`
@@ -856,6 +857,27 @@ fields. JSON output includes `worktrees_swept` array.
 Successful dispatches already remove their worktree on settle (see
 §11.4) — sweep catches the leftovers from parked / timeout /
 errored runs that were kept for forensics.
+
+**Cancel sentinel eligibility (V3.8.b):**
+
+1. Sentinel filename = full UUIDv7 `<run-id>` (one file per
+   cancelled run; presence is the entire signal).
+2. Run must be terminal — `events.jsonl` carries
+   `pipeline_run.ended` for that run_id (verified via
+   `listPipelineRuns`).
+3. Sentinel mtime is older than `--older-than` (default 30d).
+
+**In-flight sentinels are never swept.** A sentinel without a
+matching `.ended` event is the live cancel signal — removing it
+would silently neutralise an operator's intent if the walker
+hasn't picked it up yet. The skip reason `in-flight` flags these
+in `--json` output; operators can `rm` by hand if a process
+genuinely died and left a zombie sentinel.
+
+`cluster.swept` event gains `pipeline_cancels_removed` count
+alongside `dispatches_removed` / `worktrees_removed`. JSON output
+includes `pipeline_cancels_swept` array (run_id, path,
+mtime_iso) + `pipeline_cancels_held` count.
 
 ### 11.6 V3.3.c — any-complete / k-of-n joins (landed)
 
@@ -1212,14 +1234,10 @@ that lands. Same run_id can't collide because UUIDv7.
 - `builtin.set_attr` in parallel branches with explicit merge
   contract (e.g. last-write-wins ordered by branch index, or
   per-branch namespacing)
-- `artel sweep` pruning stale `.artel/.pipeline-cancels/`
-  sentinels (presence after their run terminated)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
 - Branch-level timeout budgets (cap each branch independently of
   whole-dispatch timeout)
-- Operator cancel of in-flight pipeline run (`artel pipeline cancel
-  <run-id>`)
 - Regex / `where` / function-style predicates if a concrete need
   arises (deliberately not in V3.6 — current `not`/`and`/`or` +
   comparisons cover most routing without inviting unbounded

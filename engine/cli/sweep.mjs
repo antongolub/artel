@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // `artel sweep` — housekeeping for `.artel/.dispatches/` and (V3.3.b)
-// `.artel/.worktrees/`.
+// `.artel/.worktrees/` and (V3.8.b) `.artel/.pipeline-cancels/`.
 //
 // Dispatches: removes `<task>.meta`, `<task>.out`, `<task>.prompt`
 // triplets older than the threshold, **except**:
@@ -20,6 +20,17 @@
 // catches the leftovers from parked / timeout / errored runs (kept for
 // forensics) once the operator no longer needs them.
 //
+// Pipeline-cancel sentinels (V3.8.b): removes
+// `.artel/.pipeline-cancels/<run-id>` files for runs that have
+// already terminated (events.jsonl carries a `pipeline_run.ended`
+// for that run_id). In-flight sentinels are NEVER swept — they're
+// the live cancel signal. Aged sentinels for runs whose `.ended` is
+// missing (process died mid-flight) are also kept for forensics
+// unless `--older-than` ages them out, but the run has to be at
+// least believed-terminal (no in-flight signal of life). We rely on
+// the same age threshold; the operator can clear them by hand if
+// they want immediate cleanup.
+//
 // Emits a single `infra` event `cluster.swept` with totals.
 
 import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
@@ -27,11 +38,13 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendInfraEvent } from '../util/audit.mjs'
 import { defaultGit, listWorktrees, removeWorktree } from '../util/worktree.mjs'
+import { listPipelineRuns, pipelineCancelsDir } from '../util/pipelines.mjs'
 
 const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
 const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
 const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
 const WORKTREES_DIR = join(PROJECT_ARTEL, '.worktrees')
+const PIPELINE_CANCELS_DIR = pipelineCancelsDir(PROJECT_DIR)
 const QUEUE_PATH = join(PROJECT_ARTEL, 'QUEUE.md')
 
 const tty = process.stdout.isTTY
@@ -233,6 +246,57 @@ const collectWorktrees = () => {
 
 const { remove: worktreesToRemove, skipped: worktreesSkipped } = collectWorktrees()
 
+// --- pipeline-cancel sentinels (V3.8.b) ---
+//
+// Sentinels at .artel/.pipeline-cancels/<run-id> are stale once the
+// run is terminal — events.jsonl carries `pipeline_run.ended` for
+// that run_id. In-flight sentinels are the live cancel signal and
+// must never be swept; missing-`.ended` sentinels older than the
+// threshold are treated as zombie processes and pruned (operator
+// can recreate by re-running cancel if a run somehow comes back).
+
+const collectPipelineCancels = () => {
+  const remove = []
+  const skipped = []
+  if (!existsSync(PIPELINE_CANCELS_DIR)) return { remove, skipped }
+
+  // Build a set of terminated run_ids. listPipelineRuns walks
+  // events.jsonl and returns one entry per run, with `final_state`
+  // set when an `.ended` event exists. Pass limit: null for full
+  // history (some sentinels may belong to old runs).
+  const terminalRunIds = new Set()
+  for (const r of listPipelineRuns(PROJECT_DIR, { limit: null })) {
+    if (r.final_state) terminalRunIds.add(r.run_id)
+  }
+
+  for (const name of readdirSync(PIPELINE_CANCELS_DIR)) {
+    const path = join(PIPELINE_CANCELS_DIR, name)
+    let stat
+    try { stat = statSync(path) } catch { continue }
+    if (!stat.isFile()) continue
+    const runId = name  // filename = full UUIDv7 run_id
+
+    if (!terminalRunIds.has(runId)) {
+      // Run not yet terminated. If it's still actively cancelling
+      // (the walker hasn't picked up the sentinel yet, or is in the
+      // SIGTERM grace window), the sentinel is the live signal —
+      // never sweep. If the process truly died mid-cancel, the
+      // sentinel is harmless residue, but we err on the side of
+      // forensic preservation. Operator can rm by hand if needed.
+      skipped.push({ runId, path, mtimeMs: stat.mtimeMs, reason: 'in-flight' })
+      continue
+    }
+    if (stat.mtimeMs > cutoffMs) {
+      skipped.push({ runId, path, mtimeMs: stat.mtimeMs, reason: 'fresh' })
+      continue
+    }
+    remove.push({ runId, path, mtimeMs: stat.mtimeMs })
+  }
+  return { remove, skipped }
+}
+
+const { remove: cancelsToRemove, skipped: cancelsSkipped } = collectPipelineCancels()
+
 // --- render ---
 
 if (values.json) {
@@ -250,11 +314,15 @@ if (values.json) {
       branch: w.branch, path: w.path, mtime_iso: new Date(w.mtimeMs).toISOString(),
     })),
     worktrees_held: worktreesSkipped.length,
+    pipeline_cancels_swept: cancelsToRemove.map((c) => ({
+      run_id: c.runId, path: c.path, mtime_iso: new Date(c.mtimeMs).toISOString(),
+    })),
+    pipeline_cancels_held: cancelsSkipped.length,
   }, null, 2))
 } else {
   console.log(`\n${bold('artel sweep')} ${dim(`— older than ${values['older-than'] || '30d'}, keep newest ${keepN}`)}\n`)
-  if (!toRemove.length && !worktreesToRemove.length) {
-    console.log(`  ${dim('nothing to sweep — all dispatches/worktrees are fresh, active, or within --keep')}`)
+  if (!toRemove.length && !worktreesToRemove.length && !cancelsToRemove.length) {
+    console.log(`  ${dim('nothing to sweep — all dispatches/worktrees/cancel-sentinels are fresh, active, or within --keep')}`)
   }
   if (toRemove.length) {
     console.log(`  ${bold('dispatches')}`)
@@ -270,7 +338,14 @@ if (values.json) {
     }
     console.log(`  ${dim(`subtotal: ${worktreesToRemove.length} worktrees`)}`)
   }
-  const allSkipped = [...skipped, ...worktreesSkipped]
+  if (cancelsToRemove.length) {
+    console.log(`\n  ${bold('pipeline-cancel sentinels')}`)
+    for (const c of cancelsToRemove) {
+      console.log(`  ${yellow('×')} ${c.runId.slice(-12).padEnd(36)} ${dim(new Date(c.mtimeMs).toISOString().replace('T', ' ').slice(0, 19) + 'Z')}  ${dim(c.path)}`)
+    }
+    console.log(`  ${dim(`subtotal: ${cancelsToRemove.length} cancel sentinels`)}`)
+  }
+  const allSkipped = [...skipped, ...worktreesSkipped, ...cancelsSkipped]
   if (allSkipped.length) {
     const counts = allSkipped.reduce((acc, s) => ((acc[s.reason] = (acc[s.reason] || 0) + 1), acc), {})
     const parts = Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(' · ')
@@ -295,7 +370,12 @@ for (const wt of worktreesToRemove) {
   if (!r || r.ok) worktreesRemovedOk++
 }
 
-if (toRemove.length || worktreesToRemove.length) {
+let cancelsRemovedOk = 0
+for (const c of cancelsToRemove) {
+  try { rmSync(c.path); cancelsRemovedOk++ } catch {}
+}
+
+if (toRemove.length || worktreesToRemove.length || cancelsToRemove.length) {
   appendInfraEvent(PROJECT_DIR, 'cluster.swept', {
     older_than_ms: olderThanMs,
     keep: keepN,
@@ -303,11 +383,13 @@ if (toRemove.length || worktreesToRemove.length) {
     files_removed: removed,
     bytes_freed: totalBytes,
     worktrees_removed: worktreesRemovedOk,
+    pipeline_cancels_removed: cancelsRemovedOk,
   })
   if (!values.json) {
     const parts = []
     if (toRemove.length) parts.push(`${toRemove.length} dispatches (${removed} files, ${fmtBytes(totalBytes)})`)
     if (worktreesRemovedOk) parts.push(`${worktreesRemovedOk} worktrees`)
+    if (cancelsRemovedOk) parts.push(`${cancelsRemovedOk} cancel sentinels`)
     if (parts.length) console.log(`${green('✓')} swept ${parts.join(', ')}\n`)
   }
 }
