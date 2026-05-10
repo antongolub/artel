@@ -269,6 +269,18 @@ const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
     })
     return
   }
+  // V3.7.f.b — short-circuit pre-aborted: don't spawn at all, so
+  // the operation is guaranteed side-effect-free. The post-spawn
+  // abort handler below covers mid-flight aborts (where git may
+  // race ahead of SIGTERM and complete the tag write — disposition
+  // is still `cancelled` in that case, but the tag persists).
+  if (ctx.abortSignal?.aborted) {
+    resolve({
+      disposition: 'cancelled', exitCode: null, signal: null,
+      durationMs: Date.now() - start, tag_name: name,
+    })
+    return
+  }
   const args = ['-C', ctx.projectDir, 'tag']
   if (node.lightweight !== true) {
     args.push('-a', name, '-m', message)
