@@ -207,7 +207,7 @@ if (sub === 'show') {
   console.log(`  ${bold('Nodes')}`)
   for (const [nid, node] of Object.entries(def.nodes)) {
     if (node.type === 'dispatch') {
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('dispatch')} role=${node.role}${node.engine ? ` engine=${node.engine}` : ''}${node.model ? ` model=${node.model}` : ''}`)
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('dispatch')} role=${node.role}${node.engine ? ` engine=${node.engine}` : ''}${node.model ? ` model=${node.model}` : ''}${node.timeout_ms ? ` timeout_ms=${node.timeout_ms}` : ''}`)
     } else if (node.type === 'terminal') {
       const colour = node.final_state === 'completed' ? green
         : node.final_state === 'aborted' ? yellow : red
@@ -354,6 +354,10 @@ if (sub === 'run') {
         tools: node.tools || null,
         permissionMode: node['permission-mode'] || null,
         useWorktree: !!opts.useWorktree,
+        // V3.9 — per-node timeout. dispatchLifecycle falls back to
+        // env / default when null, so passing through unconditionally
+        // preserves prior behavior for nodes that don't set it.
+        timeoutMs: node.timeout_ms ?? null,
         abortSignal: opts.signal || null,
         taskAttrs,
       })

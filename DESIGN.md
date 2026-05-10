@@ -636,6 +636,30 @@ disposition → run aborts with `abort_reason`.
 - every edge endpoint exists; edges don't originate from terminals
 - at least one terminal is reachable from `entry`
 
+**Dispatch node optional fields:**
+
+```yaml
+some-step:
+  type: dispatch
+  role: implementer
+  engine: claude            # optional driver override
+  model: opus               # optional model
+  effort: medium            # optional reasoning effort
+  sandbox: workspace-write  # optional sandbox tier
+  tools: 'Bash,Edit,Write'  # optional allowed-tools list
+  permission-mode: acceptEdits  # optional permission mode
+  timeout_ms: 60000         # V3.9 — optional per-node budget
+  prompt: '...'             # required, V3.5 templates supported
+```
+
+`timeout_ms` (V3.9) plumbs through to `dispatchLifecycle` as
+`timeoutMs`; falls back to `ARTEL_DISPATCH_TIMEOUT_MS` env / the
+lifecycle's built-in default when absent. SIGTERM → grace → SIGKILL
+machinery is V3.3.c's existing path. Useful for parallel branches
+that need different per-branch budgets, or top-level dispatches
+that should bound their runtime independently of the global
+default.
+
 **Run** is synchronous: walk node-by-node, dispatch each `dispatch`
 inline, pick next via `resolveNext`, stop on `terminal` or
 no-transition. `pipeline_run_id` (UUID v7) propagated into each
@@ -1236,8 +1260,6 @@ that lands. Same run_id can't collide because UUIDv7.
   per-branch namespacing)
 - `pause` — return-of-control, waits on signal
 - `subpipeline` — composition
-- Branch-level timeout budgets (cap each branch independently of
-  whole-dispatch timeout)
 - Regex / `where` / function-style predicates if a concrete need
   arises (deliberately not in V3.6 — current `not`/`and`/`or` +
   comparisons cover most routing without inviting unbounded

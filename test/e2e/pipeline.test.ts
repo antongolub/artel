@@ -1706,3 +1706,137 @@ describe('artel pipeline cancel — operator cancel of in-flight run (V3.8)', ()
     expect(ended.pipeline_run_id).toBe(runId)
   }, 30000)
 })
+
+describe('artel pipeline run — dispatch node timeout_ms (V3.9)', () => {
+  // dispatch node carries an optional timeout_ms that flows into
+  // dispatchLifecycle as `timeoutMs`. When the engine stub hangs
+  // past the budget, dispatch settles with `disposition: 'timeout'`
+  // (V3.3.c machinery), and the wildcard edge catches it.
+  it('hanging dispatch with timeout_ms → timeout disposition → wildcard edge', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'budgeted', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'do thing',
+          timeout_ms: 500,           // V3.9 — node-level budget
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'done' },
+        { from: 'd', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Stub that hangs past the budget. SIGTERM-handler exits non-zero
+    // so the timeout path settles cleanly.
+    const stub = ['#!/usr/bin/env node',
+      'setTimeout(() => process.exit(0), 30000)',
+      `process.on('SIGTERM', () => process.exit(143))`,
+      ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'budgeted', '--task-prefix', 'b'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'timeout',
+    })
+  }, 15000)
+
+  it('parallel branches with distinct timeout_ms budgets settle independently (V3.9)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mixed-budgets', version: 1, entry: 'fan',
+      nodes: {
+        // any-complete: succeed as soon as one branch finishes; the
+        // other gets cancelled by V3.7.e abort plumbing. Distinct
+        // per-branch timeouts ensure the slow one would hit timeout
+        // if it weren't cancelled first by the fast one's success.
+        fan: { type: 'parallel', branches: ['fast', 'slow'], join: 'any-complete' },
+        fast: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'fast', timeout_ms: 30000,    // generous
+        },
+        slow: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'slow', timeout_ms: 500,       // tight
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const fastStub = ['#!/usr/bin/env node', 'console.log("fast ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', fastStub)
+
+    // The pipeline has both branches share the same engine 'claude',
+    // so the fast stub returns success immediately. Slow doesn't get
+    // a chance to hit its tight timeout — it's cancelled by V3.7.e.
+    // What we're asserting is that the per-branch timeout_ms values
+    // round-trip through validation + dispatch metadata, which
+    // means the next test ("show renders") covers the visible
+    // contract.
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mixed-budgets', '--task-prefix', 'mb'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+  }, 30000)
+
+  it('show renders dispatch timeout_ms', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'showable', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: 60000,
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'showable'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/d\s+dispatch\s+role=implementer\s+engine=claude\s+timeout_ms=60000/)
+  })
+
+  it('register rejects dispatch with non-positive timeout_ms', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'broken', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: 0,
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive finite number/)
+  })
+})

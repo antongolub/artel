@@ -124,6 +124,49 @@ describe('validatePipeline', () => {
   })
 })
 
+describe('dispatch node timeout_ms validation (V3.9)', () => {
+  const withTimeout = (timeoutMs: unknown) => {
+    const def = minimalPipeline() as Record<string, unknown> & { nodes: Record<string, Record<string, unknown>> }
+    def.nodes.first.timeout_ms = timeoutMs
+    return def
+  }
+
+  it('accepts a positive finite number', () => {
+    expect(() => validatePipeline(withTimeout(60000))).not.toThrow()
+    expect(() => validatePipeline(withTimeout(1))).not.toThrow()
+  })
+
+  it('accepts dispatch node without timeout_ms (back-compat)', () => {
+    expect(() => validatePipeline(minimalPipeline())).not.toThrow()
+  })
+
+  it('rejects zero / negative timeout_ms', () => {
+    expect(() => validatePipeline(withTimeout(0))).toThrow(
+      /\.timeout_ms must be a positive finite number/,
+    )
+    expect(() => validatePipeline(withTimeout(-1000))).toThrow(
+      /\.timeout_ms must be a positive finite number/,
+    )
+  })
+
+  it('rejects non-numeric / Infinity / NaN', () => {
+    expect(() => validatePipeline(withTimeout('60s'))).toThrow(
+      /\.timeout_ms must be a positive finite number/,
+    )
+    expect(() => validatePipeline(withTimeout(Infinity))).toThrow(
+      /\.timeout_ms must be a positive finite number/,
+    )
+    expect(() => validatePipeline(withTimeout(NaN))).toThrow(
+      /\.timeout_ms must be a positive finite number/,
+    )
+  })
+
+  it('null / undefined treated as absent (no validation error)', () => {
+    expect(() => validatePipeline(withTimeout(null))).not.toThrow()
+    expect(() => validatePipeline(withTimeout(undefined))).not.toThrow()
+  })
+})
+
 describe('resolveNext', () => {
   const def = minimalPipeline()
 

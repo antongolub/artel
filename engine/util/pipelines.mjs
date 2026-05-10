@@ -245,6 +245,18 @@ export const validatePipeline = (def, source = '<inline>') => {
       if (typeof node.prompt !== 'string') {
         throw new Error(`${source}: dispatch node '${nid}' requires a prompt`)
       }
+      // V3.9 — optional per-node timeout, plumbed to dispatchLifecycle
+      // as `timeoutMs`. Same shape as handler.exec.timeout_ms for
+      // consistency. Falls back to ARTEL_DISPATCH_TIMEOUT_MS env /
+      // built-in default when absent. Useful for parallel branches
+      // that need different per-branch budgets, and for gating long
+      // dispatches at the pipeline level rather than relying on the
+      // global default.
+      if (node.timeout_ms != null) {
+        if (typeof node.timeout_ms !== 'number' || node.timeout_ms <= 0 || !Number.isFinite(node.timeout_ms)) {
+          throw new Error(`${source}: dispatch node '${nid}' .timeout_ms must be a positive finite number (got: ${node.timeout_ms})`)
+        }
+      }
     } else if (node.type === 'terminal') {
       if (!VALID_FINAL_STATES.has(node.final_state)) {
         throw new Error(`${source}: terminal node '${nid}' has invalid final_state '${node.final_state}' (valid: ${[...VALID_FINAL_STATES].join(' | ')})`)
