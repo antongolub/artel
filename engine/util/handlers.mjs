@@ -210,12 +210,30 @@ const setAttrBuiltin = async (node, ctx) => {
     setResolved[key] = val
     writePath(resolved, key, val)
   }
+  // V3.7.d.c — `unset` entries are V3.5 template-rendered against
+  // ctx.attrs the same way set values are. Lets pipelines remove
+  // scope-dependent keys like `'{{ scope }}.tmp'`. Render failure
+  // → atomic error (no partial mutation reaches the walker).
+  const unsetResolved = []
+  if (Array.isArray(node.unset)) {
+    for (const path of node.unset) {
+      try {
+        unsetResolved.push(renderTemplate(path, attrs))
+      } catch (err) {
+        return {
+          disposition: 'error',
+          durationMs: Date.now() - start,
+          error: `set_attr: render of .unset entry '${path}' failed: ${err.message}`,
+        }
+      }
+    }
+  }
   return {
     disposition: 'success',
     durationMs: Date.now() - start,
     attrs: resolved,         // walker deep-merges over userAttrs
     set_resolved: setResolved,
-    unsets: Array.isArray(node.unset) ? [...node.unset] : [],
+    unsets: unsetResolved,
   }
 }
 
@@ -230,6 +248,11 @@ const setAttrBuiltin = async (node, ctx) => {
 // Stderr is captured (not inherited) so the failure reason flows
 // into the pipeline_handler.end event's `error` field for
 // forensics. Stdout is ignored (git tag is silent on success).
+//
+// V3.7.f.b — honours ctx.abortSignal. On abort: SIGTERM the git
+// child; disposition resolves to `cancelled`. No grace window —
+// `git tag` is ms-scale; SIGTERM is sufficient. Cancel takes
+// precedence over the natural exit if both fire close together.
 const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
   const start = Date.now()
   const attrs = ctx.attrs || {}
@@ -261,7 +284,30 @@ const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
   })
   let stderr = ''
   child.stderr?.on('data', (d) => { stderr += d.toString() })
+
+  let cancelled = false
+  let abortHandler = null
+  const cleanup = () => {
+    if (ctx.abortSignal && abortHandler) {
+      ctx.abortSignal.removeEventListener('abort', abortHandler)
+    }
+  }
+  if (ctx.abortSignal) {
+    const triggerAbort = () => {
+      if (cancelled) return
+      cancelled = true
+      try { child.kill('SIGTERM') } catch {}
+    }
+    if (ctx.abortSignal.aborted) {
+      triggerAbort()
+    } else {
+      abortHandler = triggerAbort
+      ctx.abortSignal.addEventListener('abort', abortHandler, { once: true })
+    }
+  }
+
   child.on('error', (err) => {
+    cleanup()
     resolve({
       disposition: 'error',
       exitCode: null,
@@ -271,7 +317,17 @@ const gitTagBuiltin = (node, ctx) => new Promise((resolve) => {
     })
   })
   child.on('exit', (code, signal) => {
+    cleanup()
     const durationMs = Date.now() - start
+    // Cancel takes precedence over the exit code regardless —
+    // intentional teardown beats whatever git happened to return.
+    if (cancelled) {
+      resolve({
+        disposition: 'cancelled', exitCode: code, signal, durationMs,
+        tag_name: name,
+      })
+      return
+    }
     if (code === 0) {
       resolve({
         disposition: 'success', exitCode: 0, signal, durationMs,

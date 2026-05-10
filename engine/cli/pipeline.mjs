@@ -240,9 +240,10 @@ if (sub === 'show') {
       console.log(`    ${cyan(nid.padEnd(20))} ${dim('handler')} ${node.handler}${detail}`)
     } else if (node.type === 'subpipeline') {
       // V3.10.a — show the child pipeline_id + attrs spec
-      // (templates unrendered).
+      // (templates unrendered). V3.10.c — `inherit` flag.
       const attrsDetail = node.attrs ? ` attrs=${JSON.stringify(node.attrs)}` : ''
-      console.log(`    ${cyan(nid.padEnd(20))} ${dim('subpipeline')} pipeline_id=${cyan(node.pipeline_id)}${attrsDetail}`)
+      const inheritDetail = node.inherit_attrs === true ? ' inherit_attrs' : ''
+      console.log(`    ${cyan(nid.padEnd(20))} ${dim('subpipeline')} pipeline_id=${cyan(node.pipeline_id)}${inheritDetail}${attrsDetail}`)
     }
   }
   console.log(`\n  ${bold('Edges')}`)
@@ -267,6 +268,15 @@ if (sub === 'run') {
         // values land in pipeline_run.started for trace correlation.
         'parent-run': { type: 'string' },
         'parent-node': { type: 'string' },
+        // V3.10.b — chain of ancestor pipeline_ids (comma-separated)
+        // for arbitrary-depth cycle detection. Parent appends its
+        // own def.id when spawning child.
+        'parent-chain': { type: 'string' },
+        // V3.10.b — parent-controlled run_id. When omitted the
+        // walker generates one (back-compat for top-level runs);
+        // subpipeline parents pre-allocate it so they know where
+        // the child's cancel sentinel will land.
+        'run-id': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
       allowPositionals: true,
@@ -282,13 +292,25 @@ if (sub === 'run') {
   try { def = validatePipeline(JSON.parse(readFileSync(path, 'utf8')), path) }
   catch (err) { die(`run: ${err.message}`, 1) }
 
+  // V3.10.b — cycle detection. parent-chain is a comma-separated
+  // list of ancestor pipeline_ids; if our own def.id appears in it,
+  // a subpipeline cycle is closing and we abort before any side
+  // effects (no pipeline_run.started, no dispatches).
+  const parentChain = values['parent-chain']
+    ? values['parent-chain'].split(',').map((s) => s.trim()).filter(Boolean)
+    : []
+  if (parentChain.includes(def.id)) {
+    const trace = [...parentChain, def.id].join(' → ')
+    die(`run: subpipeline cycle detected — '${def.id}' already in ancestor chain: ${trace}`, 1)
+  }
+
   let userAttrs = {}
   if (values.attrs) {
     try { userAttrs = JSON.parse(values.attrs) }
     catch (err) { die(`run: --attrs is not valid JSON: ${err.message}`, 2) }
   }
 
-  const runId = uuidv7()
+  const runId = values['run-id'] || uuidv7()
   const taskPrefix = values['task-prefix'] || `${id}-${runId.slice(-6)}`
 
   appendWorkloadEvent(PROJECT_DIR, 'pipeline_run.started', {
@@ -514,11 +536,101 @@ if (sub === 'run') {
     }
   }
 
+  // V3.10.a inline; V3.10.d extracted so runBranchNode can call it
+  // for subpipeline branches. Returns runDispatchNode-shape:
+  // `{ disposition }` on settle, `{ __error, node }` on a thrown /
+  // unregistered child. opts.signal — when fires, write the child's
+  // V3.8 cancel sentinel so the child's poller aborts the run
+  // gracefully (~500ms + SIGTERM grace). Tracks whether the cancel
+  // already fired to skip double-write on the rare double-fire.
+  const runSubpipelineNode = async (id, parallelOf = null, opts = {}) => {
+    const node = def.nodes[id]
+    const childPath = pipelinePath(PROJECT_DIR, node.pipeline_id)
+    if (!existsSync(childPath)) {
+      return {
+        __error: `child pipeline '${node.pipeline_id}' not registered`,
+        node: id,
+      }
+    }
+    const parentScope = {
+      ...userAttrs,
+      pipeline_run_id: runId,
+      pipeline_id: def.id,
+      pipeline_node_id: id,
+      ...(parallelOf ? { pipeline_parallel_of: parallelOf } : {}),
+    }
+    let childAttrs = node.inherit_attrs === true ? { ...userAttrs } : {}
+    if (node.attrs) {
+      for (const [k, raw] of Object.entries(node.attrs)) {
+        try {
+          childAttrs[k] = typeof raw === 'string' ? renderTemplate(raw, parentScope) : raw
+        } catch (err) {
+          return {
+            __error: `template render failed: attrs['${k}']: ${err.message}`,
+            node: id,
+          }
+        }
+      }
+    }
+    const childRunId = uuidv7()
+    const childChain = [...parentChain, def.id].join(',')
+    console.error(`${bold('▦')} ${cyan(id)} ${dim('→')} subpipeline ${cyan(node.pipeline_id)} ${dim(`run=${childRunId.slice(-12)}`)}${node.attrs ? ` ${dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
+    const childArgs = [
+      process.argv[1], 'run', node.pipeline_id,
+      '--run-id', childRunId,
+      '--parent-run', runId,
+      '--parent-node', id,
+      '--parent-chain', childChain,
+    ]
+    if (Object.keys(childAttrs).length) {
+      childArgs.push('--attrs', JSON.stringify(childAttrs))
+    }
+    let childCancelled = false
+    const cancelChild = () => {
+      if (childCancelled) return
+      childCancelled = true
+      try {
+        mkdirSync(pipelineCancelsDir(PROJECT_DIR), { recursive: true })
+        writeFileSync(pipelineCancelPath(PROJECT_DIR, childRunId), '')
+      } catch {}
+    }
+    let abortHandler = null
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        cancelChild()
+      } else {
+        abortHandler = cancelChild
+        opts.signal.addEventListener('abort', abortHandler, { once: true })
+      }
+    }
+    // V3.10.d — when this subpipeline is itself a parallel branch
+    // (parallelOf set), force the child's dispatches to use
+    // worktrees. Otherwise the child's `git checkout -B` on the
+    // shared main checkout would race against sibling branches'
+    // git operations on the same repo.
+    const childEnv = parallelOf
+      ? { ...process.env, ARTEL_PIPELINE_FORCE_WORKTREE: '1' }
+      : process.env
+    const childExit = await new Promise((resolveExit) => {
+      const child = spawn(process.argv0, childArgs, {
+        cwd: PROJECT_DIR, stdio: 'inherit', env: childEnv,
+      })
+      child.on('error', () => resolveExit(-1))
+      child.on('exit', (code) => resolveExit(code ?? -1))
+    })
+    if (abortHandler && opts.signal) {
+      opts.signal.removeEventListener('abort', abortHandler)
+    }
+    const disposition = childExit === 0 ? 'success' : 'error'
+    console.error(`  ${dim('disposition:')} ${disposition} ${dim(`(child exit=${childExit})`)}`)
+    return { disposition, child_run_id: childRunId, child_pipeline_id: node.pipeline_id, exit_code: childExit }
+  }
+
   // V3.7.e — branch dispatcher used by the parallel walker. Routes
-  // by node type so parallel can mix dispatch + handler branches.
-  // Other types (parallel / condition / terminal) aren't legal
-  // branches; the validator rejects them at register time, so this
-  // dispatcher just trusts the def shape.
+  // by node type so parallel can mix dispatch + handler + subpipeline
+  // branches (V3.10.d). Other types (parallel / condition / terminal)
+  // aren't legal branches; the validator rejects them at register
+  // time, so this dispatcher just trusts the def shape.
   const runBranchNode = async (id, parentId, opts) => {
     const node = def.nodes[id]
     if (node.type === 'dispatch') {
@@ -526,6 +638,9 @@ if (sub === 'run') {
     }
     if (node.type === 'handler') {
       return runHandlerNode(id, parentId, { signal: opts.signal })
+    }
+    if (node.type === 'subpipeline') {
+      return runSubpipelineNode(id, parentId, { signal: opts.signal })
     }
     return { __error: `branch '${id}' has unsupported type '${node.type}'`, node: id }
   }
@@ -557,7 +672,16 @@ if (sub === 'run') {
       // (which can be long-lived) terminates the child via V3.3.c's
       // SIGTERM→SIGKILL plumbing. Linear dispatch was previously
       // signal-less; cancel only took effect at next step boundary.
-      const result = await runDispatchNode(nodeId, null, { signal: runAbort.signal })
+      // V3.10.d — when this run was spawned as a parallel-branch
+      // subpipeline, ARTEL_PIPELINE_FORCE_WORKTREE=1 forces every
+      // dispatch to isolate via worktree (otherwise the child's
+      // `git checkout -B` would race against sibling branches'
+      // operations on the parent's main checkout).
+      const forceWorktree = process.env.ARTEL_PIPELINE_FORCE_WORKTREE === '1'
+      const result = await runDispatchNode(nodeId, null, {
+        signal: runAbort.signal,
+        useWorktree: forceWorktree,
+      })
       if (result.__error) {
         abortReason = `dispatch threw at node '${nodeId}': ${result.__error}`
         finalState = 'failed'
@@ -694,62 +818,17 @@ if (sub === 'run') {
       }
       stepDisposition = result.disposition
     } else if (node.type === 'subpipeline') {
-      // V3.10.a — composition. Child runs as a subprocess via the
-      // same `pipeline run` CLI; child's `pipeline_run.started`
-      // event records `parent_pipeline_run_id` +
-      // `parent_pipeline_node_id` for trace correlation. Parent's
-      // step disposition derives from the child's exit code:
-      // 0 → success, non-0 → error. Templates render in `attrs`
-      // values against the parent's merged attrs blob.
-      const childPath = pipelinePath(PROJECT_DIR, node.pipeline_id)
-      if (!existsSync(childPath)) {
-        abortReason = `subpipeline '${nodeId}': child pipeline '${node.pipeline_id}' not registered`
+      // V3.10.a inline; V3.10.d extracted into runSubpipelineNode so
+      // parallel branches can call it via runBranchNode.
+      const result = await runSubpipelineNode(nodeId, null, { signal: runAbort.signal })
+      if (result.__error) {
+        abortReason = `subpipeline '${nodeId}': ${result.__error}`
         finalState = 'failed'
         break
       }
-      const parentScope = {
-        ...userAttrs,
-        pipeline_run_id: runId,
-        pipeline_id: def.id,
-        pipeline_node_id: nodeId,
-      }
-      let childAttrs = {}
-      let renderError = null
-      if (node.attrs) {
-        for (const [k, raw] of Object.entries(node.attrs)) {
-          try {
-            childAttrs[k] = typeof raw === 'string' ? renderTemplate(raw, parentScope) : raw
-          } catch (err) {
-            renderError = `attrs['${k}']: ${err.message}`
-            break
-          }
-        }
-      }
-      if (renderError) {
-        abortReason = `subpipeline '${nodeId}': template render failed: ${renderError}`
-        finalState = 'failed'
-        break
-      }
-      console.error(`${bold('▦')} ${cyan(nodeId)} ${dim('→')} subpipeline ${cyan(node.pipeline_id)}${node.attrs ? ` ${dim('attrs=')}${JSON.stringify(childAttrs)}` : ''}`)
-      const childArgs = [
-        process.argv[1], 'run', node.pipeline_id,
-        '--parent-run', runId,
-        '--parent-node', nodeId,
-      ]
-      if (node.attrs && Object.keys(childAttrs).length) {
-        childArgs.push('--attrs', JSON.stringify(childAttrs))
-      }
-      const childExit = await new Promise((resolve) => {
-        const child = spawn(process.argv0, childArgs, {
-          cwd: PROJECT_DIR, stdio: 'inherit', env: process.env,
-        })
-        child.on('error', () => resolve(-1))
-        child.on('exit', (code) => resolve(code ?? -1))
-      })
-      stepDisposition = childExit === 0 ? 'success' : 'error'
-      console.error(`  ${dim('disposition:')} ${stepDisposition} ${dim(`(child exit=${childExit})`)}`)
+      stepDisposition = result.disposition
     } else {
-      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.10.a supports: dispatch | parallel | condition | handler | subpipeline | terminal)`
+      abortReason = `unsupported node type '${node.type}' at '${nodeId}' (V3.10.d supports: dispatch | parallel | condition | handler | subpipeline | terminal)`
       finalState = 'failed'
       break
     }
@@ -785,6 +864,11 @@ if (sub === 'run') {
     last_node: nodeId,
     last_disposition: lastDisposition,
     ...(abortReason ? { abort_reason: abortReason } : {}),
+    // V3.10.b — mirror parent linkage from `.started` so trace tools
+    // can join `.ended` events to parent runs without back-walking
+    // through `.started`.
+    ...(values['parent-run'] ? { parent_pipeline_run_id: values['parent-run'] } : {}),
+    ...(values['parent-node'] ? { parent_pipeline_node_id: values['parent-node'] } : {}),
   })
 
   if (abortReason) {
@@ -888,7 +972,11 @@ if (sub === 'runs') {
     const state = r.final_state ? stateColour(r.final_state) : dim('in-flight')
     const when = (r.started_at || '').replace('T', ' ').slice(0, 19) + 'Z'
     const tail = r.run_id.slice(-8)
-    console.log(`  ${dim(when)}  ${cyan(tail)}  ${cyan(r.pipeline_id?.padEnd(20) || '?'.padEnd(20))} ${state.padEnd(20)} ${dim(fmtDur(r.duration_ms).padStart(6))} ${r.last_node ? dim(`→ ${r.last_node}`) : ''}`)
+    // V3.10.b — annotate child runs with the parent's tail
+    // fragment so operators can spot composition relationships at a
+    // glance. Two-space indent for the row keeps alignment.
+    const parentHint = r.parent_run_id ? ` ${dim(`↳ child of ${r.parent_run_id.slice(-8)}`)}` : ''
+    console.log(`  ${dim(when)}  ${cyan(tail)}  ${cyan(r.pipeline_id?.padEnd(20) || '?'.padEnd(20))} ${state.padEnd(20)} ${dim(fmtDur(r.duration_ms).padStart(6))} ${r.last_node ? dim(`→ ${r.last_node}`) : ''}${parentHint}`)
   }
   console.log()
   process.exit(0)

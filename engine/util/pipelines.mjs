@@ -310,16 +310,17 @@ export const validatePipeline = (def, source = '<inline>') => {
           throw new Error(`${source}: parallel node '${nid}' has duplicate branch '${branchId}'`)
         }
         seen.add(branchId)
-        // V3.2.a → V3.7.e: branches must be a dispatch or handler
-        // node. Nested parallel / condition / subpipeline still
+        // V3.2.a → V3.7.e → V3.10.d: branches accept dispatch,
+        // handler, or subpipeline. Nested parallel / condition still
         // deferred (walker isn't recursive on aggregate
         // dispositions). For handlers in branches, set_attr is
         // explicitly rejected — its mutation lands in shared
         // userAttrs, and concurrent siblings would race on writes
         // (validator wins is fine in linear flows; parallel needs
-        // either a merge contract or no mutation). assert + exec are
-        // fine: assert is read-only, exec mutates only the
-        // filesystem (which the operator's pipeline shape governs).
+        // either a merge contract or no mutation). assert + exec
+        // + git_tag are fine. Subpipeline children run in their own
+        // process so there's no shared-state race; cancellation
+        // cascades via V3.10.b sentinel writes.
         const branchNode = def.nodes[branchId]
         if (branchNode.type === 'dispatch') {
           // ok
@@ -327,8 +328,11 @@ export const validatePipeline = (def, source = '<inline>') => {
           if (branchNode.handler === 'builtin.set_attr') {
             throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' is a builtin.set_attr handler — disallowed in parallel branches (concurrent set_attr writes would race on userAttrs; use a sequential set_attr after the parallel join)`)
           }
+        } else if (branchNode.type === 'subpipeline') {
+          // ok — child runs in its own process; cancellation cascade
+          // handled by V3.10.b sentinel mechanism
         } else {
-          throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch or handler node (got: ${branchNode.type})`)
+          throw new Error(`${source}: parallel node '${nid}' branch '${branchId}' must be a dispatch / handler / subpipeline node (got: ${branchNode.type})`)
         }
       }
     } else if (node.type === 'handler') {
@@ -449,6 +453,10 @@ export const validatePipeline = (def, source = '<inline>') => {
       // Optional `attrs` becomes the child run's userAttrs blob;
       // string values get V3.5 template-rendered against the
       // parent's merged attrs at dispatch time.
+      // V3.10.c — optional `inherit_attrs: true` makes the child
+      // inherit the parent's userAttrs (post-mutation) merged
+      // with the explicit `attrs` (explicit wins). Default false
+      // for back-compat with V3.10.a.
       if (typeof node.pipeline_id !== 'string' || !SLUG_RE.test(node.pipeline_id)) {
         throw new Error(`${source}: subpipeline node '${nid}' .pipeline_id must be a slug (got: ${node.pipeline_id})`)
       }
@@ -459,6 +467,9 @@ export const validatePipeline = (def, source = '<inline>') => {
         if (typeof node.attrs !== 'object' || Array.isArray(node.attrs)) {
           throw new Error(`${source}: subpipeline node '${nid}' .attrs must be a plain object`)
         }
+      }
+      if (node.inherit_attrs != null && typeof node.inherit_attrs !== 'boolean') {
+        throw new Error(`${source}: subpipeline node '${nid}' .inherit_attrs must be a boolean (got: ${typeof node.inherit_attrs})`)
       }
     }
   }
@@ -795,6 +806,10 @@ export const listPipelineRuns = (projectDir, { limit = null, pipelineId = null }
       cur.pipeline_version = e.pipeline_version
       cur.entry_node = e.entry_node
       cur.started_at = e.at
+      // V3.10.b — surface parent linkage so consumers (`runs`,
+      // tooling) can group child runs under their parent.
+      if (e.parent_pipeline_run_id) cur.parent_run_id = e.parent_pipeline_run_id
+      if (e.parent_pipeline_node_id) cur.parent_node_id = e.parent_pipeline_node_id
     } else if (e.type === 'pipeline_run.ended') {
       cur.ended_at = e.at
       cur.final_state = e.final_state

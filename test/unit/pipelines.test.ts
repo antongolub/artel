@@ -259,7 +259,7 @@ describe('parallel node validation (V3.2.a)', () => {
     const def = withParallel() as Record<string, unknown> & { nodes: Record<string, unknown> }
     def.nodes.nested = { type: 'parallel', branches: ['a'], join: 'all-complete' }
     def.nodes.fan = { type: 'parallel', branches: ['a', 'nested'], join: 'all-complete' }
-    expect(() => validatePipeline(def)).toThrow(/branch 'nested' must be a dispatch or handler node \(got: parallel\)/)
+    expect(() => validatePipeline(def)).toThrow(/branch 'nested' must be a dispatch \/ handler \/ subpipeline node \(got: parallel\)/)
   })
 
   it('parallel-only flow: branches reachable through parallel', () => {
@@ -577,6 +577,16 @@ describe('subpipeline node validation (V3.10.a)', () => {
   it('rejects self-recursion (pipeline_id === parent.id)', () => {
     expect(() => validatePipeline(withSubpipeline({ pipeline_id: 'parent' })))
       .toThrow(/is the parent itself \(self-recursion\)/)
+  })
+
+  it('accepts subpipeline with inherit_attrs: true (V3.10.c)', () => {
+    expect(() => validatePipeline(withSubpipeline({ inherit_attrs: true }))).not.toThrow()
+    expect(() => validatePipeline(withSubpipeline({ inherit_attrs: false }))).not.toThrow()
+  })
+
+  it('rejects subpipeline with non-boolean inherit_attrs', () => {
+    expect(() => validatePipeline(withSubpipeline({ inherit_attrs: 'yes' as never })))
+      .toThrow(/\.inherit_attrs must be a boolean/)
   })
 
   it('rejects subpipeline with non-object attrs', () => {

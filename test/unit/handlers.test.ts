@@ -342,6 +342,33 @@ describe('builtin.set_attr (V3.7.d)', () => {
     expect(r2.unsets).toEqual([])
   })
 
+  it('renders templates in unset paths (V3.7.d.c)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        unset: ['{{ scope }}.tmp', 'phase'],
+      },
+      { attrs: { scope: 'flags' } },
+    )
+    expect(r.disposition).toBe('success')
+    expect(r.unsets).toEqual(['flags.tmp', 'phase'])
+  })
+
+  it('atomic error when unset template render fails (V3.7.d.c)', async () => {
+    const r = await runHandler(
+      {
+        handler: 'builtin.set_attr',
+        set: { phase: 'next' },        // would succeed alone
+        unset: ['{{ ghost }}.tmp'],    // template fails
+      },
+      { attrs: {} },
+    )
+    expect(r.disposition).toBe('error')
+    expect(r.error).toMatch(/render of \.unset entry '\{\{ ghost \}\}\.tmp' failed:.*ghost/)
+    // No attrs returned — atomic, walker leaves userAttrs alone.
+    expect(r.attrs).toBeUndefined()
+  })
+
   it('renders templates in dotted-key values (V3.7.d.b)', async () => {
     const r = await runHandler(
       {
@@ -434,6 +461,19 @@ describe('builtin.git_tag (V3.7.f)', () => {
     )
     expect(r.disposition).toBe('error')
     expect(r.error).toMatch(/git_tag:/)
+  })
+
+  it('returns cancelled when ctx.abortSignal already aborted at entry (V3.7.f.b)', async () => {
+    const root = initRepo()
+    const ac = new AbortController()
+    ac.abort()
+    const r = await runHandler(
+      { handler: 'builtin.git_tag', name: 'v1.0', message: 'r' },
+      { projectDir: root, attrs: {}, abortSignal: ac.signal },
+    )
+    expect(r.disposition).toBe('cancelled')
+    // Pre-aborted: git was killed before it could write the tag.
+    expect(tags(root)).toEqual([])
   })
 
   it('errors when template render fails (no partial side-effect)', async () => {
