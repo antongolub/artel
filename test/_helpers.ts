@@ -187,6 +187,7 @@ export const runNode = (cwd: string, args: string[], env: Record<string, string>
 export const ENGINE_FILES_CORE = [
   'engine/core/dispatch_api.mjs',
   'engine/core/dispatch_lifecycle.mjs',
+  'engine/core/dispatches.mjs',
   'engine/core/parked.mjs',
   'engine/core/schema.mjs',
   'engine/core/cluster.mjs',

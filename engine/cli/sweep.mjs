@@ -37,6 +37,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync, rmSync, statSync }
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendInfraEvent } from '../core/audit.mjs'
+import { listDispatches } from '../core/dispatches.mjs'
 import { defaultGit, listWorktrees, removeWorktree } from '../git/worktree.mjs'
 import { listPipelineRuns } from '../pipelines/pipelines.mjs'
 import { chalk } from '../util/chalk.mjs'
@@ -133,23 +134,14 @@ const now = Date.now()
 const cutoffMs = now - olderThanMs
 const active = activeTaskSlugs()
 
-const dispatches = []
-if (existsSync(DISPATCHES_DIR)) {
-  for (const f of readdirSync(DISPATCHES_DIR)) {
-    if (!f.endsWith('.meta')) continue
-    const stem = f.replace(/\.meta$/, '')
-    let meta
-    try { meta = JSON.parse(readFileSync(join(DISPATCHES_DIR, f), 'utf8')) } catch { continue }
-    if (!meta.completedAt) continue            // unfinished — never sweep
-    const completedMs = Date.parse(meta.completedAt) || 0
-    dispatches.push({
-      stem,
-      task: meta.task || stem,
-      completedAt: meta.completedAt,
-      completedMs,
-    })
-  }
-}
+const dispatches = listDispatches(DISPATCHES_DIR)
+  .filter(({ meta }) => meta.completedAt)            // unfinished — never sweep
+  .map(({ stem, meta }) => ({
+    stem,
+    task: meta.task || stem,
+    completedAt: meta.completedAt,
+    completedMs: Date.parse(meta.completedAt) || 0,
+  }))
 
 // Newest-first so --keep N wins over age filter.
 dispatches.sort((a, b) => b.completedMs - a.completedMs)

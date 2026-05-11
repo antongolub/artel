@@ -18,6 +18,7 @@ import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { listDispatches } from '../core/dispatches.mjs'
 import { chalk } from '../util/chalk.mjs'
 import { config } from '../config/env.mjs'
 
@@ -288,28 +289,17 @@ const getRecentDispatches = (n = 5) => {
 
 // --- Parked dispatches (recoverable tail markers) ---
 
-const getParked = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.parked && meta.completedAt) out.push(meta)
-    } catch {}
-  }
-  return out
+const getParked = () =>
+  listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+    .map(({ meta }) => meta)
+    .filter((m) => m.parked && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
     .slice(0, 10)
-}
 
 // Aggregate activity over the last `days` days from .dispatches/*.meta:
 // disposition counts, role/engine breakdown, summed delta. Returns null
 // when there are no dispatches in the window — render skips the panel.
 const getActivity = (days = DAYS) => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return null
   const cutoffMs = cutoff(days)
   let total = 0
   const dispositions = {}
@@ -318,10 +308,7 @@ const getActivity = (days = DAYS) => {
   let linesAdded = 0
   let linesRemoved = 0
   let filesChanged = 0
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    let m
-    try { m = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+  for (const { meta: m } of listDispatches(join(PROJECT_ARTEL, '.dispatches'))) {
     if (!m.completedAt) continue
     const ts = Date.parse(m.completedAt)
     if (!ts || ts < cutoffMs) continue
@@ -340,21 +327,12 @@ const getActivity = (days = DAYS) => {
   return { total, dispositions, byRole, byEngine, linesAdded, linesRemoved, filesChanged }
 }
 
-const getTimedOut = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.status === 'timed-out' && meta.completedAt) out.push(meta)
-    } catch {}
-  }
-  return out
+const getTimedOut = () =>
+  listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+    .map(({ meta }) => meta)
+    .filter((m) => m.status === 'timed-out' && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
     .slice(0, 10)
-}
 
 // --- Running subprocesses ---
 
@@ -410,19 +388,13 @@ const roleEngineFromFile = (role) => {
   }
 }
 
-const readMetaByPid = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return new Map()
-  const m = new Map()
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.pid && !meta.completedAt) m.set(String(meta.pid), meta)
-    } catch {}
-  }
-  return m
-}
+const readMetaByPid = () =>
+  new Map(
+    listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+      .map(({ meta }) => meta)
+      .filter((m) => m.pid && !m.completedAt)
+      .map((m) => [String(m.pid), m]),
+  )
 
 const getRunning = () => {
   try {
@@ -496,31 +468,18 @@ const getGitContext = () => {
 // recent success → ✓; nothing on record → ?.
 const getAuthHealth = (engine) => {
   const window = Date.now() - 86400000
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  let recentAuthFail = false
-  let recentSuccess = false
   let latestFailAt = 0
   let latestSuccessAt = 0
-  if (!existsSync(dir)) return { mark: '?', color: chalk.dim }
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    let meta
-    try { meta = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+  for (const { meta } of listDispatches(join(PROJECT_ARTEL, '.dispatches'))) {
     if (meta.engine !== engine) continue
     const ts = Date.parse(meta.completedAt || '') || 0
     if (!ts || ts < window) continue
-    if (meta.parked?.reason === 'auth-expired' && ts > latestFailAt) {
-      recentAuthFail = true
-      latestFailAt = ts
-    }
-    if (meta.disposition === 'success' && ts > latestSuccessAt) {
-      recentSuccess = true
-      latestSuccessAt = ts
-    }
+    if (meta.parked?.reason === 'auth-expired' && ts > latestFailAt) latestFailAt = ts
+    if (meta.disposition === 'success' && ts > latestSuccessAt) latestSuccessAt = ts
   }
   // If success post-dates the failure, treat as recovered.
-  if (recentAuthFail && latestFailAt > latestSuccessAt) return { mark: '⚠', color: chalk.yellow }
-  if (recentSuccess) return { mark: '✓', color: chalk.green }
+  if (latestFailAt && latestFailAt > latestSuccessAt) return { mark: '⚠', color: chalk.yellow }
+  if (latestSuccessAt) return { mark: '✓', color: chalk.green }
   return { mark: '?', color: chalk.dim }
 }
 

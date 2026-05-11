@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { listDispatches } from '../core/dispatches.mjs'
 import { config } from '../config/env.mjs'
 
 const { projectDir } = config
@@ -66,11 +67,7 @@ const loadJson = (path) => {
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
 
-const loadMetas = () =>
-  existsSync(dispatchDir)
-    ? readdirSync(dispatchDir).filter((n) => n.endsWith('.meta'))
-        .map((n) => loadJson(join(dispatchDir, n))).filter(Boolean)
-    : []
+const loadMetas = () => listDispatches(dispatchDir).map(({ meta }) => meta)
 
 const loadEvents = () =>
   existsSync(eventsPath)
