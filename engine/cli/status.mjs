@@ -12,26 +12,33 @@
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { join, basename } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { dirname } from 'node:path'
 import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
 import { readClusterIdentity } from '../core/cluster.mjs'
 import { listDispatches } from '../core/dispatches.mjs'
+import { QUEUE_SECTIONS as SECTIONS, readQueueMd, flattenItem } from '../core/queue_md.mjs'
+import { tryGit } from '../git/git.mjs'
+import { readJson, readJsonl } from '../util/fs.mjs'
+import { formatDuration } from '../util/proc.mjs'
+import { parseFrontmatter } from '../agents/frontmatter.mjs'
 import { chalk } from '../util/chalk.mjs'
 import { config } from '../config/env.mjs'
 
-const { projectDir: PROJECT_DIR } = config
-
-const here = dirname(fileURLToPath(import.meta.url))
-// `here` is engine/cli/, so platform root is two levels up.
-const PLATFORM_DIR = dirname(dirname(here))
-// Project paths: each consuming repo holds its own .artel/ runtime. Resolved
-// in config/env.mjs from cwd (or env override) — never from `here`,
-// since one platform serves many projects.
+// Platform layout (agentsDir) + project-local runtime (artelDir,
+// dispatchesDir, eventsPath, queuePath, dispatcherStatePath, project
+// dir for the heading). All resolved in config/env.mjs — one platform
+// serves many projects.
+const {
+  projectDir: PROJECT_DIR,
+  agentsDir: AGENTS_DIR,
+  artelDir: PROJECT_ARTEL,
+  dispatchesDir: DISPATCHES_DIR,
+  eventsPath: EVENTS_PATH,
+  queuePath: QUEUE_PATH,
+  dispatcherStatePath: DISPATCHER_STATE_PATH,
+} = config
 const PROJECT_NAME = basename(PROJECT_DIR)
-const { artelDir: PROJECT_ARTEL, eventsPath: EVENTS_PATH, dispatcherStatePath: DISPATCHER_STATE_PATH } = config
 const DAYS = 7
 
 const fmt = (n) => {
@@ -57,14 +64,6 @@ const sparkChar = (val, max) => {
 const cutoff = (days) => Date.now() - days * 86400000
 const dayKey = (ts) => new Date(ts).toISOString().slice(0, 10)
 
-const formatDuration = (ms) => {
-  if (!Number.isFinite(ms) || ms < 0) return null
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
-  return `${(ms / 3600000).toFixed(1)}h`
-}
-
 const relativeTime = (iso) => {
   const ms = Date.now() - Date.parse(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z'))
   if (isNaN(ms)) return '?'
@@ -84,46 +83,14 @@ const dayLabel = (iso) => {
 
 // --- QUEUE parsing ---
 
-const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
-
+// Empty `.artel/QUEUE.md` shows up after `artel init` before the user
+// populates the queue; the `_missing` flag lets renderQueue surface a
+// hint instead of a misleading "0". Items are flattened to single
+// strings — status only renders, never round-trips.
 const parseQueue = () => {
-  const out = Object.fromEntries(SECTIONS.map((s) => [s, []]))
-  const path = join(PROJECT_ARTEL, 'QUEUE.md')
-  // Empty fallback when QUEUE.md doesn't exist yet — happens after `artel
-  // init` and before the user populates the queue, or when running
-  // `artel status` from a directory without artel runtime. Status should
-  // still render a meaningful skeleton in those cases. The `_missing`
-  // flag lets renderQueue surface a hint instead of a misleading "0".
-  if (!existsSync(path)) {
-    Object.defineProperty(out, '_missing', { value: true })
-    return out
-  }
-  const text = readFileSync(path, 'utf8')
-  let cur = null
-  let item = null
-  const flush = () => {
-    if (item && cur) out[cur].push(item)
-    item = null
-  }
-  for (const line of text.split('\n')) {
-    const sec = line.match(/^## (.+)$/)
-    if (sec) {
-      flush()
-      cur = SECTIONS.includes(sec[1]) ? sec[1] : null
-      continue
-    }
-    if (!cur) continue
-    const li = line.match(/^- (.+)$/)
-    if (li) {
-      flush()
-      item = li[1]
-      continue
-    }
-    const cont = line.match(/^  (.+)$/)
-    if (cont && item) item += ' ' + cont[1]
-  }
-  flush()
-  for (const k of SECTIONS) out[k] = out[k].filter((s) => !s.startsWith('(none)'))
+  const { sections, missing } = readQueueMd(QUEUE_PATH)
+  const out = Object.fromEntries(SECTIONS.map((s) => [s, sections[s].map(flattenItem)]))
+  if (missing) Object.defineProperty(out, '_missing', { value: true })
   return out
 }
 
@@ -134,25 +101,11 @@ const parseQueue = () => {
 // projection (see engine/cli/state_gen.mjs), not a source of truth, and
 // keeping the dashboard live means staying close to the event stream.
 
-const readDispatcherState = () => {
-  if (!existsSync(DISPATCHER_STATE_PATH)) return null
-  try {
-    return JSON.parse(readFileSync(DISPATCHER_STATE_PATH, 'utf8'))
-  } catch {
-    return null
-  }
-}
+const readDispatcherState = () => readJson(DISPATCHER_STATE_PATH)
 
-const readEvents = () => {
-  if (!existsSync(EVENTS_PATH)) return []
-  return readFileSync(EVENTS_PATH, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      try { return JSON.parse(line) } catch { return null }
-    })
-    .filter((e) => e && e.type !== 'schema')
-}
+// Drop schema-marker events — they're file headers, not telemetry the
+// dashboard surfaces.
+const dashboardEvents = () => readJsonl(EVENTS_PATH).filter((e) => e.type !== 'schema')
 
 const summarizeEvent = (e) => {
   // dispatch.start / dispatch.end are canonical (DESIGN.md §4.5); legacy
@@ -190,7 +143,7 @@ const summarizeEvent = (e) => {
 }
 
 const getSharedFeed = (n = 5) =>
-  readEvents()
+  dashboardEvents()
     .map((e) => ({ ts: e.at, role: e.owner_role || e.from_role || e.type, text: summarizeEvent(e) }))
     .filter((x) => x.ts && x.text)
     .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
@@ -217,7 +170,6 @@ const getDispatcherStatus = () => {
 // Roles are project-defined; the platform discovers them from the
 // agents/ directory at runtime. Fallback only — when meta sidecar
 // is missing we try to detect role from filename `<role>-<task>.out`.
-const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
 const knownRoles = () =>
   existsSync(AGENTS_DIR)
     ? readdirSync(AGENTS_DIR)
@@ -226,7 +178,7 @@ const knownRoles = () =>
     : []
 
 const getRecentDispatches = (n = 5) => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
+  const dir = DISPATCHES_DIR
   if (!existsSync(dir)) return []
   return readdirSync(dir)
     .filter((f) => f.endsWith('.out'))
@@ -251,23 +203,20 @@ const getRecentDispatches = (n = 5) => {
       let traceId = null
       let durationMs = null
       let delta = null
-      const metaPath = join(dir, `${base}.meta`)
-      if (existsSync(metaPath)) {
-        try {
-          const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
-          role = meta.role
-          engine = meta.engine
-          task = meta.task
-          usage = meta.usage || null
-          retryCount = meta.retryCount || 0
-          dispatchId = meta.dispatchId || null
-          traceId = meta.traceId || null
-          delta = meta.delta || null
-          if (meta.dispatchedAt && meta.completedAt) {
-            const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
-            if (Number.isFinite(d) && d >= 0) durationMs = d
-          }
-        } catch {}
+      const meta = readJson(join(dir, `${base}.meta`))
+      if (meta) {
+        role = meta.role
+        engine = meta.engine
+        task = meta.task
+        usage = meta.usage || null
+        retryCount = meta.retryCount || 0
+        dispatchId = meta.dispatchId || null
+        traceId = meta.traceId || null
+        delta = meta.delta || null
+        if (meta.dispatchedAt && meta.completedAt) {
+          const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
+          if (Number.isFinite(d) && d >= 0) durationMs = d
+        }
       }
       // Legacy fallback: detect from filename (`<role>-<task>.out`) and content
       if (!role) role = knownRoles().find((r) => f.startsWith(r + '-')) || '?'
@@ -290,7 +239,7 @@ const getRecentDispatches = (n = 5) => {
 // --- Parked dispatches (recoverable tail markers) ---
 
 const getParked = () =>
-  listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+  listDispatches(DISPATCHES_DIR)
     .map(({ meta }) => meta)
     .filter((m) => m.parked && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
@@ -308,7 +257,7 @@ const getActivity = (days = DAYS) => {
   let linesAdded = 0
   let linesRemoved = 0
   let filesChanged = 0
-  for (const { meta: m } of listDispatches(join(PROJECT_ARTEL, '.dispatches'))) {
+  for (const { meta: m } of listDispatches(DISPATCHES_DIR)) {
     if (!m.completedAt) continue
     const ts = Date.parse(m.completedAt)
     if (!ts || ts < cutoffMs) continue
@@ -328,7 +277,7 @@ const getActivity = (days = DAYS) => {
 }
 
 const getTimedOut = () =>
-  listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+  listDispatches(DISPATCHES_DIR)
     .map(({ meta }) => meta)
     .filter((m) => m.status === 'timed-out' && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
@@ -378,11 +327,7 @@ const parseRunArgs = (command) => {
 
 const roleEngineFromFile = (role) => {
   try {
-    const text = readFileSync(join(PLATFORM_DIR, 'agents', `${role}.md`), 'utf8')
-    const fm = text.match(/^---\n([\s\S]*?)\n---/)
-    if (!fm) return null
-    const eng = fm[1].match(/^engine:\s*(\S+)/m)
-    return eng ? eng[1] : null
+    return parseFrontmatter(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8')).meta.engine || null
   } catch {
     return null
   }
@@ -390,7 +335,7 @@ const roleEngineFromFile = (role) => {
 
 const readMetaByPid = () =>
   new Map(
-    listDispatches(join(PROJECT_ARTEL, '.dispatches'))
+    listDispatches(DISPATCHES_DIR)
       .map(({ meta }) => meta)
       .filter((m) => m.pid && !m.completedAt)
       .map((m) => [String(m.pid), m]),
@@ -443,20 +388,10 @@ const getClusterContext = () => {
   }
 }
 
-const gitOf = (cwd, args) => {
-  try {
-    return execSync(`git ${args}`, {
-      cwd, encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-  } catch {
-    return null
-  }
-}
-
 const getGitContext = () => {
-  const branch = gitOf(PROJECT_DIR, 'rev-parse --abbrev-ref HEAD')
+  const branch = tryGit(PROJECT_DIR, ['rev-parse', '--abbrev-ref', 'HEAD'])
   if (!branch) return null
-  const porcelain = gitOf(PROJECT_DIR, 'status --porcelain')
+  const porcelain = tryGit(PROJECT_DIR, ['status', '--porcelain'])
   const dirty = porcelain ? porcelain.split('\n').filter(Boolean).length : 0
   return { branch, dirty }
 }
@@ -470,7 +405,7 @@ const getAuthHealth = (engine) => {
   const window = Date.now() - 86400000
   let latestFailAt = 0
   let latestSuccessAt = 0
-  for (const { meta } of listDispatches(join(PROJECT_ARTEL, '.dispatches'))) {
+  for (const { meta } of listDispatches(DISPATCHES_DIR)) {
     if (meta.engine !== engine) continue
     const ts = Date.parse(meta.completedAt || '') || 0
     if (!ts || ts < window) continue

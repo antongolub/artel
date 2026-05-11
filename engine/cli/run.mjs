@@ -6,31 +6,22 @@
 // Universal terms (DESIGN.md §5): runner speaks model / effort / sandbox /
 // tools / permission-mode. Drivers translate to engine-native flags.
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { buildTaskContextBlock, parseJsonObject } from '../core/dispatch_api.mjs'
 import { parseFrontmatter, normaliseFrontmatter } from '../agents/frontmatter.mjs'
 import { expandSkills } from '../agents/skills.mjs'
 import { validateRoleFrontmatter } from '../agents/contract.mjs'
 import { listDrivers, loadDriver } from '../drivers/loader.mjs'
+import { listDirBy } from '../util/fs.mjs'
 import { die } from '../util/chalk.mjs'
 import { config, dispatchEnv } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-const PLATFORM_DIR = join(here, '..', '..')
-const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
-const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
-const PROJECT_SKILLS_DIR = config.skillsDir
+const { agentsDir: AGENTS_DIR, platformSkillsDir: PLATFORM_SKILLS_DIR, skillsDir: PROJECT_SKILLS_DIR } = config
 
-const listDir = (dir, ext) =>
-  existsSync(dir)
-    ? readdirSync(dir).filter((f) => f.endsWith(ext)).map((f) => f.slice(0, -ext.length))
-    : []
-
-const listRoles = () => listDir(AGENTS_DIR, '.md').filter((n) => n !== 'README')
+const listRoles = () => listDirBy(AGENTS_DIR, '.md').filter((n) => n !== 'README')
 
 const usage = (code = 2) => {
   const roles = listRoles()

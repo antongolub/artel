@@ -19,8 +19,8 @@
 // same `queue_edge.added` for an existing tuple is a no-op (last
 // `attrs` patch wins). `queue_edge.removed` removes by tuple.
 
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { pathsFor } from '../config/env.mjs'
+import { readJsonl } from '../util/fs.mjs'
 
 export const VALID_STATUSES = new Set([
   'For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done',
@@ -47,9 +47,6 @@ const GATING_RELATIONS = new Set(['blocks', 'depends_on'])
 
 const edgeKey = (relation, from, to) => `${relation}:${from}->${to}`
 
-const eventsPath = (projectDir) =>
-  join(projectDir, '.artel', 'events.jsonl')
-
 // Replay queue_node.* events from .artel/events.jsonl into a map.
 // Each NodeState: {
 //   slug, status, lane?, description?,
@@ -66,12 +63,7 @@ const eventsPath = (projectDir) =>
 export const buildGraph = (projectDir) => {
   const nodes = new Map()
   const edges = new Map()
-  const path = eventsPath(projectDir)
-  if (!existsSync(path)) return { nodes, edges }
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    if (!line) continue
-    let e
-    try { e = JSON.parse(line) } catch { continue }
+  for (const e of readJsonl(pathsFor(projectDir).eventsPath)) {
     if (e.kind !== 'workload' || typeof e.type !== 'string') continue
     if (e.type.startsWith('queue_node.')) applyNodeEvent(nodes, e)
     else if (e.type.startsWith('queue_edge.')) applyEdgeEvent(edges, e)

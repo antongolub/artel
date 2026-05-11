@@ -7,19 +7,19 @@
 // this module wraps the baseline-fields boilerplate.
 
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { SCHEMA_VERSION, validateEventType } from './schema.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { pathsFor } from '../config/env.mjs'
 
 // Shared envelope writer. `kind` may be infra | workload | signal |
 // control. Workload events get fence_token: 0 (V1 federation
 // reservation; enforcement deferred). Bootstraps cluster identity if
 // absent so events land cleanly on fresh projects.
 const writeEvent = (projectDir, kind, type, payload = {}) => {
-  const projectArtelDir = join(projectDir, '.artel')
-  const eventsPath = join(projectArtelDir, 'events.jsonl')
-  const cluster = ensureClusterIdentity(projectArtelDir)
+  const { artelDir, eventsPath } = pathsFor(projectDir)
+  const cluster = ensureClusterIdentity(artelDir)
   const event = {
     schema: SCHEMA_VERSION,
     kind,

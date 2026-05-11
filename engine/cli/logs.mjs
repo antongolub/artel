@@ -8,6 +8,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { parseArgs } from 'node:util'
+import { readJson, readJsonl } from '../util/fs.mjs'
+import { formatDuration } from '../util/proc.mjs'
 import { chalk } from '../util/chalk.mjs'
 import { config } from '../config/env.mjs'
 
@@ -88,10 +90,7 @@ if (!files) {
   process.exit(1)
 }
 
-let meta = null
-if (files.metaPath) {
-  try { meta = JSON.parse(readFileSync(files.metaPath, 'utf8')) } catch {}
-}
+const meta = files.metaPath ? readJson(files.metaPath) : null
 
 const promptText = files.promptPath ? safeRead(files.promptPath) : null
 const outText = files.outPath ? safeRead(files.outPath) : null
@@ -102,18 +101,9 @@ function safeRead (path) {
 
 // ---- events for this task ----
 
-const matchedEvents = []
-if (existsSync(EVENTS_PATH)) {
-  for (const line of readFileSync(EVENTS_PATH, 'utf8').split('\n')) {
-    if (!line) continue
-    try {
-      const e = JSON.parse(line)
-      if (e.task === taskSlug || (meta && e.dispatch_id === meta.dispatchId)) {
-        matchedEvents.push(e)
-      }
-    } catch {}
-  }
-}
+const matchedEvents = readJsonl(EVENTS_PATH).filter(
+  (e) => e.task === taskSlug || (meta && e.dispatch_id === meta.dispatchId),
+)
 
 // ---- render ----
 
@@ -133,15 +123,8 @@ const fmtDate = (iso) => {
   return iso.replace('T', ' ').replace(/\.\d{3}Z?$/, ' UTC')
 }
 
-const fmtDuration = (start, end) => {
-  if (!start || !end) return null
-  const ms = Date.parse(end) - Date.parse(start)
-  if (!Number.isFinite(ms) || ms < 0) return null
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
-  return `${(ms / 3600000).toFixed(1)}h`
-}
+const fmtDuration = (start, end) =>
+  start && end ? formatDuration(Date.parse(end) - Date.parse(start)) : null
 
 const dispoColor = (d) =>
   d === 'success' ? chalk.green(d)

@@ -6,32 +6,29 @@
 // invocation so observers can distinguish process restarts of the same
 // cluster.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
+import { readJson, writeJson } from '../util/fs.mjs'
 
 const CLUSTER_FILE = 'cluster.json'
 
 const clusterPath = (artelDir) => join(artelDir, CLUSTER_FILE)
 
 export function readClusterIdentity (artelDir) {
-  const path = clusterPath(artelDir)
-  if (!existsSync(path)) return null
-  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+  return readJson(clusterPath(artelDir))
 }
 
 export function ensureClusterIdentity (artelDir, { name = null } = {}) {
   const existing = readClusterIdentity(artelDir)
   if (existing?.cluster_id) return existing
 
-  mkdirSync(artelDir, { recursive: true })
   const cluster = {
     cluster_id: uuidv7(),
     name: name || basename(artelDir.replace(/\/?\.artel\/?$/, '')) || 'unnamed-cluster',
     created_at: new Date().toISOString(),
     schema: 'cluster-v1',
   }
-  writeFileSync(clusterPath(artelDir), JSON.stringify(cluster, null, 2) + '\n')
+  writeJson(clusterPath(artelDir), cluster)
   return cluster
 }
 

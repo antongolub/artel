@@ -11,92 +11,55 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createDispatchApi } from './dispatch_api.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { detectParked } from './parked.mjs'
+import { findLastJsonl } from '../util/fs.mjs'
+import { parseFrontmatter } from '../agents/frontmatter.mjs'
 import { uuidv7 } from '../util/ids.mjs'
 import { gitContext, gitDelta } from '../git/git.mjs'
 import { listDrivers } from '../drivers/loader.mjs'
 import { identityEnv, resolveIdentity, resolveRequires } from '../trust/trust.mjs'
 import { createWorktreeForBranch, removeWorktree } from '../git/worktree.mjs'
 import { parseDuration } from '../util/proc.mjs'
-import { createConfig, dispatchEnv, pathsFor } from '../config/env.mjs'
+import { createConfig, dispatchEnv, pathsFor, platformPathsFor } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-// Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
-// `here` is engine/core/, so platform root is two levels up.
-const DEFAULT_PLATFORM_DIR = join(here, '..', '..')
 // Project dir is per-project: each consuming repo holds its own `.artel/`
 // runtime (.dispatches/, .sessions/, events.jsonl, dispatcher_state.json,
-// state.md, JOURNAL/QUEUE). Resolve from cwd (or env override) — never from
-// `here`, since a single platform serves many projects. Reads via
-// createConfig() so test-time env mutations between calls take effect.
+// state.md, JOURNAL/QUEUE). Resolve via createConfig() so test-time env
+// mutations between calls (ARTEL_PROJECT_DIR / ARTEL_PLATFORM_DIR) take
+// effect; one platform serves many projects.
 const projectArtelDirOf = (projectDir = createConfig().projectDir) => pathsFor(projectDir).artelDir
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60 * 1000
 
-// Find the dispatch.start event (or legacy 'claim') with matching dispatch_id
-// in events.jsonl. Used by retry-counter to compare engine+model against the
-// previous dispatch in this chain.
-const findDispatchStart = (eventsPath, dispatchId) => {
-  if (!dispatchId || !existsSync(eventsPath)) return null
-  const lines = readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean)
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let event
-    try { event = JSON.parse(lines[i]) } catch { continue }
-    if (event.dispatch_id === dispatchId && (event.type === 'dispatch.start' || event.type === 'claim')) {
-      return event
-    }
-  }
-  return null
-}
-
-// Find the dispatch.end event matching dispatchId — used to derive retry_reason
-// (= previous dispatch's disposition).
-const findDispatchEnd = (eventsPath, dispatchId) => {
-  if (!dispatchId || !existsSync(eventsPath)) return null
-  const lines = readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean)
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let event
-    try { event = JSON.parse(lines[i]) } catch { continue }
-    if (event.dispatch_id === dispatchId && (event.type === 'dispatch.end' || event.type === 'release')) {
-      return event
-    }
-  }
-  return null
-}
-
-const frontmatterOf = (text) => {
-  const match = text.match(/^---\n([\s\S]*?)\n---/)
-  if (!match) return {}
-  const out = {}
-  for (const line of match[1].split('\n')) {
-    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/)
-    if (kv) out[kv[1]] = kv[2].trim()
-  }
-  return out
-}
+// Most-recent event for `dispatchId` matching one of `types`. dispatch.start
+// + dispatch.end are canonical; 'claim' / 'release' are accepted as one-cycle
+// back-compat aliases (DESIGN.md §4.5).
+const findDispatchEvent = (eventsPath, dispatchId, types) =>
+  dispatchId
+    ? findLastJsonl(eventsPath, (e) => e.dispatch_id === dispatchId && types.includes(e.type))
+    : null
+const findDispatchStart = (eventsPath, dispatchId) =>
+  findDispatchEvent(eventsPath, dispatchId, ['dispatch.start', 'claim'])
+const findDispatchEnd = (eventsPath, dispatchId) =>
+  findDispatchEvent(eventsPath, dispatchId, ['dispatch.end', 'release'])
 
 const dispatchPathsOf = ({
-  platformDir = DEFAULT_PLATFORM_DIR,
+  platformDir = createConfig().platformDir,
   projectDir = createConfig().projectDir,
   projectArtelDir = projectArtelDirOf(projectDir),
 } = {}) => {
-  const engineDir = join(platformDir, 'engine')
+  const { agentsDir, platformDriversDir: driversDir, runPath } = platformPathsFor(platformDir)
+  const { dispatchesDir, sessionsDir, eventsPath } = pathsFor(projectDir)
   return {
-    platformDir,
-    projectDir,
-    projectArtelDir,
-    agentsDir: join(platformDir, 'agents'),
-    driversDir: join(engineDir, 'drivers'),
-    runPath: join(engineDir, 'cli', 'run.mjs'),
-    dispatchesDir: join(projectArtelDir, '.dispatches'),
-    sessionsDir: join(projectArtelDir, '.sessions'),
-    eventsPath: join(projectArtelDir, 'events.jsonl'),
+    platformDir, projectDir, projectArtelDir,
+    agentsDir, driversDir, runPath,
+    dispatchesDir, sessionsDir, eventsPath,
   }
 }
 
@@ -110,7 +73,7 @@ const readRoleMeta = (role, agentsDir) => {
   if (!existsSync(rolePath)) {
     throw new Error(`Role not found: ${rolePath}`)
   }
-  return frontmatterOf(readFileSync(rolePath, 'utf8'))
+  return parseFrontmatter(readFileSync(rolePath, 'utf8')).meta
 }
 
 // Parse dispatch policy from a role's frontmatter:
@@ -137,7 +100,7 @@ const checkDispatchPolicy = (parentRoleName, requestedRole, agentsDir) => {
   if (!parentRoleName) return
   const parentPath = join(agentsDir, `${parentRoleName}.md`)
   if (!existsSync(parentPath)) return // unknown parent — fail open
-  const parentMeta = frontmatterOf(readFileSync(parentPath, 'utf8'))
+  const parentMeta = parseFrontmatter(readFileSync(parentPath, 'utf8')).meta
   const policy = parseDispatchPolicy(parentMeta)
   if (policy.allow !== 'all' && !policy.allow.includes(requestedRole)) {
     throw new Error(
@@ -301,7 +264,7 @@ export async function dispatchLifecycle(
     useWorktree = false,
     keepWorktreeOnSuccess = false,
     abortSignal = null,
-    platformDir = DEFAULT_PLATFORM_DIR,
+    platformDir = createConfig().platformDir,
     projectDir = createConfig().projectDir,
     projectArtelDir = projectArtelDirOf(projectDir),
   } = {},

@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { SCHEMA_VERSION, validateEventType } from './schema.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { readJson, writeJson } from '../util/fs.mjs'
 
 const nowIso = () => new Date().toISOString()
 
@@ -9,14 +10,7 @@ const clone = (value) => JSON.parse(JSON.stringify(value))
 
 const ensureParent = (path) => mkdirSync(dirname(path), { recursive: true })
 
-const readJsonFile = (path) => {
-  if (!path || !existsSync(path)) return null
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
-    return null
-  }
-}
+const readJsonFile = (path) => (path ? readJson(path) : null)
 
 const normalizeAttrs = (value) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -126,8 +120,7 @@ export const createDispatchApi = ({
       updatedAt: nowIso(),
       lastMovement: movement,
     }
-    ensureParent(metaPath)
-    writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n')
+    writeJson(metaPath, meta)
     notifyMeta(movement)
     return clone(meta)
   }

@@ -7,8 +7,8 @@
 // jsonl for new appends.
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
 import { parseArgs } from 'node:util'
+import { readJsonl } from '../util/fs.mjs'
 import { chalk } from '../util/chalk.mjs'
 import { config } from '../config/env.mjs'
 
@@ -85,16 +85,6 @@ const matches = (e) => {
   return true
 }
 
-const readEvents = () => {
-  if (!existsSync(EVENTS_PATH)) return []
-  const out = []
-  for (const line of readFileSync(EVENTS_PATH, 'utf8').split('\n')) {
-    if (!line) continue
-    try { out.push(JSON.parse(line)) } catch {}
-  }
-  return out
-}
-
 // --- formatting ---
 
 const KIND_COLOR = {
@@ -145,7 +135,7 @@ const formatEvent = (e) => {
 
 // --- run ---
 
-const initial = readEvents().filter(matches)
+const initial = readJsonl(EVENTS_PATH).filter(matches)
 const slice = limit < 0 ? initial : initial.slice(-limit)
 
 if (values.json) {
@@ -159,7 +149,7 @@ if (!values.follow) process.exit(0)
 // --- follow mode (poll mtime + size) ---
 
 let lastSize = existsSync(EVENTS_PATH) ? statSync(EVENTS_PATH).size : 0
-let lastSeenLine = slice.length ? readEvents().findIndex((e) => e === initial[initial.length - 1]) : -1
+let lastSeenLine = slice.length ? readJsonl(EVENTS_PATH).findIndex((e) => e === initial[initial.length - 1]) : -1
 
 // Cleaner approach: track the byte offset we've already consumed and only
 // read past it. jsonl events.jsonl is append-only — events never re-written,

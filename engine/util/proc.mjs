@@ -43,6 +43,17 @@ export const parseDuration = (raw, label = 'duration') => {
   throw new Error(`${label} must be a positive integer ms or string with suffix (ms|s|m|h|d), got: ${raw}`)
 }
 
+// Inverse of parseDuration for human-glance rendering. Returns `null`
+// on invalid input so callers pick their own placeholder ('—', '?', …).
+// Three CLIs (status, pipeline, logs) had nearly-identical copies.
+export const formatDuration = (ms) => {
+  if (!Number.isFinite(ms) || ms < 0) return null
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
+  return `${(ms / 3600000).toFixed(1)}h`
+}
+
 // V3.10.f — cancellable spawn for handler builtins (V3.7.a exec,
 // V3.7.f git_tag) that need: SIGTERM on abort, optional timeout
 // SIGTERM, optional SIGKILL grace, optional stderr capture. Never

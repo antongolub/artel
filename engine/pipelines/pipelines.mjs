@@ -48,6 +48,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathsFor } from '../config/env.mjs'
+import { readJsonl } from '../util/fs.mjs'
 import { parseDuration } from '../util/proc.mjs'
 
 // V3.1 + V3.8 — explicit-projectDir variants for tests / sub-pipeline
@@ -750,20 +751,9 @@ export const listPipelineFiles = (projectDir) => {
 
 // V3.4.a — pipeline run observability. Reads events.jsonl, joins
 // `pipeline_run.started` with `pipeline_run.ended` by `pipeline_run_id`
-// to materialise past runs. (`readFileSync` is already imported above.)
+// to materialise past runs.
 
-const eventsPathFor = (projectDir) => join(projectDir, '.artel', 'events.jsonl')
-
-const replayEvents = (projectDir) => {
-  const path = eventsPathFor(projectDir)
-  if (!existsSync(path)) return []
-  const out = []
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    if (!line) continue
-    try { out.push(JSON.parse(line)) } catch {}
-  }
-  return out
-}
+const replayEvents = (projectDir) => readJsonl(pathsFor(projectDir).eventsPath)
 
 // Returns past pipeline runs newest-first. Each entry:
 //   { run_id, pipeline_id, pipeline_version, started_at, ended_at?,

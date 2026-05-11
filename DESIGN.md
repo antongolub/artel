@@ -251,7 +251,7 @@ promptParts, session)`; optional `id` / `command` / `api_version` /
 3. <platform>/engine/drivers/<engine>.mjs   (platform default)
 ```
 
-Same precedence shape as skills (§8.3). `engine/util/drivers.mjs`
+Same precedence shape as skills (§8.3). `engine/drivers/loader.mjs`
 exposes `resolveDriverPath` / `loadDriver` / `listDrivers` /
 `discoverDrivers`. `loadDriver` validates the contract (`args` is
 required) and throws on unknown names with a `Visible drivers: ...`
@@ -388,8 +388,8 @@ Plus type-specific required fields:
 - **role-v1**: `name`, `description`
 - **skill-v1**: `description`, `tools`
 
-Validators (`engine/util/contract.mjs`) enforce on every load —
-`engine/util/skills.mjs` validates skill files when expanded into
+Validators (`engine/agents/contract.mjs`) enforce on every load —
+`engine/agents/skills.mjs` validates skill files when expanded into
 tool patterns; `engine/cli/run.mjs` validates the role file before
 dispatching. Files that fail validation are rejected with a clear
 error before any side-effects.
@@ -850,7 +850,7 @@ artel spawn <role> <task> -p "..." --worktree --keep-worktree  # keep even on su
 `artel pipeline run` enables worktrees automatically for `parallel`
 branches.
 
-**Mechanics** (`engine/util/worktree.mjs`):
+**Mechanics** (`engine/git/worktree.mjs`):
 - `createWorktreeForBranch(projectDir, branch, gitImpl)` — `git
   branch -f <branch> HEAD` + `git worktree add <path> <branch>`.
   Idempotent; cleans stale worktrees at the same path before adding.
@@ -1102,7 +1102,7 @@ ci_check:
 - `disposition: 'error'` — non-zero exit code
 - `disposition: 'timeout'` — `timeout_ms` elapsed (SIGTERM the child)
 
-**Builtins** (in `engine/util/handlers.mjs`):
+**Builtins** (in `engine/pipelines/handlers.mjs`):
 
 - `builtin.exec` (V3.7.a) — `bash -c <cmd>` in `ctx.projectDir`.
   `stdio: 'inherit'` so the operator sees command output inline
@@ -1142,8 +1142,8 @@ ci_check:
   is fine. Pure function — no spawn, no I/O.
 
 Adding a new builtin = registering its name in
-`VALID_HANDLERS` (`engine/util/pipelines.mjs`) + its implementation
-in the `BUILTINS` map (`engine/util/handlers.mjs`). Validator
+`VALID_HANDLERS` (`engine/pipelines/pipelines.mjs`) + its implementation
+in the `BUILTINS` map (`engine/pipelines/handlers.mjs`). Validator
 catches malformed handler nodes at register time.
 
 **Mutation contract (V3.7.d):**
@@ -1512,7 +1512,7 @@ the key lives elsewhere (CI secret, separate machine, OS keychain).
 ### 13.6 Audit log
 
 Every trust mutator appends an `infra` event to `.artel/events.jsonl`.
-`engine/util/audit.mjs#appendInfraEvent` wraps the envelope; `trust.`
+`engine/core/audit.mjs#appendInfraEvent` wraps the envelope; `trust.`
 is reserved in `RESERVED_TYPE_PREFIXES.infra`. Events:
 
 | Mutator | Type | Payload (always sans secrets) |

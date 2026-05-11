@@ -11,22 +11,18 @@
 // default locations for tests / sandboxes.
 
 import { existsSync, readdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createConfig } from '../config/env.mjs'
 
-// loader.mjs lives next to its peer drivers — the platform default dir
-// is the directory containing this module.
-const PLATFORM_DRIVERS_DIR = dirname(fileURLToPath(import.meta.url))
-
 // Resolve config per call so test overrides of ARTEL_PROJECT_DIR /
-// ARTEL_USER_DRIVERS_DIR between calls take effect.
+// ARTEL_USER_DRIVERS_DIR / ARTEL_PLATFORM_DIR between calls take effect.
 const layers = () => {
   const cfg = createConfig()
   return [
     { source: 'project',  dir: cfg.driversDir },
     { source: 'user',     dir: cfg.userDriversDir },
-    { source: 'platform', dir: PLATFORM_DRIVERS_DIR },
+    { source: 'platform', dir: cfg.platformDriversDir },
   ]
 }
 

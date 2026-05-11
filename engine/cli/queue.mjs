@@ -12,7 +12,7 @@
 // Tasks are matched by slug (the `<task>` token after the optional
 // `[lane]` tag, or by an explicit `[task: slug]` annotation).
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendWorkloadEvent } from '../core/audit.mjs'
@@ -25,13 +25,12 @@ import {
   outgoingEdges,
   readyForDispatch,
 } from '../core/queue_graph.mjs'
+import { QUEUE_SECTIONS as SECTIONS, readQueueMd, flattenItem } from '../core/queue_md.mjs'
 
 import { chalk, die } from '../util/chalk.mjs'
 import { config } from '../config/env.mjs'
 
 const { projectDir: PROJECT_DIR, queuePath: QUEUE_PATH } = config
-
-const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
 
 const usage = (code = 2) => {
   console.error(`\
@@ -66,49 +65,16 @@ if (sub === '-h' || sub === '--help') usage(0)
 // --- QUEUE.md parser/serializer (preserves headers + whitespace) ---
 
 const parseQueue = () => {
-  if (!existsSync(QUEUE_PATH)) {
-    return { header: ['# Work queue', ''], sections: SECTIONS.map((name) => ({ name, items: [] })) }
-  }
-  const lines = readFileSync(QUEUE_PATH, 'utf8').split('\n')
-  const sections = []
-  const header = []
-  let cur = null
-  let item = null
-  const flush = () => {
-    if (item && cur) cur.items.push(item)
-    item = null
-  }
-  for (const line of lines) {
-    const sec = line.match(/^## (.+)$/)
-    if (sec) {
-      flush()
-      cur = { name: sec[1], items: [] }
-      sections.push(cur)
-      continue
-    }
-    if (!cur) {
-      header.push(line)
-      continue
-    }
-    const li = line.match(/^- (.+)$/)
-    if (li) {
-      flush()
-      item = li[1]
-      continue
-    }
-    const cont = line.match(/^  (.+)$/)
-    if (cont && item) item += ' ' + cont[1]
-  }
-  flush()
-  // Drop empty placeholders (`- (none)`).
-  for (const s of sections) s.items = s.items.filter((it) => !it.startsWith('(none)'))
-  // Backfill missing canonical sections in canonical order so writes are stable.
-  const byName = new Map(sections.map((s) => [s.name, s]))
-  const ordered = SECTIONS.map((name) => byName.get(name) || { name, items: [] })
-  // Trailing trim of the header to a single blank line.
+  const { header, sections, missing } = readQueueMd(QUEUE_PATH)
+  // Fresh files get a stub heading; existing headers get trailing
+  // whitespace trimmed back to a single blank line so writes are stable.
+  if (missing) return { header: ['# Work queue', ''], sections: SECTIONS.map((name) => ({ name, items: [] })) }
   while (header.length && header[header.length - 1].trim() === '') header.pop()
   header.push('')
-  return { header, sections: ordered }
+  return {
+    header,
+    sections: SECTIONS.map((name) => ({ name, items: sections[name].map(flattenItem) })),
+  }
 }
 
 const serializeQueue = ({ header, sections }) => {

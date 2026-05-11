@@ -40,7 +40,9 @@ import {
 } from '../pipelines/pipelines.mjs'
 import { dispatchLifecycle } from '../core/dispatch_lifecycle.mjs'
 import { runHandler } from '../pipelines/handlers.mjs'
+import { writeJson } from '../util/fs.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { formatDuration } from '../util/proc.mjs'
 import { chalk, die } from '../util/chalk.mjs'
 import { config, dispatchEnv } from '../config/env.mjs'
 
@@ -136,8 +138,7 @@ if (sub === 'register') {
   catch (err) { die(`register: ${err.message}`, 1) }
 
   const target = pipelinePath(PROJECT_DIR, def.id)
-  mkdirSync(dirname(target), { recursive: true })
-  writeFileSync(target, JSON.stringify(def, null, 2) + '\n')
+  writeJson(target, def)
 
   appendWorkloadEvent(PROJECT_DIR, 'pipeline.registered', {
     pipeline_id: def.id,
@@ -947,13 +948,7 @@ if (sub === 'runs') {
     console.log()
     process.exit(0)
   }
-  const fmtDur = (ms) => {
-    if (ms == null) return chalk.dim('—')
-    if (ms < 1000) return `${ms}ms`
-    if (ms < 60000) return `${Math.round(ms / 1000)}s`
-    if (ms < 3600000) return `${Math.round(ms / 60000)}m`
-    return `${(ms / 3600000).toFixed(1)}h`
-  }
+  const fmtDur = (ms) => formatDuration(ms) || chalk.dim('—')
   for (const r of runs) {
     const stateColour =
       r.final_state === 'completed' ? chalk.green

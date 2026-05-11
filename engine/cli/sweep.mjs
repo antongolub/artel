@@ -38,6 +38,7 @@ import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { appendInfraEvent } from '../core/audit.mjs'
 import { listDispatches } from '../core/dispatches.mjs'
+import { readQueueMd, flattenItem } from '../core/queue_md.mjs'
 import { defaultGit, listWorktrees, removeWorktree } from '../git/worktree.mjs'
 import { listPipelineRuns } from '../pipelines/pipelines.mjs'
 import { chalk } from '../util/chalk.mjs'
@@ -106,24 +107,20 @@ if (Number.isNaN(keepN) || keepN < 0) {
 
 // --- collect active task slugs from QUEUE.md ---
 
-const ACTIVE_SECTIONS = new Set(['For Owner', 'In progress', 'Pending', 'Blocked'])
+const ACTIVE_SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked']
 
 const activeTaskSlugs = () => {
-  if (!existsSync(QUEUE_PATH)) return new Set()
+  const { sections } = readQueueMd(QUEUE_PATH)
   const slugs = new Set()
-  let inActive = false
-  for (const line of readFileSync(QUEUE_PATH, 'utf8').split('\n')) {
-    const sec = line.match(/^## (.+)$/)
-    if (sec) {
-      inActive = ACTIVE_SECTIONS.has(sec[1])
-      continue
+  for (const sec of ACTIVE_SECTIONS) {
+    for (const item of sections[sec]) {
+      const line = flattenItem(item)
+      // Match `[task: slug]` or `[task=slug]` or fall back to first slug-like token.
+      const tagged = line.match(/\[task[:= ]\s*([a-z0-9][a-z0-9._-]*)\]/i)
+      if (tagged) { slugs.add(tagged[1]); continue }
+      const m = line.match(/^(?:\[[^\]]+\]\s*)?([a-z0-9][a-z0-9._-]+)/i)
+      if (m) slugs.add(m[1])
     }
-    if (!inActive) continue
-    // Match `[task: slug]` or `[task=slug]` or fall back to first slug-like token.
-    const tagged = line.match(/\[task[:= ]\s*([a-z0-9][a-z0-9._-]*)\]/i)
-    if (tagged) { slugs.add(tagged[1]); continue }
-    const m = line.match(/^- (?:\[[^\]]+\]\s*)?([a-z0-9][a-z0-9._-]+)/i)
-    if (m) slugs.add(m[1])
   }
   return slugs
 }

@@ -192,6 +192,7 @@ export const ENGINE_FILES_CORE = [
   'engine/core/schema.mjs',
   'engine/core/cluster.mjs',
   'engine/core/queue_graph.mjs',
+  'engine/core/queue_md.mjs',
 ]
 // Everything a CLI script transitively needs that isn't a driver or a
 // core orchestration module. Order doesn't matter (cpSync each file

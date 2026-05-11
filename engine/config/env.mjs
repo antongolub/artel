@@ -17,9 +17,25 @@
 //      child process and have no platform-level defaults to compute.
 
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const trim = (s) => (typeof s === 'string' && s.length ? s : null)
+
+// Platform layout — the installed engine package. `import.meta.url`
+// resolves to `<platform>/engine/config/env.mjs`, so the platform root
+// is two dirs up. Test fixtures install the whole `engine/` tree under
+// a tempdir, so the same resolution still points at the fixture root.
+const PLATFORM_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+
+export const platformPathsFor = (platformDir) => ({
+  platformDir,
+  agentsDir:          join(platformDir, 'agents'),
+  platformSkillsDir:  join(platformDir, 'skills'),
+  platformDriversDir: join(platformDir, 'engine', 'drivers'),
+  cliDir:             join(platformDir, 'engine', 'cli'),
+  runPath:            join(platformDir, 'engine', 'cli', 'run.mjs'),
+})
 
 // Project-relative path layout. Pulled out so per-projectDir helpers
 // (pipelinesDir(root), pipelineCancelsDir(root), etc.) share the same
@@ -51,8 +67,10 @@ export const createConfig = ({
   home = homedir(),
 } = {}) => {
   const projectDir = trim(env.ARTEL_PROJECT_DIR) || cwd
+  const platformDir = trim(env.ARTEL_PLATFORM_DIR) || PLATFORM_DIR
   return {
     ...pathsFor(projectDir),
+    ...platformPathsFor(platformDir),
 
     // Engine-session caches outside the project tree.
     userDriversDir:     trim(env.ARTEL_USER_DRIVERS_DIR)    || join(home, '.artel', 'drivers'),
