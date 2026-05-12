@@ -46,16 +46,16 @@ implementations later requires no migration.
 | # | Title | Status | Why deferred |
 |---|---|---|---|
 | V1 | Repository abstraction + non-fs backends | `[v2]` | Refactor; fs behavior works for parent project today. |
-| V2 | Queue graph model | `[v2]` | Flat sections in `QUEUE.md` cover parent project's flow. |
-| V3 | Pipeline registry + engine | `[v2]` | Orchestrator does flow-routing in-LLM today. Formalisation post-MVP. |
+| V2 | **Queue graph model (V2.1 nodes + V2.2 edges)** | `[done]` | **V2.1 (nodes):** event-sourced read-side over `queue_node.*` workload events. `engine/core/queue_graph.mjs#buildGraph(projectDir)` replays into `{ nodes, edges }` snapshot. Mutators (`artel queue add / move / rm`) emit canonical events alongside `QUEUE.md`. New subcommands `artel queue ready` (dispatchable Pending) and `artel queue graph` (snapshot, `--json`). **V2.2 (edges):** `queue_edge.*` workload events with seven relations (`blocks` / `depends_on` / `supersedes` / `parent_of` / `triggers` / `derived_from` / `same_pipeline_run`); identity is the tuple `(relation, from, to)`. Gating relations (`blocks`, `depends_on`) participate in dispatch readiness — a Pending node with unresolved gating inbound is effectively `Blocked`. `effectiveStatus` overlays this on declared status (In progress / Recently done are sticky). `findGatingCycle` does DFS at link time so cycles never persist. New CLI: `artel queue link <from> <to> --relation <R>` and `unlink ...`; `ready` surfaces "Held by upstream" hint; `graph --json` includes `edges` + per-node `effective_status`. 345 tests green (28 new — 18 graph unit covering edge replay / effectiveStatus / readyForDispatch filtering / cycle detection + 10 e2e covering link/unlink/cycle-rejection/ready-with-edges/graph-with-edges). |
+| V3 | **Pipelines (V3.1–V3.10.e)** | `[done]` | Declarative multi-step orchestration. **6 node types**: `dispatch` / `parallel` / `condition` / `handler` / `subpipeline` / `terminal`. **4 handler builtins**: `exec` (bash -c), `assert` (predicate guard), `set_attr` (mutate run attrs), `git_tag`. **Predicate vocabulary**: atomic `equals`/`ne`/`in`/`exists`/`gt`/`gte`/`lt`/`lte` + compounds `not`/`and`/`or` (recursive). **Templates** `{{ dotted.path }}` substitute against merged attrs scope in dispatch prompts, assert messages, set_attr values, set_attr unset paths, subpipeline attrs. **Joins**: `all-complete` (worst-of-children), `any-complete`, `k-of-n` with first-success cancellation via `AbortController`. **Worktrees**: parallel branches each isolate via `git worktree`; subpipelines as parallel branches force their dispatches to worktree mode via `ARTEL_PIPELINE_FORCE_WORKTREE`. **Cancellation cascades** end-to-end: master `runAbort` → linear/branch signals → `builtin.exec` SIGTERM/grace/SIGKILL → subpipeline child sentinels. **Operator cancel**: `artel pipeline cancel <run-id>` writes a sentinel polled by walker (500ms cadence). **Subpipelines** spawn child as subprocess via same CLI; cycle detection via `--parent-chain`; `inherit_attrs` opt-in; allowed as parallel branches. **Per-node `timeout_ms`** with suffix syntax (`'500ms'`/`'60s'`/`'5m'`/`'2h'`/`'1d'`) via shared `parseDuration`. **Schema** at `.artel/pipelines/<id>.json`. **Workload events**: `pipeline.*`, `pipeline_run.*` (with `parent_pipeline_run_id` linkage), `pipeline_handler.*`, `pipeline_subpipeline.*`. **CLI**: `register` / `list` / `show` / `run` / `runs` / `status` / `cancel`. 676 tests green (~190 across V3 — 110 unit + 80 e2e). V3.x open: `builtin.git_squash` / `builtin.git_merge`, `pause` / `signal`, set_attr in parallel branches with merge contract. |
 | V4 | Capability manifest + federation | `[v2]` | Parent project is single-cluster. |
 | V5 | Real claim/lease + fence enforcement | `[v2]` | Federation-only. Field reserved in C2; enforcement follows. |
 | V6 | **Driver plugin overlay loader** | `[done]` | `engine/util/drivers.mjs` resolves `<engineId>.mjs` across three layers (project `.artel/drivers/` → user `~/.artel/drivers/` → platform). `loadDriver` validates the contract (`args` required); `discoverDrivers` returns `{id, source, module}` for every visible engine. `run.mjs` and `dispatch_lifecycle.mjs` use the loader; `probe.mjs` discovers all drivers dynamically and shows `(project)` / `(user)` overlay markers. `api_version` already exported by all in-tree drivers (since C5). 143 tests green (12 new — 8 unit on loader + 3 overlay e2e + 1 driver-list assertion). |
 | V7 | Infra reconcile pass + availability events | `[v2]` | `cluster.heartbeat` ships in C2; `role.*` / `engine.*` lifecycle events when needed. |
 | V8 | **Replay tooling** | `[done]` | `artel replay <task | dispatch-id>` re-runs a past dispatch on the same or a different engine. Resolves target by slug (most-recent meta) or UUID v7 dispatch_id; pulls role + prompt from `.meta` and `.prompt` sidecars; spawns a new dispatch with auto-generated slug `<orig>-replay-<short>` and `--retry-of <orig-id>` so the chain reconstructs from events.jsonl. Flags: `--engine`, `--model`, `--task` (override slug), `--effort`, `--sandbox`, `--tools`, `--permission-mode`, `--timeout-ms`. Errors helpfully when target / prompt missing. 162 tests green (6 new e2e). |
-| V9 | Mid-run heartbeats from lifecycle | `[v2]` | Checkpoint API covers observability gap. |
+| V9 | **Mid-run heartbeats from lifecycle** | `[done]` | Lifecycle emits a `heartbeat` event every `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) until the child exits or settles, plus updates `.meta.lastHeartbeatAt` + `.meta.pidAlive`. `0` disables. `heartbeat` added to reserved workload types in schema. `interval.unref()` so a stuck heartbeat can never keep node alive past settle. Status RUNNING gets a `hb Ns ago` annotation coloured by freshness (green ≤90s, yellow ≤5m, red older). 176 tests green (5 new — 4 unit + 1 status e2e). |
 | V10 | **Dispatch deltas + git context in telemetry** | `[done]` | `engine/util/git.mjs` exposes `gitContext` + `gitDelta`. Lifecycle calls `gitContext` pre-`markRunning` (captures `commit_sha` / `branch` / `repo_name` — origin URL parsed; SSH + HTTPS; falls back to project basename). Calls `gitDelta(commit_sha)` post-exit (working-tree diff via `git diff --shortstat <sha>` covers committed + uncommitted, tracked-only). Both flow into `dispatch.start` / `dispatch.end` event payloads + `.meta` sidecar. `status.mjs` RECENT row gets `+N/-M` delta annotation when present. Tolerates non-git dirs / git-not-on-PATH. 131 tests green (20 new — 11 git unit + 1 spawn e2e + 1 status e2e + existing). |
-| V11 | **Agent identity & truststore** | `[v2]` | Agents commit under their own identity, not the owner's. (a) Dedicated `name <email>` + signing key per agent / cluster; (b) SSH key separate from owner's for push; (c) truststore abstraction for agent credentials (tokens / OAuth / SSH / API keys) — mounted into the dispatch env on demand, not embedded in events. Lives outside `events.jsonl` (operational state, not history). Open: in-tree under `.artel/trust/` with strict file perms vs external secret manager (1Password / pass / OS keychain) integration. Drives §C10 follow-up: "only owner commits to master" is a current invariant; agent-identity commits don't relax that — the agent-branch protocol still funnels through owner review at the master boundary. |
+| V11 | **Agent identity & credentials (truststore)** | `[done]` | **V11.1 (identities):** `.artel/trust/identities.json` registers named git identities. Roles declare `identity: <name>`; lifecycle injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` / `GIT_SSH_COMMAND`. **V11.2 (credentials):** `.artel/trust/credentials.json` (gitignore) holds opaque secrets. Roles declare `requires: <NAMES>`; lifecycle merges into spawn env, strict on missing. CLI shows names only. **V11.3 (mutators + keygen):** `artel trust` is multi-subcommand — `set-identity` / `delete-identity` / `set-credential` (stdin or `--from-env`, never `--value`) / `delete-credential` / `gen-ssh` (ed25519, prints pubkey on stdout for `\| gh repo deploy-key add -`). Atomic writes; credentials.json auto-`chmod 600`. **V11.4 (encryption at rest):** AES-256-GCM via pure node `crypto`. Master key (32 random bytes, base64) at `~/.config/artel/master.key` by default — overridable via `ARTEL_MASTER_KEY_FILE` (path) or `ARTEL_MASTER_KEY` (inline base64, for CI). `artel trust gen-key [--print]` writes the key 0600. `artel trust encrypt` seals existing creds in place to `credentials.json.enc` (fresh IV per write); `decrypt` reverses. Mode auto-detected by file shape; mutators reseal on every write; reads transparently decrypt. Auth-tag failure or wrong key throws helpful error. `artel trust list` shows mode badge (empty / plaintext / encrypted). Encrypted creds still flow into dispatch env via existing `requires:` path. 267 tests green (91 new across V11.1–V11.4). |
 
 ## Open questions — defaults locked
 
@@ -79,6 +79,646 @@ Owner answered "Ok" + MVP-pivot on 2026-05-02 → defaults locked:
 
 ## Revision log
 
+- **2026-05-10** — V3.10.e — subpipeline observability events.
+  Closes the gap V3.10.a-d left: `pipeline status <parent>` now
+  shows subpipeline steps. Mirror of V3.7.b handler-events
+  pattern. New workload event types `pipeline_subpipeline.start` /
+  `pipeline_subpipeline.end` reserved in
+  `engine/core/schema.mjs#RESERVED_TYPE_PREFIXES`. Walker emits
+  start (`subpipeline_id` UUIDv7 join key, `child_run_id`,
+  `child_pipeline_id`, snapshot of `attrs` + `inherit_attrs`,
+  `pipeline_parallel_of` when in a branch) before the child
+  spawn, end (disposition / exit_code / duration_ms) after exit.
+  `pipelineRunDetail` joins them; `kind: 'subpipeline'` steps
+  surface alongside dispatch + handler, interleaved by start
+  time. `status` text renderer adds a subpipeline row showing
+  `child_pipeline_id` + run-id fragment + disposition; drilldown
+  hint extended to mention `artel pipeline status <child-run>`.
+  676 tests green (3 new — 2 unit on pipelineRunDetail
+  subpipeline-only join + mixed-kind interleave, 1 e2e on events
+  + status --json + text rendering; schema test extended).
+- **2026-05-10** — V3.10.a — `subpipeline` node type. Composition
+  primitive — pipelines invoke other pipelines as a subprocess via
+  the same `pipeline run` CLI. Schema: `{ pipeline_id, attrs? }`.
+  `attrs` map V3.5-templated against parent scope before being
+  passed as child's `--attrs`. New CLI flags `--parent-run` /
+  `--parent-node` plumb the linkage into child's
+  `pipeline_run.started` event as `parent_pipeline_run_id` /
+  `parent_pipeline_node_id`. Child exit code → parent step
+  disposition (0=success, else=error). Validator: pipeline_id is
+  a slug; rejects self-recursion + non-object attrs. Lazy
+  resolution — child pipeline_id checked at run time, not register
+  (parent + child can be registered in either order). Cycle
+  detection across the whole chain + parent-cancel cascade
+  deferred to V3.10.b. show renders `pipeline_id=<id> attrs={...}`
+  row. 661 tests green (10 new — 6 unit on validator (well-formed,
+  with-attrs, missing-pipeline-id, non-slug, self-recursion,
+  non-object-attrs), 4 e2e on child-success-links-to-parent +
+  templated-attrs-rendering / child-failure-routes-to-error-edge /
+  unregistered-child-fails-fast / show rendering; 1 existing
+  validator test updated to use `'pause'` as the unknown-type
+  example since `'subpipeline'` is now real).
+- **2026-05-10** — V3.7.f — `builtin.git_tag` handler. First concrete
+  git operation in the handler family. `node.name` (required) and
+  `node.message` (required unless `lightweight: true`) and optional
+  `node.target` (defaults to HEAD) are V3.5 template-rendered
+  against ctx.attrs at runtime. Spawns `git -C <projectDir> tag`
+  with `-a <name> -m <message>` for annotated (default) or just
+  `<name>` for lightweight; appends `<target>` ref when set. Stderr
+  captured (not inherited) so failure reasons surface in
+  `pipeline_handler.end` event's `error` field — git's first-line
+  diagnostic, capped to 200 chars. Disposition: success on git
+  exit 0; error on duplicate tag, malformed name, missing target
+  ref, template render failure. Events: `pipeline_handler.start`
+  snapshots `name` / `message` / `target` verbatim (templates
+  unrendered) plus `annotated: <bool>`; `pipeline_handler.end`
+  carries resolved `tag_name` + `target_resolved` (when set) +
+  `annotated` for forensics. Validator: name + message non-empty
+  string; lightweight is a boolean if set; target non-empty string
+  when set. `show` renders `name=<json> message=<json>` (or
+  `lightweight`) + optional `target=<json>`. Allowed in parallel
+  branches by validator (tag names are independent — no shared
+  mutable state at the userAttrs level), but abort signal not yet
+  wired to the spawned `git` (tags complete in ms, cancel window
+  tiny). 651 tests green (17 new — 7 unit pipelines validator
+  covering shape: name+message / lightweight-no-message / target /
+  missing-name / missing-message / non-bool-lightweight / empty-
+  target, 6 unit handlers (with real `git init` per test) covering
+  annotated success / lightweight success / template rendering /
+  duplicate tag error / missing-target-ref / template-render-
+  failure-leaves-no-tag, 4 e2e covering tag-lands-in-repo + events
+  resolved / duplicate-tag failure path / show rendering with
+  target / register error path).
+- **2026-05-10** — V3.7.d.b — `set_attr` dotted-path keys + `unset`.
+  Closes two deferred items from V3.7.d. New shape: keys in
+  `node.set` can be dotted paths (`'flags.deployed': true`,
+  `'config.timeout.ms': 30000`) for nested mutation; new optional
+  `node.unset` is an array of dotted-path strings to remove. At
+  least one of `set` / `unset` is required (validator rejects
+  empty-and-both-missing). Top-segment of any path still rejected
+  if it's a reserved pipeline-injected key (`pipeline_run_id`
+  etc.) — nested under another top key (`'flags.pipeline_run_id'`)
+  is fine. New helpers exported from `engine/util/pipelines.mjs`:
+  `writePath(obj, path, value)` (creates intermediate objects,
+  overwrites scalar/array intermediates with fresh object —
+  caller's intent honoured), `deletePath(obj, path)` (no-ops on
+  missing intermediate; only removes leaf), `deepMergeAttrs(target,
+  source)` (recursive merge of plain objects; arrays + scalars
+  overwrite). `setAttrBuiltin` (`engine/util/handlers.mjs`) now
+  builds nested `result.attrs` via `writePath` after V3.5 template
+  rendering of string values; flat `set_resolved` view returned
+  alongside for events; `result.unsets` mirrors `node.unset`.
+  Walker (`runHandlerNode`) deep-merges `result.attrs` into
+  `userAttrs` (instead of shallow `Object.assign` — siblings under
+  shared top key preserved) and applies `result.unsets` via
+  `deletePath`. Atomicity preserved: template error → no partial
+  mutation. Event payloads: `pipeline_handler.start` snapshots
+  `set` + `unset` verbatim (templates unrendered);
+  `pipeline_handler.end` carries `set_resolved` (when non-empty) +
+  `unset_resolved` (when non-empty). `show` renders both.
+  Parallel-branch rejection unchanged (concurrent userAttrs writes
+  still race). Back-compat: existing flat-set pipelines work
+  identically — `Object.assign` semantics fall out of deep-merge
+  for flat sources. 634 tests green (27 new — 14 unit pipelines
+  on writePath / deletePath / deepMergeAttrs + dotted-key validator
+  + unset validator + reserved-top-segment + nested-vs-toplevel +
+  set/unset shape variations, 7 unit handlers on nested mutation /
+  unset-only / set-only / both / template rendering in nested
+  values, 3 e2e on dotted+unset reaching downstream dispatch via
+  .meta + rendered prompt + events / unset-only flow / show
+  rendering with both fields; 2 existing tests updated for new
+  validator messages).
+- **2026-05-10** — V3.9.b — suffix syntax for `timeout_ms`.
+  Pipelines can now write `timeout_ms: '60s'` / `'5m'` / `'2h'` /
+  `'1d'` instead of raw milliseconds. Same parser handles dispatch
+  nodes, `handler.exec` nodes, and `dispatchLifecycle`'s env-var /
+  built-in default fallback — single source of truth means
+  validator's accept-set matches what the runtime parses. New
+  `parseDuration(raw, label?)` exported from `engine/util/proc.mjs`:
+  accepts `null`/`undefined`/`''` → returns null; positive integer
+  → ms; string of `<n>` (digits only, ms) or `<n><suffix>` (suffix
+  ∈ {`ms`, `s`, `m`, `h`, `d`}). Rejects zero / negative /
+  fractional / `Infinity` / `NaN` / non-string-non-number /
+  malformed strings (`'60sec'`, `'60x'`) / internal whitespace
+  (`'60 s'`); accepts leading/trailing whitespace via `.trim()`.
+  `dispatch_lifecycle.mjs#parseTimeoutMs` collapsed to a thin
+  delegator. Pipelines validator's dispatch + handler.exec
+  `timeout_ms` checks delegate to `parseDuration`; error format
+  unified to `"<label> must be a positive integer ms or string
+  with suffix (ms|s|m|h|d), got: <value>"`. `handler.exec` runtime
+  re-parses at execution time (validator + runtime in lockstep).
+  607 tests green (14 new — 10 unit on parseDuration covering null
+  passthrough / number passthrough / 5 suffixes / bare-number
+  string / trim / fractional+zero+negative rejection / malformed /
+  Infinity+NaN / non-types / labeled errors, 1 unit pipelines for
+  dispatch suffix accept, 3 e2e covering suffix flows through
+  walker for both dispatch + handler.exec + register accepts +
+  rejects malformed). Existing V3.7.a + V3.9 validator tests
+  updated (5 regex updates) for new error format; one V3.9 test
+  case (`'60s'` was previously expected to throw) repurposed into
+  a positive case under V3.9.b.
+- **2026-05-10** — V3.9 — node-level `timeout_ms` on dispatch nodes.
+  Closes the "branch-level timeout budgets" backlog item via the
+  broader gap it pointed at: `dispatch` nodes had no per-node
+  timeout — `timeout_ms` only worked on `handler.exec`. Now every
+  dispatch can declare its own budget, plumbed through
+  `dispatchLifecycle` as `timeoutMs` (which already supports the
+  full SIGTERM → grace → SIGKILL machinery from V3.3.c). Falls
+  back to `ARTEL_DISPATCH_TIMEOUT_MS` env / built-in default when
+  the field is absent — back-compat preserved for every existing
+  pipeline definition. Validator (in `engine/util/pipelines.mjs`)
+  requires positive finite number when set; null/undefined treated
+  as absent. Walker (`runDispatchNode`) passes `timeoutMs:
+  node.timeout_ms ?? null` unconditionally — the lifecycle's
+  fallback handles the absent case. `show` renders `timeout_ms=N`
+  on the dispatch row when present. The same field works
+  identically at top level (linear dispatch) and inside parallel
+  branches, giving operators per-branch budgets without coupling
+  to the whole-run timeout. 593 tests green (9 new — 5 unit on
+  validator (positive number / back-compat / zero+negative
+  rejection / non-numeric+Infinity+NaN rejection / null+undefined
+  absent), 4 e2e on hanging-dispatch-times-out / per-branch-budgets
+  round-trip / show rendering / register error path).
+- **2026-05-09** — V3.8.b — `artel sweep` prunes stale pipeline-cancel
+  sentinels. Closes the deferred item from V3.8 §11.10. Sweep
+  cross-checks events.jsonl via `listPipelineRuns({ limit: null })`
+  to build a set of terminated run_ids; sentinels for those past
+  `--older-than` are pruned. **In-flight sentinels never swept** —
+  they're the live cancel signal, removing them mid-cancel would
+  silently neutralise an operator's intent. Three skip reasons:
+  `in-flight` (no `pipeline_run.ended` yet — keeps walker's signal
+  alive), `fresh` (mtime within `--older-than`). `cluster.swept`
+  event gains `pipeline_cancels_removed` count alongside existing
+  `dispatches_removed` / `worktrees_removed`. JSON output includes
+  `pipeline_cancels_swept` array (full run_id + path + mtime_iso)
+  + `pipeline_cancels_held` count. Text rendering adds a
+  "pipeline-cancel sentinels" subsection mirroring the worktrees
+  block. Missing `.pipeline-cancels/` directory handled gracefully
+  (existsSync guard — no error). 584 tests green (5 new e2e —
+  removes-stale / in-flight-protected / fresh-protected /
+  dry-run-preserves / missing-dir-noop).
+- **2026-05-08** — V3.8 — operator cancel of in-flight pipeline run.
+  Closes the cancellation story end-to-end: V3.3.c added quorum-met
+  cancel within parallel; V3.7.e extended cancel to handler.exec;
+  V3.8 lets operators cancel an entire run from a separate
+  process/terminal. Sentinel-file design — `artel pipeline cancel
+  <run-id>` writes `.artel/.pipeline-cancels/<run-id>`; walker polls
+  every 500ms and on detection aborts a master `runAbort`
+  AbortController. runAbort cascades to: (1) linear dispatch +
+  handler steps via `opts.signal` plumbing, and (2) every
+  per-branch parallel controller via an event listener that fires
+  all of them. `engine/util/pipelines.mjs` exports
+  `pipelineCancelsDir(projectDir)` + `pipelineCancelPath(projectDir,
+  runId)` helpers. New `cancel` subcommand on `artel pipeline`:
+  resolves fragment → full run_id (same logic as `status`); rejects
+  unknown runs and already-terminal runs (final_state set); writes
+  empty-file sentinel + prints `cancel signal sent for run <fragment>`.
+  Walker emits `pipeline_run.ended` with `final_state: 'aborted'`
+  and `abort_reason: 'cancelled by operator: <fragment>'` regardless
+  of how individual branches/steps settled — operator cancel always
+  beats step disposition at the run level. Cleanup: walker
+  `clearInterval(cancelWatcher)` before exit; sentinel file remains
+  on disk as forensic evidence (sweep prune deferred). Choice of
+  polling vs PID/SIGTERM: polling is cross-platform, doesn't depend
+  on signal semantics, and works for cross-machine setups (future
+  federation). 500ms poll cadence balances responsiveness against
+  fs cost — `existsSync` is ~microseconds. 579 tests green (3 new
+  e2e — cancel-rejects-unknown / cancel-rejects-terminal /
+  cancel-mid-flight-aborts-long-running-handler with async
+  `node:child_process.spawn` + poll-for-pipeline_run.started +
+  cancel CLI + await proc exit + assert events). Choice notes:
+  Cancel takes precedence over step dispositions at the run level —
+  even if every branch happened to succeed before the cancel cascade
+  reached them, the run is still `aborted`. This matches
+  user intent: "cancel" means "end this run", not "skip the next
+  step".
+- **2026-05-08** — V3.7.e — handlers in parallel branches.
+  Lifts the V3.2.a restriction where `parallel.branches` had to
+  reference dispatch nodes. Now accepts dispatch OR handler
+  (`builtin.exec` / `builtin.assert`); `builtin.set_attr`
+  explicitly rejected at register because concurrent siblings
+  writing to shared `userAttrs` would race. Validator error
+  messages updated to mention "dispatch or handler" in the
+  rejection. `engine/cli/pipeline.mjs` extracts
+  `runHandlerNode(id, parallelOf, opts)` (mirroring
+  `runDispatchNode`) and adds `runBranchNode(id, parentId, opts)`
+  dispatcher that switches by node type. Parallel walker swaps
+  its inner call from `runDispatchNode` to `runBranchNode`. Handler
+  events emitted from a parallel branch include
+  `pipeline_parallel_of` field for join-key parity with dispatch
+  branches. Mutation guard: `runHandlerNode` only applies
+  `result.attrs` to `userAttrs` when `parallelOf == null` —
+  belt-and-suspenders alongside the validator rejection.
+  `engine/util/handlers.mjs#execBuiltin` learned to honour
+  `ctx.abortSignal`: on abort, SIGTERM the child immediately,
+  then SIGKILL after a 5s grace window. New disposition
+  `cancelled` distinct from `timeout`/`error`. Cancel takes
+  precedence over timeout if both fire (intentional teardown
+  beats budget exhaustion). `builtin.assert` and
+  `builtin.set_attr` ignore the signal — synchronous, complete
+  in microseconds, no cancel surface. 576 tests green (7 new — 4
+  unit on validator-allows-handler-branches + reject-set_attr +
+  exec-cancel-signal + cancel-precedence-over-timeout, 3 e2e on
+  mixed dispatch+handler.exec+handler.assert parallel run + race
+  with slow exec cancelled + register rejects set_attr in
+  branch). 2 existing tests updated to reflect lifted
+  restriction.
+- **2026-05-08** — V3.7.d — `builtin.set_attr` mutates run attrs.
+  Completes the handler data-flow story (V3.7.c assert reads;
+  V3.7.d set_attr writes). `node.set` is a flat object of
+  `{ key: scalar | null }` pairs; string values get V3.5 template-
+  rendered against the current attrs scope before merge.
+  `setAttrBuiltin` returns `{ disposition, attrs, set_resolved }`;
+  walker shallow-merges `result.attrs` into `userAttrs` only on
+  success — atomic, no partial mutation on template error.
+  Validator rejects: empty `set`, non-object `set`, object/array
+  values, dotted-path keys (deferred), and reserved
+  pipeline-injected keys (`pipeline_run_id` / `pipeline_id` /
+  `pipeline_node_id` / `pipeline_parallel_of`). Pipeline-injected
+  ids are respread per step regardless, so overriding is
+  technically benign but rejected for clarity. Mutation contract
+  formalised: any handler returning `{ ..., attrs }` asks the
+  walker to merge — `builtin.exec` and `builtin.assert` don't, so
+  back-compat preserved. Event payloads: `pipeline_handler.start`
+  carries the verbatim `set` spec (template strings unrendered);
+  `pipeline_handler.end` carries `set_resolved` (post-template).
+  `show` renders `<id> handler builtin.set_attr set=<json>`. 569
+  tests green (17 new — 8 unit pipelines on validator (well-formed,
+  empty set, array, object value, array value, reserved key,
+  dotted-path), 5 unit handlers (basic merge, scalar passthrough,
+  template rendering against ctx.attrs, atomic error path,
+  no-recursion guarantee), 4 e2e (downstream visibility through
+  `.meta` taskAttrs + rendered prompt, set + set_resolved in
+  events, render error aborts run, show rendering)).
+- **2026-05-08** — V3.7.c — `builtin.assert` predicate-guard handler.
+  Adds the second handler builtin alongside V3.7.a's `builtin.exec`.
+  Pure-function (no I/O, no spawn): evaluates `node.if` (V3.6
+  predicate vocabulary — atomic + compound + comparisons,
+  recursive) against run attrs; success on true, error on false.
+  Optional `node.message` (string, V3.5 template-rendered against
+  the same attrs scope) lands in the `pipeline_handler.end`
+  event's `error` field for forensics — bad templates surface as
+  `[message render failed: ...]` rather than crashing the walker.
+  Handler ctx grew an `attrs` field (merged user `--attrs` +
+  pipeline-injected ids) so read-from-state builtins can see run
+  data; `builtin.exec` ignores it. `pipeline_handler.start`
+  payload for assert snapshots the predicate + message template
+  so operators can read back what gate fired without
+  cross-referencing the pipeline definition. `show` renders
+  asserts via the same `renderPredicate` recursive helper as
+  `condition`. `engine/util/handlers.mjs` now imports from
+  `pipelines.mjs` (`evaluatePredicate` + `renderTemplate`) — clean
+  one-way dep, no cycle (pipelines.mjs only references handler
+  builtin names statically). 552 tests green (17 new — 5 unit
+  pipelines on validator shape + nested predicate path errors +
+  message string check, 7 unit handlers covering true/false /
+  custom message / compound predicate / missing attrs / template
+  error path / dotted-path / fail-closed comparisons, 5 e2e on
+  predicate-true-success-edge / predicate-false with rendered
+  message in event + status / compound predicate routing / show
+  rendering / linear flow).
+- **2026-05-08** — V3.7.b — handler observability events + status
+  integration. Closes the V3.7.a wart where handler steps were
+  invisible to `artel pipeline status`. New workload event types
+  `pipeline_handler.start` / `pipeline_handler.end` reserved in
+  `engine/core/schema.mjs`. Walker emits start (with handler_id /
+  cmd / timeout_ms / pipeline_run_id / pipeline_node_id) before
+  invoking `runHandler`, and end (with disposition / exit_code /
+  signal / duration_ms / error?) after — including in the catch
+  branch so a thrown handler still gets a record. `handler_id` is
+  a fresh UUIDv7 per step, used as the join key (handler events
+  carry it top-level rather than via `task_attrs.dispatch_id` —
+  handlers don't go through dispatch_api). `pipelineRunDetail`
+  reshapes its accumulator: each step now has `kind:
+  'dispatch' | 'handler'` and the relevant per-kind fields
+  (handler steps carry handler / cmd / exit_code / signal /
+  duration_ms / timeout_ms / error). Steps are interleaved by
+  `started_at` so a chain of `handler → dispatch → handler` shows
+  up in execution order. `status` text renderer adds a handler row
+  format (cmd fragment in the task slot, "handler" + builtin name
+  in the role/engine slots). 535 tests green (4 new — 3 unit
+  pipelinesRunDetail covering handler step join / interleave /
+  timeout payload + 1 e2e end-to-end through the walker emitting
+  events and `status --json` returning them; schema test extended
+  to cover the new prefixes).
+- **2026-05-08** — V3.7.a — `handler` node type with `builtin.exec`.
+  Adds the missing primitive between `dispatch` (LLM-driven) and
+  `terminal` / routing — platform actions run inline by the walker
+  with no role / engine / worktree / `.meta` sidecar. Disposition
+  flows through outgoing edges identically to `dispatch`. New file
+  `engine/util/handlers.mjs` exposes
+  `runHandler(node, ctx)` returning
+  `{ disposition, exitCode, signal, durationMs }`; the BUILTINS map
+  registers each implementation. V3.7.a ships `builtin.exec` only
+  — `bash -c <cmd>` in `ctx.projectDir` with stdio: 'inherit' so
+  the operator sees the command output inline. Optional
+  `timeout_ms` field; on timeout the walker emits SIGTERM (no
+  grace window in V3.7.a — added when handler abort joins parallel
+  cancellation work). `engine/util/pipelines.mjs` adds `handler`
+  to `VALID_NODE_TYPES` + new `VALID_HANDLERS` set + per-handler
+  shape validators (cmd non-empty, timeout_ms positive finite).
+  Reachability already handles edge-walking, so handler nodes
+  participate without changes. Parallel branches still restricted
+  to dispatch nodes (V3.2.a rule preserved — handler-in-branch
+  needs cancellation work that lands later). `engine/cli/pipeline.mjs`
+  walker adds the handler case; `show` renders
+  `<id> handler <name> cmd=<json> timeout_ms=<n>`. 531 tests green
+  (23 new — 9 unit pipelines on validator shape + reachability +
+  parallel-branch rejection, 8 unit handlers on dispatch + exec
+  exit codes / cwd / shell features / timeout / syntax error,
+  6 e2e on success edge / error edge / timeout / register error /
+  show rendering / handler-then-dispatch chaining). Observability
+  gap noted: handler steps don't yet appear in
+  `artel pipeline status` (no `pipeline_handler.start/.end`
+  events) — deferred to V3.7.b.
+- **2026-05-08** — V3.6 — condition predicate vocabulary expansion.
+  `engine/util/pipelines.mjs` adds compound predicates and
+  comparison operators on top of the V3.2.b atomic vocabulary.
+  Compounds (recursive, no `attr`): `not: <pred>` (single nested),
+  `and: [<pred>, ...]` (non-empty array), `or: [<pred>, ...]`
+  (non-empty array). New atomics: `gt`/`gte`/`lt`/`lte` (numeric;
+  fail-closed on missing or non-numeric attr — non-numeric values
+  never silently take a comparison branch) and `ne` (strict !==,
+  accepts any value). New exports `VALID_ATOMIC_OPS` /
+  `VALID_COMPOUND_OPS`; `VALID_PREDICATE_OPS` kept (combined set)
+  for back-compat with V3.2.b importers. Validator extracted into
+  recursive `validatePredicateShape(pred, source, nid, path)` —
+  errors include the full dotted path
+  (e.g. `.if.and[0].not.attr`) so operators can pinpoint which
+  nested predicate is broken. `evaluatePredicate` recurses through
+  compounds before falling through to the atomic switch, so order
+  is: `not` → `and` (every) → `or` (some) → atomic. Compounds
+  short-circuit naturally via JS `&&` / `||`. `engine/cli/pipeline.mjs`
+  gets a `renderPredicate(pred)` helper used by `show` to print
+  nested predicates compactly: `not(...)`, `(p1 and p2)`,
+  `(p1 or p2)` with atomic leaves rendered as
+  `<attr> <op> <value>`. 508 tests green (22 new — 17 unit on
+  validator compounds / validator comparisons / evaluator
+  compounds / evaluator comparisons + 5 e2e on and/or-with-not /
+  gte routing / register error path / show nested rendering).
+- **2026-05-08** — V3.5 — prompt template substitution.
+  `engine/util/pipelines.mjs` exposes `renderTemplate(template,
+  scope)` — `{{ dotted.path }}` substitution against the merged
+  attrs blob (user `--attrs` JSON + pipeline-injected
+  `pipeline_run_id` / `pipeline_id` / `pipeline_node_id` /
+  `pipeline_parallel_of`). Reuses the existing `readPath` helper
+  used by `evaluatePredicate` so both V3.2.b condition predicates
+  and V3.5 templates share scope semantics. Whitespace-tolerant
+  (`{{x}}`, `{{ x }}`, `{{  x  }}`). Fail-fast: missing attribute,
+  null/undefined, or object/array value all throw with helpful
+  errors caught by `runDispatchNode` and surfaced as the run's
+  `abort_reason`. Coerces scalar (string|number|boolean) to string
+  via `String(v)`. No recursion: substituted values aren't
+  re-scanned (closes the infinite-loop foot-gun). Vocabulary
+  intentionally minimal — no conditionals, loops, filters, or
+  escapes; literal `{{` is reserved (encode via the scope if a real
+  prompt needs that bigraph). Walker integration: `runDispatchNode`
+  builds `taskAttrs` once, renders `node.prompt` against it, passes
+  rendered string to `dispatchLifecycle`. Render errors flow
+  through the same `__error` channel as dispatch throws, so the
+  parallel walker also handles them (sibling cancel + abort). 486
+  tests green (16 new — 12 unit covering substitution / dotted
+  paths / whitespace / coercion / missing-attr / object-rejection /
+  pipeline-injected ids / no-recursion + 4 e2e covering
+  --attrs+injected-ids substitution / missing-attr abort /
+  parallel branches / no-template back-compat).
+- **2026-05-08** — V3.3.c — `any-complete` / `k-of-n` parallel joins
+  with cancellation. `engine/util/pipelines.mjs` extends
+  `VALID_JOIN_POLICIES` to `{all-complete, any-complete, k-of-n}`;
+  k-of-n requires integer `k` in `[1, branches.length]` (validated at
+  register). New helpers `quorumOf(node)` (1 for any-complete, `k`
+  for k-of-n, `branches.length` for all-complete) and
+  `aggregateForJoin(dispositions, join, k)` (success once quorum is
+  met regardless of trailing branches; otherwise falls through to
+  `aggregateDisposition` worst-of-children). `aggregateDisposition`
+  itself now filters out `cancelled` first — a cancelled branch
+  reflects intentional teardown, not a real outcome.
+  `engine/core/dispatch_lifecycle.mjs` accepts an `abortSignal`
+  option; on abort sends SIGTERM, then SIGKILL after the existing
+  termination-grace window. New `disposition: 'cancelled'` distinct
+  from error / timeout / parked. Worktree cleanup treats `cancelled`
+  like `success` (intentional, not forensic). `engine/cli/pipeline.mjs`
+  walker switches the parallel block from `Promise.all` to
+  progressive quorum collection: each branch gets its own
+  `AbortController`; `Promise.race` resolves them with index +
+  branchId so the walker can back-map; once `succeeded >= quorum` it
+  aborts siblings + collects trailing settles via `Promise.allSettled`.
+  `show` renders `k=` for k-of-n. 470 tests green (17 new — 13 unit
+  on join validator / quorumOf / aggregateForJoin / cancelled
+  exclusion + 4 e2e on first-success-wins / k=2-of-3 / all-fail
+  fallthrough / show k-of-n; e2e timing-tolerant — accept either
+  `cancelled` or `error` per branch but assert at least one was
+  actually cancelled).
+- **2026-05-04** — V3.4.a — pipeline run observability.
+  Two read-side helpers in `engine/util/pipelines.mjs`:
+  `listPipelineRuns(projectDir, { limit, pipelineId })` joins
+  `pipeline_run.started`/`.ended` from events.jsonl into
+  newest-first run summaries (run_id, pipeline_id, pipeline_version,
+  started_at, ended_at, final_state, last_node, last_disposition,
+  duration_ms, abort_reason). `pipelineRunDetail(projectDir, runId)`
+  reconstructs the per-node timeline by joining `dispatch.start`/`.end`
+  events tagged with the run_id via `task_attrs.pipeline_run_id` —
+  surfaces parallel_of for fan-out branches. New CLI subcommands
+  `artel pipeline runs [--limit N] [--pipeline <id>] [--json]` (one
+  row per run with state badge + duration + last node) and
+  `artel pipeline status <run-id-or-fragment> [--json]` (summary
+  block + Steps panel; trailing-fragment match for ergonomics).
+  In-flight runs (started, not yet ended) appear in `runs` without
+  a final_state. Pure read-side — events.jsonl is the source of
+  truth, no extra state. 453 tests green (18 new — 10 unit on
+  listPipelineRuns + pipelineRunDetail + 8 e2e on runs/status CLI
+  with full + fragment matching, --json shape, empty-state hint).
+- **2026-05-04** — V3.2.b + V3.3.b — closing V3 polish.
+  **Condition node (V3.2.b)**: pure routing without dispatch.
+  Predicate vocabulary: `equals` / `in` / `exists` over dotted-path
+  attrs (`pipeline_id`, `attrs.target`, `attrs.flags.skip_tests`).
+  Validator checks `then` / `else` references, exactly-one operator,
+  array shape for `in`, boolean for `exists`. Walker short-circuits
+  to the chosen branch — no event emitted (the route is implicit
+  in subsequent dispatch attrs). Reachability follows
+  `then`/`else`. **Worktree sweep (V3.3.b)**: `artel sweep` now
+  prunes orphaned `.artel/.worktrees/<branch>/` directories
+  cross-checked against `git worktree list` (so we don't fs-rm
+  paths that aren't in git's worktree registry, which would
+  corrupt it). Active QUEUE entries — by full branch or trailing
+  task slug — are held; `--older-than` threshold gates the rest.
+  Single `cluster.swept` event gains `worktrees_removed` field.
+  JSON output includes `worktrees_swept` array. 435 tests green
+  (22 new — 13 condition unit + 4 condition e2e + 5 sweep-worktrees
+  e2e guarded by `git --version`).
+- **2026-05-04** — V3.3.a landed: git worktrees + concurrent pipeline parallel.
+  `engine/util/worktree.mjs` exposes `createWorktreeForBranch` /
+  `removeWorktree` / `listWorktrees` / `worktreeDir`. Lifecycle gains
+  `useWorktree` (and `keepWorktreeOnSuccess`) options: branch is
+  created via `git branch -f` + `git worktree add` instead of
+  `git checkout -B` in main. Child dispatches run with cwd set to
+  the worktree path; V10 git context + delta capture runs there too.
+  Dirty-tree guard skipped in worktree mode (main untouched). On
+  success the worktree is removed; on parked/timeout/error it's kept
+  for the operator to `cd` in. Pipeline parallel branches now use
+  worktrees by default and dispatch via `Promise.all` — real
+  wall-clock concurrency. Operator stays on `master` while
+  dispatches work in isolation. `artel spawn --worktree` and
+  `--keep-worktree` flags exposed. Test fixture gitignores
+  `.artel/.worktrees/`. 413 tests green (17 new — 10 worktree unit
+  + 7 e2e). V3.3.b open: sweep prune for stale worktrees, true
+  cancellation for `any-complete` / `k-of-n` joins.
+- **2026-05-04** — V3.2.a landed: pipelines `parallel` node + all-complete join.
+  `engine/util/pipelines.mjs` validates parallel nodes (non-empty
+  branches, all dispatch-typed, no self-reference, no dups; default
+  join `all-complete`). Reachability follows parallel branches so a
+  parallel-only flow passes. New `aggregateDisposition` joins
+  branches via worst-severity rule (`error > timeout > parked > else
+  success`). Walker fans out sequentially (real concurrency over a
+  shared git working tree needs worktrees — V3.3); each branch's
+  taskAttrs carry `pipeline_parallel_of: <parent-node-id>` for
+  external filtering. `show` renders parallel rows; `run` logs each
+  branch's disposition + the aggregate. 396 tests green (18 new — 11
+  unit covering validator + aggregateDisposition + reachability + 7
+  e2e covering parallel happy path / failure aggregation / branch
+  attrs / show rendering). V3.2.b open: `any-complete` / `k-of-n`,
+  `condition` / `pause` / `signal` / `handler` / `subpipeline`.
+- **2026-05-04** — V3.1 landed: pipeline registry + linear runs.
+  `engine/util/pipelines.mjs` (parser/validator/resolveNext + listing
+  helpers); `engine/cli/pipeline.mjs` (register / list / show / run).
+  JSON pipeline files at `.artel/pipelines/<id>.json` with `dispatch`
+  + `terminal` node types and `on_disposition` edges. Validator
+  enforces structural integrity (slugs, refs, reachable terminal,
+  no edges from terminals). `run` walks synchronously via
+  `dispatchLifecycle`, picks next node via exact-disposition →
+  wildcard `*` fallback, propagates `pipeline_run_id` /
+  `pipeline_id` / `pipeline_node_id` into each dispatch's
+  `taskAttrs`, emits `pipeline_run.started` / `.ended`. Aborts
+  cleanly on dispatch throw or no matching transition (event has
+  `abort_reason`). DESIGN §11 still describes the full V3 (parallel
+  / condition / pause / handler / subpipeline) — V3.2+ open.
+  378 tests green (33 new — 13 unit + 20 e2e).
+- **2026-05-04** — V2.2 landed: queue graph edges + cycle detection.
+  `queue_edge.*` workload events with seven relations; gating subset
+  (`blocks` / `depends_on`) drives status derivation. `engine/core/
+  queue_graph.mjs` extended with `incomingEdges` / `outgoingEdges` /
+  `hasUnresolvedUpstream` / `effectiveStatus` / `findGatingCycle`
+  pure helpers. CLI gains `artel queue link` / `unlink` (validates
+  src/dst exist, rejects self-edges, rejects gating cycles before
+  emit); `ready` filters on gating with "Held by upstream" hint;
+  `graph --json` includes edges + `effective_status` per node.
+  `events.mjs` formatter renders `<from> --rel-> <to>` for edge
+  events. DESIGN §10.2 marked landed; §10.3 status contract reframed
+  as declared vs effective. 345 tests green (28 new — 18 graph unit
+  + 10 e2e). V2.3 (markdown ↔ events reconciliation; pipelines as
+  graph traversal patterns) remains open.
+- **2026-05-04** — V2.1 landed: queue graph (nodes-only).
+  `engine/core/queue_graph.mjs` replays `queue_node.*` workload events
+  from `events.jsonl` into `Map<slug, NodeState>`. `engine/util/audit.mjs`
+  factored to share envelope code; gains `appendWorkloadEvent` alongside
+  `appendInfraEvent`. `artel queue` mutators (`add` / `move` / `rm`)
+  switch from `queue.entry.*` infra to canonical `queue_node.*`
+  workload events (`queue.` dropped from infra reserved prefixes —
+  was speculative). New subcommands `artel queue ready` (dispatchable
+  Pending nodes, sorted by created_at) and `artel queue graph` (full
+  replay snapshot, `--json` for tooling). `events.mjs` formatter
+  surfaces `node=` / `status=` / `lane=` / `from=` for the new vocab.
+  DESIGN §10 rewritten — §10.1 V2.1 nodes (landed), §10.2 V2.2 edges
+  (reserved prefix `queue_edge.*`, deferred), §10.3 status projection
+  contract showing V2.1 explicit vs V2.2 derived. 317 tests green
+  (15 new — 9 graph unit + 6 e2e).
+- **2026-05-04** — `artel queue` + `artel sweep` (housekeeping pair).
+  **`artel queue`** is a programmatic editor for `.artel/QUEUE.md` —
+  `list` (`--section` filter, `--json`), `add` (slug + optional `--tag`
+  + free-text description, default section Pending), `move --to <S>`
+  (auto-stamps `[since <iso>]` when moving into In progress, strips
+  on exit), `done` (sugar for `move --to "Recently done"`), `rm`.
+  Bootstraps a missing QUEUE.md with the canonical 5-section
+  skeleton. Each mutation emits `queue.entry.*` infra events
+  (`queue.` added to RESERVED_TYPE_PREFIXES.infra).
+  **`artel sweep`** prunes `.artel/.dispatches/<task>.{meta,out,prompt}`
+  triplets older than `--older-than` (default 30d), excluding tasks
+  in active QUEUE sections (For Owner / In progress / Pending /
+  Blocked) and the newest `--keep N` dispatches (default 20).
+  `--dry-run` plans only; `--json` for scripts. Emits a single
+  `cluster.swept` summary event with file count + bytes freed.
+  Rejects malformed `--older-than`. 302 tests green (25 new — 14
+  queue + 9 sweep + 2 cross-checks).
+- **2026-05-04** — Trust audit log + examples/quickstart.
+  `engine/util/audit.mjs` exposes `appendInfraEvent(projectDir, type,
+  payload)` — wraps SCHEMA_VERSION + envelope baseline (id / at /
+  cluster_id / instance_id) for one-shot CLIs that aren't dispatch
+  contexts. `trust.` added to `RESERVED_TYPE_PREFIXES.infra`. Each
+  `artel trust` mutator (`set-identity` / `delete-identity` /
+  `set-credential` / `delete-credential` / `gen-ssh` / `gen-key` /
+  `encrypt` / `decrypt`) appends a `trust.*` infra event — values
+  NEVER recorded; only names + length + non-secret metadata. Failed
+  mutations don't emit. `artel events --kind infra` surfaces the
+  audit trail. `examples/quickstart/` ships a copy-and-go template
+  with `package.json` / `.gitignore` (covers credentials and keys) /
+  `.artel/QUEUE.md` skeleton + a README walkthrough of init → probe →
+  spawn → status / events → logs → replay → trust. 277 tests green
+  (10 new e2e for audit). DESIGN §13.6 audit-log entry can flip from
+  deferred → done in a follow-up.
+- **2026-05-04** — V11.4 landed: encryption at rest for credentials.
+  Pure-node `crypto.mjs` exposes `encryptJson` / `decryptJson` /
+  `generateMasterKey` / `loadMasterKey` / `masterKeyPath` (AES-256-GCM,
+  fresh IV per write, schema `secret-aes-256-gcm-v1`). Master key
+  default at `~/.config/artel/master.key` (XDG-aware), overridable via
+  `ARTEL_MASTER_KEY_FILE` (path) or `ARTEL_MASTER_KEY` (inline base64
+  — CI-friendly). `trust.mjs` gains `credentialsMode` /
+  `encryptCredentials` / `decryptCredentials`; `readCredentials` and
+  `writeCredentials` auto-detect mode and route through the cipher
+  when `.enc` is on disk. New CLI subcommands `gen-key` (writes 0600,
+  refuses overwrite), `encrypt` (seals plaintext → .enc + removes
+  plaintext, idempotent), `decrypt` (reverse). `artel trust list`
+  shows the mode badge. Encrypted creds still flow into dispatch env
+  via `requires:` — no change for downstream roles. 267 tests green
+  (30 new across crypto unit + trust integration + CLI e2e).
+  Encryption-at-rest closes V11. Per-cluster scoping + audit log
+  remain open follow-ups but are not blocking — flagged informally,
+  no [v2] entry filed.
+- **2026-05-04** — V11.3 landed: trust mutators + SSH keygen.
+  `artel trust` now multi-subcommand: `set-identity --author "N <e>"
+  [--ssh-key]`, `delete-identity`, `set-credential` (stdin or
+  `--from-env VAR` — never `--value` for shell-history safety),
+  `delete-credential`, `gen-ssh <identity> [--force]`. Atomic JSON
+  writes (rename-into-place); credentials.json auto-chmod 0600;
+  gen-ssh shells `ssh-keygen -t ed25519 -N ''`, writes to
+  `.artel/trust/keys/<name>`, updates identity's ssh_key, prints public
+  key on stdout (other output to stderr — pipe-friendly). 237 tests
+  green (21 new — 13 unit + 8 e2e + 3 keygen guarded by host
+  `ssh-keygen` availability). Encryption-at-rest deferred (V11.4 —
+  needs key-management design call).
+- **2026-05-04** — V11.2 landed: credential injection.
+  `.artel/trust/credentials.json` (gitignore!) — opaque token/secret
+  registry keyed by env-var name. Roles declare `requires: A, B, C` in
+  frontmatter; lifecycle resolves each via `resolveRequires` and merges
+  into spawn env. Strict — missing names throw before the child starts
+  (`requires: X but credentials.json is missing`). `artel trust list`
+  shows credential **names only** — values never exposed by CLI. JSON
+  shape changed to `{ identities, credentials: [names] }`. Truststore
+  values override operator env on name collision. 216 tests green
+  (21 new — 16 unit + 5 e2e).
+- **2026-05-04** — V11.1 landed: agent identity (truststore v1).
+  `.artel/trust/identities.json` registers named git identities (name +
+  email + optional ssh_key path); `engine/util/trust.mjs` resolves and
+  builds the env-var slice. Lifecycle injects `GIT_AUTHOR_*` /
+  `GIT_COMMITTER_*` / `GIT_SSH_COMMAND` per role's `identity:`
+  frontmatter, with `--identity` CLI override (CLI wins). `ARTEL_IDENTITY`
+  exposed to child. Unknown names fail with helpful Known: list.
+  `artel trust list` read-only inspector. Credentials (tokens / OAuth)
+  and SSH keygen deferred to V11.2. 195 tests green (19 new).
+- **2026-05-04** — V9 landed: mid-run heartbeats. Lifecycle emits a
+  `heartbeat` event every `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s)
+  while the child is alive; updates `.meta.lastHeartbeatAt` + `pidAlive`.
+  `interval.unref()` so it never holds the process open past settle.
+  `cleanupTimers` clears the handle on exit / timeout / error. Schema:
+  added `heartbeat` to reserved workload types. Status RUNNING shows a
+  `hb Ns ago` annotation coloured by freshness (green ≤90s, yellow ≤5m,
+  red older). 176 tests green (5 new).
+- **2026-05-04** — `artel events` — tail / filter the event stream.
+  Replaces manual `tail -f .artel/events.jsonl | jq` workflow. Filters:
+  `--task` / `--trace` / `--kind` / `--type` / `--since 30s|5m|2h|1d` /
+  `--limit N`. Follow mode (`-f`) polls jsonl every 500ms and renders
+  new appends. JSON pass-through (`--json`) for piping. Per-kind colour:
+  workload cyan, signal/infra yellow, control magenta. Out-of-backlog
+  QoL win. 171 tests green (8 new e2e).
 - **2026-05-04** — V8 landed: `artel replay <task | dispatch-id>`.
   Resolves target by slug or dispatch_id, pulls role + prompt from
   sidecars, spawns a new dispatch with `--retry-of <orig-id>` and auto-

@@ -26,9 +26,8 @@ artel is the experiment that probes that question.
   runtime, in-memory actors — different design point. artel runs
   each dispatch as a separate OS process and coordinates through
   files and events.
-- **Production tooling.** Schema and APIs change. Federation,
-  repository abstraction, queue graph, pipelines — reserved in
-  schema, not implemented.
+- **Production tooling.** Schema and APIs change. Federation +
+  repository abstraction reserved in schema, not implemented.
 
 ## Design principles
 
@@ -43,30 +42,75 @@ artel is the experiment that probes that question.
 ## Architecture (sketch)
 
 Two layers — a **shared platform** (this repo) and a **per-project
-runtime** under `.artel/` (gitignored).
+runtime** under `.artel/` (gitignored where it holds runtime state).
 
-- `agents/<role>.md` — markdown role definitions. Frontmatter
-  declares engine, model, sandbox, tool surface, dispatch policy.
-  Body is the system prompt.
-- `engine/` — dispatcher CLI. Reads a role, spawns the appropriate
-  CLI agent as an OS subprocess, watchdogs the timeout, captures
-  every boundary as a structured event.
-- `.artel/` — `events.jsonl` (append-only event stream), per-task
-  artefacts under `.dispatches/`, cluster identity, generated state.
+- `agents/<role>.md` — markdown role definitions. Frontmatter declares
+  engine, model, sandbox, tool surface, dispatch policy, identity,
+  required credentials. Body is the system prompt.
+- `skills/<name>.md` — composable tool-surface fragments. Roles declare
+  abstract `skills:`; projects override stack-specific patterns
+  (`npm` → `bun`) without touching role files.
+- `engine/` — dispatcher CLI. Reads a role, spawns the matching driver
+  CLI as an OS subprocess, watchdogs the timeout, captures every
+  boundary as a structured event. Drivers ship in-tree (claude / codex
+  / copilot); custom drivers drop into `.artel/drivers/<name>.mjs`.
+- `.artel/` — per-project runtime: `events.jsonl` (append-only event
+  stream), per-task artefacts under `.dispatches/`, cluster identity,
+  optional skill / driver overlays, optional truststore for agent git
+  identities and credentials.
 
 Full architecture in [`DESIGN.md`](./DESIGN.md). Status per phase in
-[`PLAN.md`](./PLAN.md).
+[`PLAN.md`](./PLAN.md). Schema migration notes in
+[`MIGRATION.md`](./MIGRATION.md) (handoff-only, regenerated per
+upgrade cycle).
+
+## CLI
+
+```
+artel <init | probe | run | spawn | status | logs | events | replay | trust | queue | pipeline | sweep | checkpoint>
+```
+
+| command | what it does |
+|---|---|
+| `init` | bootstrap `.artel/cluster.json` for a project |
+| `probe` | engine readiness — binary on PATH, version, auth state, optional live roundtrip |
+| `run` | dispatch a role one-shot (low-level) |
+| `spawn` | dispatch with task sidecar + branch + timeout |
+| `status` | cluster snapshot or live dashboard (FEED · RUNNING · RECENT · ACTIVITY · QUEUE · TOKENS) |
+| `logs <task>` | drill into a single dispatch (meta + events + prompt + out) |
+| `events` | tail / filter the event stream — `--task` `--trace` `--kind` `--type` `--since` `-f` |
+| `replay <task | dispatch-id>` | re-run a past dispatch on the same or a different engine |
+| `trust` | inspect / manage agent identities, credentials, SSH keys, encryption |
+| `queue` | inspect / mutate `.artel/QUEUE.md` + edges — `list / add / move / done / rm / link / unlink / ready / graph` |
+| `pipeline` | declarative multi-step flows — `register / list / show / run / runs / status / cancel` |
+| `sweep` | prune old `.dispatches/` artefacts (keeps active + newest `--keep`) |
+| `checkpoint` | sub-role self-report between phases |
+
+Run `artel <cmd> --help` for command-specific options.
 
 ## Try it
 
 ```bash
 npm install -g @antongolub/artel
 
+# 1. Bootstrap the project's runtime
 artel init --name my-cluster
-artel probe                                                         # engine readiness
-artel run --list
+
+# 2. Verify engines are reachable + authed
+artel probe
+
+# 3. Dispatch
 artel spawn implementer my-task --engine codex --effort high -p "ship the fixture"
+
+# 4. Watch live
 artel status --watch
+artel events -f --task my-task
+
+# 5. Drill in when something fails
+artel logs my-task
+
+# 6. Re-run on a different engine
+artel replay my-task --engine claude
 ```
 
 Or clone the repo to read / hack the platform itself:
@@ -75,6 +119,71 @@ Or clone the repo to read / hack the platform itself:
 git clone https://github.com/antongolub/artel.git
 ARTEL_HOME=$PWD/artel
 node $ARTEL_HOME/engine/cli/artel.mjs init --name my-cluster
+```
+
+A copy-and-go template lives in [`examples/quickstart/`](./examples/quickstart/)
+— minimal `package.json`, `.gitignore`, `.artel/QUEUE.md` skeleton,
+plus a walkthrough of init → probe → spawn → status → logs → replay.
+
+### Optional: pipelines for multi-step flows
+
+Chain dispatches into declarative flows. 6 node types
+(`dispatch` / `parallel` / `condition` / `handler` /
+`subpipeline` / `terminal`); routing by disposition through
+`on_disposition` edges; `{{ template }}` substitution against
+run attrs; full lifecycle observable in `events.jsonl`.
+
+```yaml
+# .artel/pipelines/review.json — register, run, observe
+review:
+  type: parallel              # fan-out, first success wins
+  branches: [code, security, docs]
+  join: any-complete
+
+approve:
+  type: handler               # inline guard, no LLM
+  handler: builtin.assert
+  if: { attr: env, equals: prod }
+  message: "deploy of {{ env }} requires env=prod"
+
+deploy:
+  type: dispatch              # the LLM-driven step
+  role: implementer
+  prompt: "deploy {{ feature }}"
+  timeout_ms: '5m'            # suffix syntax: ms / s / m / h / d
+```
+
+```bash
+artel pipeline register pipelines/release.json
+artel pipeline run release --attrs '{"feature":"auth","env":"prod"}'
+artel pipeline runs                        # newest-first list
+artel pipeline status <run-id-fragment>    # per-step timeline
+artel pipeline cancel <run-id-fragment>    # abort in-flight
+```
+
+Handler builtins: `builtin.exec` (bash), `builtin.assert`
+(predicate guard), `builtin.set_attr` (mutate run attrs),
+`builtin.git_tag`. Subpipelines compose flows with cycle
+detection + parent-cancel cascade.
+
+### Optional: truststore for agent identity + secrets
+
+Separate agent-made commits from your operator identity. Inject API
+tokens into the dispatch env without exposing them in the repo or
+shell history.
+
+```bash
+artel trust set-identity bot --author "artel-bot <bot@cluster.local>"
+artel trust gen-ssh bot | gh repo deploy-key add - --title "artel-bot"
+op read 'op://Personal/GitHub/token' | artel trust set-credential GITHUB_TOKEN
+
+# Roles declare what they want via frontmatter:
+#   identity: bot
+#   requires: GITHUB_TOKEN
+
+# Optional encryption at rest (AES-256-GCM, master key outside the repo):
+artel trust gen-key
+artel trust encrypt
 ```
 
 ## Status

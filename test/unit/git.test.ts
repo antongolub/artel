@@ -1,10 +1,10 @@
-// Unit tests for engine/util/git.mjs — pure helpers used by dispatch
+// Unit tests for engine/git/git.mjs — pure helpers used by dispatch
 // telemetry (V10).
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import * as gitModule from '../../engine/util/git.mjs'
+import * as gitModule from '../../engine/git/git.mjs'
 import { cleanupTempRoots, createTempRepo, execGit, snapshotRepo } from '../_helpers.js'
 
 const { gitContext, gitDelta, repoNameFromRemote } = gitModule as {

@@ -17,6 +17,7 @@ export const RESERVED_TYPE_PREFIXES = {
   workload: [
     'dispatch.',
     'checkpoint',
+    'heartbeat',
     'parked',
     'unparked',
     'escalation',
@@ -27,6 +28,8 @@ export const RESERVED_TYPE_PREFIXES = {
     'queue_edge.',
     'pipeline.',
     'pipeline_run.',
+    'pipeline_handler.',
+    'pipeline_subpipeline.',
     // legacy (one cycle)
     'claim',
     'release',
@@ -37,6 +40,7 @@ export const RESERVED_TYPE_PREFIXES = {
     'engine.',
     'model.',
     'policy.',
+    'trust.',
   ],
   signal: [
     'signal.',

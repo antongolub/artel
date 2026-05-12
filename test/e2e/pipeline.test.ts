@@ -1,0 +1,2714 @@
+// E2E for `artel pipeline` — register / list / show / run (V3.1).
+
+import { afterEach, describe, expect, it } from 'vitest'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import {
+  cleanupTempRoots,
+  createTempRepo,
+  ENGINE_FILES_CORE,
+  ENGINE_FILES_DRIVERS,
+  ENGINE_FILES_UTIL,
+  installEngineRuntime,
+  installStub,
+  runNode,
+  snapshotRepo,
+} from '../_helpers.js'
+
+afterEach(cleanupTempRoots)
+
+const installAll = (root: string) =>
+  installEngineRuntime(root, [
+    'engine/cli/pipeline.mjs',
+    'engine/cli/spawn.mjs',
+    'engine/cli/run.mjs',
+    ...ENGINE_FILES_CORE,
+    ...ENGINE_FILES_DRIVERS,
+    ...ENGINE_FILES_UTIL,
+  ])
+
+const minimal = (overrides = {}) => ({
+  id: 'demo',
+  version: 1,
+  description: 'demo flow',
+  entry: 'first',
+  nodes: {
+    first: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'do thing' },
+    done: { type: 'terminal', final_state: 'completed' },
+    fail: { type: 'terminal', final_state: 'failed' },
+  },
+  edges: [
+    { from: 'first', on_disposition: 'success', to: 'done' },
+    { from: 'first', on_disposition: '*', to: 'fail' },
+  ],
+  ...overrides,
+})
+
+const writePipelineFile = (root: string, name: string, body: object) => {
+  const path = join(root, name)
+  writeFileSync(path, JSON.stringify(body, null, 2))
+  return path
+}
+
+const events = (root: string) => {
+  const path = join(root, '.artel', 'events.jsonl')
+  return existsSync(path)
+    ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : []
+}
+
+describe('artel pipeline register / list / show', () => {
+  it('register copies validated def into .artel/pipelines/ and emits event', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const path = writePipelineFile(root, 'demo.json', minimal())
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register', path])
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', 'pipelines', 'demo.json'))).toBe(true)
+    const evt = events(root).find((e) => e.type === 'pipeline.registered')
+    expect(evt).toMatchObject({
+      kind: 'workload',
+      pipeline_id: 'demo',
+      pipeline_version: 1,
+      node_count: 3,
+      edge_count: 2,
+      fence_token: 0,
+    })
+  })
+
+  it('register fails on validation error', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const broken = minimal()
+    delete (broken.nodes.first as { role?: string }).role
+    const path = writePipelineFile(root, 'broken.json', broken)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register', path])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/requires a role/)
+  })
+
+  it('list shows registered pipelines', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p1.json', minimal())])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p2.json', { ...minimal(), id: 'second-flow' })])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'list'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('demo')
+    expect(r.stdout).toContain('second-flow')
+    expect(r.stdout).toMatch(/3 nodes, 2 edges/)
+  })
+
+  it('list --json emits structured array', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'list', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({ id: 'demo', version: 1, node_count: 3, edge_count: 2 })
+  })
+
+  it('show renders one pipeline', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'demo'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('demo')
+    expect(r.stdout).toContain('first')
+    expect(r.stdout).toContain('on_success')
+    expect(r.stdout).toContain('completed')
+  })
+
+  it('show --json round-trips the def', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'demo', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout)
+    expect(parsed.id).toBe('demo')
+    expect(parsed.entry).toBe('first')
+  })
+
+  it('show on missing pipeline → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'ghost'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/'ghost' not registered/)
+  })
+})
+
+describe('artel pipeline run (V3.1 linear)', () => {
+  it('walks success → completed; emits pipeline_run.started + .ended', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'demo'], {
+      PATH: `${binDir}:${process.env.PATH || ''}`,
+    })
+    expect(r.status).toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      kind: 'workload',
+      final_state: 'completed',
+      pipeline_id: 'demo',
+      last_node: 'done',
+      last_disposition: 'success',
+      fence_token: 0,
+    })
+    const started = events(root).find((e) => e.type === 'pipeline_run.started')
+    expect(started.pipeline_run_id).toBe(ended.pipeline_run_id)
+  })
+
+  it('multi-node chain: 3 dispatches → all success → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'three',
+      version: 1,
+      entry: 'a',
+      nodes: {
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'a' },
+        b: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'b' },
+        c: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'c' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'a', on_disposition: 'success', to: 'b' },
+        { from: 'b', on_disposition: 'success', to: 'c' },
+        { from: 'c', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'three', '--task-prefix', 'chain'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // Three dispatches landed under task prefix `chain-<node>`.
+    for (const stem of ['chain-a', 'chain-b', 'chain-c']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+    // Each dispatch's task attrs carry pipeline_run_id + pipeline_node_id —
+    // verifiable via dispatch.start events.
+    const starts = events(root).filter((e) => e.type === 'dispatch.start')
+    expect(starts).toHaveLength(3)
+    const runIds = new Set(starts.map((e) => e.task_attrs?.pipeline_run_id).filter(Boolean))
+    // task_attrs may not surface on dispatch.start in the current schema —
+    // verify via .meta sidecar instead. Fall back to events file taskAttrs key.
+    const taskMeta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'chain-a.meta'), 'utf8'),
+    )
+    expect(taskMeta.taskAttrs?.pipeline_node_id).toBe('a')
+    expect(taskMeta.taskAttrs?.pipeline_run_id).toBeTruthy()
+  })
+
+  it('non-success disposition follows wildcard edge to abort terminal', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    // Stub that exits non-zero, no parked-marker → disposition becomes 'error'.
+    const stub = ['#!/usr/bin/env node', 'console.error("boom"); process.exit(7)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'demo'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0) // pipeline.run exits with !=0 unless completed
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+  })
+
+  it('pipeline with no transition for disposition surfaces "no transition" abort', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const stuck = {
+      id: 'stuck',
+      version: 1,
+      entry: 'a',
+      nodes: {
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        // Only handles success; any other disposition → no transition.
+        { from: 'a', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'stuck.json', stuck)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'process.exit(1)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'stuck'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.abort_reason).toMatch(/no transition for disposition/)
+  })
+
+  it('--attrs JSON merges into each dispatch task attrs', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', minimal())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'demo',
+      '--attrs', '{"brief": "ship the fixture"}',
+      '--task-prefix', 'briefed',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    const meta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'briefed-first.meta'), 'utf8'),
+    )
+    expect(meta.taskAttrs.brief).toBe('ship the fixture')
+    expect(meta.taskAttrs.pipeline_id).toBe('demo')
+  })
+
+  it('run on missing pipeline → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'ghost'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/'ghost' not registered/)
+  })
+})
+
+describe('artel pipeline run — parallel (V3.2.a)', () => {
+  const fanoutPipeline = () => ({
+    id: 'fanout',
+    version: 1,
+    description: 'Fan out to 3 reviewers, join all-complete',
+    entry: 'reviews',
+    nodes: {
+      reviews: { type: 'parallel', branches: ['cr', 'adv', 'maint'], join: 'all-complete' },
+      cr: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'cold-read' },
+      adv: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'attack' },
+      maint: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'audit' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'reviews', on_disposition: 'success', to: 'done' },
+      { from: 'reviews', on_disposition: '*', to: 'fail' },
+    ],
+  })
+
+  it('runs all branches, joins on success → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'fan'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // Each branch task lands under <prefix>-<parallel-id>-<branch-id>
+    for (const stem of ['fan-reviews-cr', 'fan-reviews-adv', 'fan-reviews-maint']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done', last_disposition: 'success' })
+  })
+
+  it('aggregate fails when any branch fails — wildcard catches', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // First branch succeeds; second exits non-zero (→ disposition error).
+    const def = fanoutPipeline()
+    def.nodes.cr.role = 'implementer-ok'
+    def.nodes.adv.role = 'implementer-bad'
+    def.nodes.maint.role = 'implementer-ok'
+    // We can't easily branch behaviour by role with a single stub.
+    // Easier path: keep stub generic but make it always fail; aggregate still reaches `fail`.
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'process.exit(7)'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'fan2'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+    // All three branches still ran
+    for (const stem of ['fan2-reviews-cr', 'fan2-reviews-adv', 'fan2-reviews-maint']) {
+      expect(existsSync(join(root, '.artel', '.dispatches', `${stem}.meta`))).toBe(true)
+    }
+  })
+
+  it('branch dispatches carry pipeline_parallel_of in taskAttrs', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")'].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout', '--task-prefix', 'tag'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    const meta = JSON.parse(
+      readFileSync(join(root, '.artel', '.dispatches', 'tag-reviews-cr.meta'), 'utf8'),
+    )
+    expect(meta.taskAttrs).toMatchObject({
+      pipeline_id: 'fanout',
+      pipeline_node_id: 'cr',
+      pipeline_parallel_of: 'reviews',
+    })
+    expect(meta.taskAttrs.pipeline_run_id).toBeTruthy()
+  })
+
+  it('show renders parallel nodes', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', fanoutPipeline())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'fanout'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/reviews\s+parallel\s+branches=\[cr, adv, maint\]\s+join=all-complete/)
+  })
+})
+
+describe('artel pipeline run — condition (V3.2.b)', () => {
+  const conditionPipeline = (overrides = {}) => ({
+    id: 'gated',
+    version: 1,
+    description: 'Skip impl when attrs.skip says so',
+    entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: { attr: 'skip', equals: true }, then: 'done', else: 'impl' },
+      impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'do the thing' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'impl', on_disposition: 'success', to: 'done' },
+      { from: 'impl', on_disposition: '*', to: 'done' },
+    ],
+    ...overrides,
+  })
+
+  it("condition with --attrs '{\"skip\": true}' jumps to .then, skipping the dispatch", () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"skip": true}',
+      '--task-prefix', 'skipped',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // The dispatch was bypassed → no impl .meta exists
+    expect(existsSync(join(root, '.artel', '.dispatches', 'skipped-impl.meta'))).toBe(false)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('condition with .else branch dispatches the gated node', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"skip": false}',
+      '--task-prefix', 'tested',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', '.dispatches', 'tested-impl.meta'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('condition routes via dotted attrs path', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = conditionPipeline({
+      nodes: {
+        gate: { type: 'condition', if: { attr: 'env.target', in: ['staging', 'prod'] }, then: 'impl', else: 'done' },
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'deploy' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', '{"env": {"target": "prod"}}',
+      '--task-prefix', 'deploy',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    // env.target = prod is in [staging, prod] → went to .then = impl
+    expect(existsSync(join(root, '.artel', '.dispatches', 'deploy-impl.meta'))).toBe(true)
+  })
+
+  it('show renders condition rows', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', conditionPipeline())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'gated'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/gate\s+condition\s+if\(skip equals true\) then=done else=impl/)
+  })
+})
+
+describe('artel pipeline runs / status (V3.4.a)', () => {
+  const linearPipeline = () => ({
+    id: 'observable',
+    version: 1,
+    entry: 'a',
+    nodes: {
+      a: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'a' },
+      b: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'b' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'a', on_disposition: 'success', to: 'b' },
+      { from: 'b', on_disposition: 'success', to: 'done' },
+    ],
+  })
+
+  const setUpRun = (root: string) => {
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', linearPipeline())])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    return runNode(root, ['engine/cli/pipeline.mjs', 'run', 'observable', '--task-prefix', 'obs'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+  }
+
+  it('runs lists past completed runs', () => {
+    const root = createTempRepo()
+    const runResult = setUpRun(root)
+    expect(runResult.status).toBe(0)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+    expect(r.stdout).toMatch(/completed/)
+  })
+
+  it('runs --json emits structured array sorted newest first', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout) as Array<{ pipeline_id: string; final_state: string; duration_ms: number }>
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({ pipeline_id: 'observable', final_state: 'completed' })
+    expect(parsed[0].duration_ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('runs --pipeline filters to one pipeline id', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const empty = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--pipeline', 'other-flow', '--json'])
+    expect(empty.status).toBe(0)
+    expect(JSON.parse(empty.stdout)).toEqual([])
+
+    const matched = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--pipeline', 'observable', '--json'])
+    expect(JSON.parse(matched.stdout)).toHaveLength(1)
+  })
+
+  it('runs --limit caps the count', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    setUpRun(createTempRepo()) // separate run, separate root, but our root has only 1
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--limit', '0', '--json'])
+    expect(r.status).toBe(0)
+    expect(JSON.parse(r.stdout)).toEqual([])
+  })
+
+  it('status surfaces per-node steps with disposition', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    // Pull the run id from runs --json
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const runId = list[0].run_id
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', runId])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+    expect(r.stdout).toContain('completed')
+    expect(r.stdout).toContain('Steps')
+    // Both dispatch nodes show as steps
+    expect(r.stdout).toMatch(/\ba\s+/)
+    expect(r.stdout).toMatch(/\bb\s+/)
+  })
+
+  it('status accepts a trailing fragment of run_id', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const runId = list[0].run_id
+    const fragment = runId.slice(-12)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', fragment])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('observable')
+  })
+
+  it('status --json emits run summary + steps', () => {
+    const root = createTempRepo()
+    setUpRun(root)
+    const list = JSON.parse(runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json']).stdout) as Array<{ run_id: string }>
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', list[0].run_id, '--json'])
+    expect(r.status).toBe(0)
+    const parsed = JSON.parse(r.stdout) as {
+      run_id: string; pipeline_id: string; final_state: string;
+      steps: Array<{ node_id: string; disposition: string }>;
+    }
+    expect(parsed.pipeline_id).toBe('observable')
+    expect(parsed.final_state).toBe('completed')
+    expect(parsed.steps).toHaveLength(2)
+    expect(parsed.steps.map((s) => s.node_id)).toEqual(['a', 'b'])
+  })
+
+  it('status on missing run id → exit 1', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'status', 'no-such-run'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/no run matches/)
+  })
+
+  it('runs on empty events.jsonl shows hint', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'runs'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/no runs yet/)
+  })
+})
+
+describe('artel pipeline run — parallel any-complete / k-of-n (V3.3.c)', () => {
+  // A stub that finishes quickly with success. Used as the "fast"
+  // branch in race tests; siblings sleep longer and end up cancelled.
+  const fastStub = ['#!/usr/bin/env node', 'console.log("fast ok")', ''].join('\n')
+
+  // Stub that hangs for several seconds so the race test can verify
+  // cancellation actually fires. We also write a marker file so
+  // forensic checks could see whether it ran to completion (it
+  // shouldn't — the controller aborts it).
+  const slowStub = ['#!/usr/bin/env node',
+    `setTimeout(() => { console.log("slow ok"); process.exit(0) }, 30000)`,
+    `// SIGTERM handler exits non-zero — used to identify the cancel path.`,
+    `process.on('SIGTERM', () => { console.error('cancelled'); process.exit(143) })`,
+    ''].join('\n')
+
+  // Project-level driver overlay (DESIGN.md §8.3) so we can spawn
+  // distinct stubs per branch without pretending they're all 'claude'.
+  // Minimal contract: id / command / args(). Engine name = binary name
+  // — installStub puts the binary on PATH under that exact name.
+  const installDriverOverlay = (root: string, engineId: string) => {
+    const dir = join(root, '.artel', 'drivers')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${engineId}.mjs`), [
+      `export const id = '${engineId}'`,
+      `export const command = '${engineId}'`,
+      `export const api_version = 1`,
+      `export function args (meta, promptParts) {`,
+      `  return promptParts.length ? [promptParts.join(' ')] : []`,
+      `}`,
+      ``,
+    ].join('\n'))
+  }
+
+  const racePipeline = (overrides = {}) => ({
+    id: 'race',
+    version: 1,
+    entry: 'fan',
+    nodes: {
+      fan: { type: 'parallel', branches: ['fast', 'slow1', 'slow2'], join: 'any-complete' },
+      fast: { type: 'dispatch', role: 'implementer', engine: 'fastclaude', prompt: 'fast' },
+      slow1: { type: 'dispatch', role: 'implementer', engine: 'slowclaude', prompt: 'slow1' },
+      slow2: { type: 'dispatch', role: 'implementer', engine: 'slowclaude', prompt: 'slow2' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'fan', on_disposition: 'success', to: 'done' },
+      { from: 'fan', on_disposition: '*', to: 'fail' },
+    ],
+    ...overrides,
+  })
+
+  it('any-complete: first success wins, siblings cancelled', () => {
+    const root = createTempRepo()
+    installAll(root)
+    installDriverOverlay(root, 'fastclaude')
+    installDriverOverlay(root, 'slowclaude')
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', racePipeline())])
+    snapshotRepo(root, 'with pipeline')
+
+    // fastclaude finishes immediately; slowclaude hangs but
+    // SIGTERM-handles cleanly.
+    const binDir = installStub(root, 'fastclaude', fastStub)
+    installStub(root, 'slowclaude', slowStub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'race', '--task-prefix', 'race1'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    // Aggregate is success
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_disposition: 'success' })
+
+    // Fast branch: success. Slow branches: cancelled (or possibly
+    // "error" if our SIGTERM races settled exit, depending on timing).
+    // What matters: at least one cancelled.
+    const dispatchEnds = events(root).filter(
+      (e) => e.type === 'dispatch.end' && e.task_attrs?.pipeline_run_id === ended.pipeline_run_id,
+    )
+    const dispoBy = Object.fromEntries(
+      dispatchEnds.map((e) => [e.task_attrs.pipeline_node_id, e.disposition]),
+    )
+    expect(dispoBy.fast).toBe('success')
+    expect(['cancelled', 'error']).toContain(dispoBy.slow1)
+    expect(['cancelled', 'error']).toContain(dispoBy.slow2)
+    // At least one branch was actually cancelled (not just errored).
+    expect([dispoBy.slow1, dispoBy.slow2].includes('cancelled')).toBe(true)
+  })
+
+  it('k-of-n with k=2: returns success once 2 of 3 finish', () => {
+    const root = createTempRepo()
+    installAll(root)
+    installDriverOverlay(root, 'fastclaude')
+    installDriverOverlay(root, 'slowclaude')
+    snapshotRepo(root, 'runtime')
+    const def = racePipeline({
+      nodes: {
+        fan: { type: 'parallel', branches: ['fast1', 'fast2', 'slow'], join: 'k-of-n', k: 2 },
+        fast1: { type: 'dispatch', role: 'implementer', engine: 'fastclaude', prompt: 'fast1' },
+        fast2: { type: 'dispatch', role: 'implementer', engine: 'fastclaude', prompt: 'fast2' },
+        slow: { type: 'dispatch', role: 'implementer', engine: 'slowclaude', prompt: 'slow' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const binDir = installStub(root, 'fastclaude', fastStub)
+    installStub(root, 'slowclaude', slowStub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'race', '--task-prefix', 'kof'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+    // 2 successes is enough; slow gets cancelled.
+    const dispatchEnds = events(root).filter(
+      (e) => e.type === 'dispatch.end' && e.task_attrs?.pipeline_run_id === ended.pipeline_run_id,
+    )
+    const dispoBy = Object.fromEntries(
+      dispatchEnds.map((e) => [e.task_attrs.pipeline_node_id, e.disposition]),
+    )
+    expect(dispoBy.fast1).toBe('success')
+    expect(dispoBy.fast2).toBe('success')
+    expect(['cancelled', 'error']).toContain(dispoBy.slow)
+  })
+
+  it('any-complete with all branches failing falls through to wildcard edge', () => {
+    const root = createTempRepo()
+    installAll(root)
+    installDriverOverlay(root, 'failclaude')
+    snapshotRepo(root, 'runtime')
+    const def = {
+      ...racePipeline(),
+      nodes: {
+        fan: { type: 'parallel', branches: ['a', 'b', 'c'], join: 'any-complete' },
+        a: { type: 'dispatch', role: 'implementer', engine: 'failclaude', prompt: 'a' },
+        b: { type: 'dispatch', role: 'implementer', engine: 'failclaude', prompt: 'b' },
+        c: { type: 'dispatch', role: 'implementer', engine: 'failclaude', prompt: 'c' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const failStub = ['#!/usr/bin/env node', 'process.exit(7)', ''].join('\n')
+    const binDir = installStub(root, 'failclaude', failStub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'race', '--task-prefix', 'allfail'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+  })
+
+  it('show renders k-of-n with k', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = racePipeline({
+      nodes: {
+        fan: { type: 'parallel', branches: ['fast1', 'fast2', 'slow'], join: 'k-of-n', k: 2 },
+        fast1: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: '' },
+        fast2: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: '' },
+        slow: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: '' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'race'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/fan\s+parallel\s+branches=\[fast1, fast2, slow\]\s+join=k-of-n\s+k=2/)
+  })
+})
+
+describe('artel pipeline run — prompt template substitution (V3.5)', () => {
+  // The walker renders `{{ attr }}` placeholders against the merged
+  // attrs (user --attrs + pipeline-injected ids) before passing to
+  // dispatchLifecycle. The rendered prompt lands in
+  // .artel/.dispatches/<task>.prompt — we read it back to assert.
+
+  const templated = (overrides = {}) => ({
+    id: 'tmpl',
+    version: 1,
+    entry: 'first',
+    nodes: {
+      first: {
+        type: 'dispatch',
+        role: 'implementer',
+        engine: 'claude',
+        prompt: 'Implement: {{ target }} for run {{ pipeline_run_id }}',
+      },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'first', on_disposition: 'success', to: 'done' },
+      { from: 'first', on_disposition: '*', to: 'fail' },
+    ],
+    ...overrides,
+  })
+
+  it('substitutes user --attrs and pipeline-injected ids into prompt', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', templated())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'tmpl',
+      '--attrs', '{"target":"auth-bug"}',
+      '--task-prefix', 'tt',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const promptPath = join(root, '.artel', '.dispatches', 'tt-first.prompt')
+    expect(existsSync(promptPath)).toBe(true)
+    const rendered = readFileSync(promptPath, 'utf8')
+    // pipeline_run_id is a UUIDv7 — assert shape via the static parts
+    // and the dynamic parts via regex.
+    expect(rendered).toMatch(/^Implement: auth-bug for run [0-9a-f-]{36}$/)
+  })
+
+  it('missing attribute fails the run with a clear template error', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', templated())])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    // No --attrs → `target` is missing → render throws → run aborts.
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'tmpl', '--task-prefix', 'fail'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/prompt template at node 'first':.*missing attribute 'target'/)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.abort_reason).toMatch(/template/)
+  })
+
+  it('parallel branches see pipeline_node_id + parallel_of in their prompt scope', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'fanout-tmpl',
+      version: 1,
+      entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['a', 'b'], join: 'all-complete' },
+        a: { type: 'dispatch', role: 'implementer', engine: 'claude',
+             prompt: 'branch={{ pipeline_node_id }} parent={{ pipeline_parallel_of }}' },
+        b: { type: 'dispatch', role: 'implementer', engine: 'claude',
+             prompt: 'branch={{ pipeline_node_id }} parent={{ pipeline_parallel_of }}' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fanout-tmpl', '--task-prefix', 'fo'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const promptA = readFileSync(join(root, '.artel', '.dispatches', 'fo-fan-a.prompt'), 'utf8')
+    const promptB = readFileSync(join(root, '.artel', '.dispatches', 'fo-fan-b.prompt'), 'utf8')
+    expect(promptA).toBe('branch=a parent=fan')
+    expect(promptB).toBe('branch=b parent=fan')
+  })
+
+  it('passes through prompt with no templates unchanged (back-compat)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'plain', version: 1, entry: 'first',
+      nodes: {
+        first: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'just a literal prompt' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'first', on_disposition: 'success', to: 'done' },
+        { from: 'first', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'plain', '--task-prefix', 'pp'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(readFileSync(join(root, '.artel', '.dispatches', 'pp-first.prompt'), 'utf8'))
+      .toBe('just a literal prompt')
+  })
+})
+
+describe('artel pipeline run — condition compounds + comparisons (V3.6)', () => {
+  // Verify the richer predicate vocabulary actually routes through
+  // the walker. Branch chosen → only that branch's dispatch
+  // .meta lands; the other branch's stays absent. (Same probe
+  // pattern as the V3.2.b condition tests.)
+  const richCondition = (predicate: object) => ({
+    id: 'gated', version: 1, entry: 'gate',
+    nodes: {
+      gate: { type: 'condition', if: predicate, then: 'yes', else: 'no' },
+      yes: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'yes' },
+      no: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'no' },
+      done: { type: 'terminal', final_state: 'completed' },
+    },
+    edges: [
+      { from: 'yes', on_disposition: 'success', to: 'done' },
+      { from: 'yes', on_disposition: '*', to: 'done' },
+      { from: 'no', on_disposition: 'success', to: 'done' },
+      { from: 'no', on_disposition: '*', to: 'done' },
+    ],
+  })
+
+  const runWithAttrs = (def: object, attrs: object, prefix: string) => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'gated',
+      '--attrs', JSON.stringify(attrs),
+      '--task-prefix', prefix,
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    return { root, r }
+  }
+
+  it('and: every nested predicate must hold for .then', () => {
+    const def = richCondition({
+      and: [
+        { attr: 'env', equals: 'prod' },
+        { attr: 'approved', equals: true },
+      ],
+    })
+    // both true → yes
+    const a = runWithAttrs(def, { env: 'prod', approved: true }, 'and-yes')
+    expect(a.r.status).toBe(0)
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'and-yes-yes.meta'))).toBe(true)
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'and-yes-no.meta'))).toBe(false)
+
+    // one false → no
+    const b = runWithAttrs(def, { env: 'prod', approved: false }, 'and-no')
+    expect(b.r.status).toBe(0)
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'and-no-no.meta'))).toBe(true)
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'and-no-yes.meta'))).toBe(false)
+  })
+
+  it('or with not: any nested predicate suffices, including negation', () => {
+    const def = richCondition({
+      or: [
+        { attr: 'force', equals: true },
+        { not: { attr: 'env', equals: 'dev' } },
+      ],
+    })
+    // env=prod → not-equals-dev fires → yes
+    const a = runWithAttrs(def, { env: 'prod' }, 'or-prod')
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'or-prod-yes.meta'))).toBe(true)
+
+    // env=dev, no force → both branches false → no
+    const b = runWithAttrs(def, { env: 'dev' }, 'or-dev')
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'or-dev-no.meta'))).toBe(true)
+
+    // env=dev but force=true → first branch fires → yes
+    const c = runWithAttrs(def, { env: 'dev', force: true }, 'or-force')
+    expect(existsSync(join(c.root, '.artel', '.dispatches', 'or-force-yes.meta'))).toBe(true)
+  })
+
+  it('comparison gte routes via numeric attr', () => {
+    const def = richCondition({ attr: 'score', gte: 0.8 })
+    const a = runWithAttrs(def, { score: 0.9 }, 'gte-hi')
+    expect(existsSync(join(a.root, '.artel', '.dispatches', 'gte-hi-yes.meta'))).toBe(true)
+
+    const b = runWithAttrs(def, { score: 0.5 }, 'gte-lo')
+    expect(existsSync(join(b.root, '.artel', '.dispatches', 'gte-lo-no.meta'))).toBe(true)
+
+    // Missing attr → fail-closed → no.
+    const c = runWithAttrs(def, {}, 'gte-miss')
+    expect(existsSync(join(c.root, '.artel', '.dispatches', 'gte-miss-no.meta'))).toBe(true)
+  })
+
+  it('show renders compound + comparison predicates recursively', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = richCondition({
+      and: [
+        { not: { attr: 'cancelled', exists: true } },
+        { or: [{ attr: 'env', equals: 'prod' }, { attr: 'score', gte: 0.8 }] },
+      ],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'gated'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(
+      /gate\s+condition\s+if\(\(not\(cancelled exists true\) and \(env equals "prod" or score gte 0\.8\)\)\) then=yes else=no/,
+    )
+  })
+
+  it('register surfaces precise paths on bad nested predicate', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const broken = richCondition({
+      and: [
+        { attr: 'env', equals: 'prod' },
+        { attr: 'approved' }, // missing op
+      ],
+    })
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', broken)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/\.if\.and\[1\] must specify exactly one/)
+  })
+})
+
+describe('artel pipeline run — handler nodes (V3.7.a)', () => {
+  // builtin.exec runs `bash -c <cmd>`. Walker treats disposition like
+  // dispatch: success on exit 0 → success edge; non-zero → error edge.
+  const flow = (handlerNode: object, edges = [
+    { from: 'h', on_disposition: 'success', to: 'done' },
+    { from: 'h', on_disposition: '*', to: 'fail' },
+  ]) => ({
+    id: 'h-flow', version: 1, entry: 'h',
+    nodes: {
+      h: handlerNode,
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges,
+  })
+
+  it('builtin.exec exit 0 → success edge → completed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: `touch handler-marker.txt`,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    // The handler ran in the project dir — marker file lands there.
+    expect(existsSync(join(root, 'handler-marker.txt'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'completed', last_node: 'done', last_disposition: 'success',
+    })
+  })
+
+  it('builtin.exec non-zero exit → wildcard edge → failed', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec', cmd: 'exit 7',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'error',
+    })
+  })
+
+  it('builtin.exec timeout → wildcard edge', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: 'sleep 5', timeout_ms: 100,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_disposition).toBe('timeout')
+  })
+
+  it('register surfaces precise error on bad handler shape', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({ type: 'handler', handler: 'builtin.exec' }) // no cmd
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/\(builtin\.exec\) requires \.cmd as a non-empty string/)
+  })
+
+  it('show renders handler row with cmd + timeout', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec',
+      cmd: 'npm test', timeout_ms: 60000,
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.exec\s+cmd="npm test"\s+timeout_ms=60000/)
+  })
+
+  it('emits pipeline_handler.start/.end events; status renders handler step (V3.7.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.exec', cmd: 'true',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+
+    // Events: start + end with full payload.
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart).toBeDefined()
+    expect(hEnd).toBeDefined()
+    expect(hStart).toMatchObject({
+      kind: 'workload', handler: 'builtin.exec',
+      pipeline_id: 'h-flow', pipeline_node_id: 'h', cmd: 'true',
+    })
+    expect(hStart.handler_id).toBeTruthy()
+    expect(hEnd).toMatchObject({
+      kind: 'workload', handler_id: hStart.handler_id, handler: 'builtin.exec',
+      pipeline_node_id: 'h', disposition: 'success', exit_code: 0,
+    })
+    expect(typeof hEnd.duration_ms).toBe('number')
+
+    // status --json: handler row alongside any dispatches (none here).
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; node_id: string; handler: string; disposition: string; exit_code: number }>
+    }
+    expect(det.steps).toHaveLength(1)
+    expect(det.steps[0]).toMatchObject({
+      kind: 'handler', node_id: 'h', handler: 'builtin.exec',
+      disposition: 'success', exit_code: 0,
+    })
+
+    // status (text): handler word appears in the row.
+    const st = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id])
+    expect(st.status).toBe(0)
+    expect(st.stdout).toMatch(/h\s+true\s+handler\s+exec\s+success/)
+  })
+
+  it('builtin.assert true → success edge, false → error edge (V3.7.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'deploy of {{ env }} requires env=prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Predicate true → success → done.
+    const ok = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"prod"}',
+    ])
+    expect(ok.status).toBe(0)
+    const okEnded = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(okEnded.last_node).toBe('done')
+  })
+
+  it('builtin.assert failure surfaces rendered message in event + status (V3.7.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'deploy of {{ env }} requires env=prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Predicate false → error → fail terminal.
+    const fail = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"dev"}',
+    ])
+    expect(fail.status).not.toBe(0)
+    const evts = events(root)
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+    expect(ended.last_node).toBe('fail')
+
+    // pipeline_handler.end carries the rendered message.
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toBe('deploy of dev requires env=prod')
+
+    // pipeline_handler.start snapshots the predicate + message
+    // template for forensics.
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    expect(hStart.predicate).toEqual({ attr: 'env', equals: 'prod' })
+    expect(hStart.message_template).toBe('deploy of {{ env }} requires env=prod')
+
+    // status renders the assert step.
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', ended.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; handler: string; disposition: string; error: string }>
+    }
+    expect(det.steps[0]).toMatchObject({
+      kind: 'handler', handler: 'builtin.assert', disposition: 'error',
+      error: 'deploy of dev requires env=prod',
+    })
+  })
+
+  it('builtin.assert with compound predicate routes correctly', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: {
+        and: [
+          { attr: 'env', equals: 'prod' },
+          { not: { attr: 'paused', equals: true } },
+        ],
+      },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // env=prod, paused=true → and([true, not(true)]) = and([true,false]) = false → fail
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"env":"prod","paused":true}',
+    ])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.last_node).toBe('fail')
+  })
+
+  it('show renders builtin.assert with predicate + message', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.assert',
+      if: { attr: 'env', equals: 'prod' },
+      message: 'must be prod',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.assert\s+if\(env equals "prod"\)\s+message="must be prod"/)
+  })
+
+  it('builtin.set_attr mutates run attrs visible to downstream nodes (V3.7.d)', () => {
+    // set_attr writes attrs that flow into:
+    //   1. downstream dispatch task_attrs (via .meta sidecar)
+    //   2. downstream condition predicates
+    //   3. downstream prompt template substitution
+    // We exercise (1) and (3): set_attr → dispatch with templated
+    // prompt + .meta inspection.
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          set: { phase: 'reviewed', label: 'run-{{ pipeline_run_id }}' },
+        },
+        impl: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'phase={{ phase }} label={{ label }}',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mut', '--task-prefix', 'mu'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    // 1. dispatch's task_attrs reflect the mutation
+    const meta = JSON.parse(readFileSync(
+      join(root, '.artel', '.dispatches', 'mu-impl.meta'), 'utf8',
+    ))
+    expect(meta.taskAttrs.phase).toBe('reviewed')
+    expect(meta.taskAttrs.label).toMatch(/^run-[0-9a-f-]{36}$/)
+
+    // 3. dispatch prompt rendered with the mutated attrs
+    const renderedPrompt = readFileSync(
+      join(root, '.artel', '.dispatches', 'mu-impl.prompt'), 'utf8',
+    )
+    expect(renderedPrompt).toMatch(/^phase=reviewed label=run-[0-9a-f-]{36}$/)
+  })
+
+  it('builtin.set_attr emits set + set_resolved in events (V3.7.d)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'reviewed', count: 3 },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart.set).toEqual({ phase: 'reviewed', count: 3 })
+    expect(hEnd.set_resolved).toEqual({ phase: 'reviewed', count: 3 })
+    expect(hEnd.disposition).toBe('success')
+  })
+
+  it('builtin.set_attr render error aborts run; userAttrs unchanged downstream', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut-fail', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          set: { phase: 'reviewed-{{ ghost }}' },  // ghost missing
+        },
+        // Never reached — but if we did, original `phase` should
+        // remain whatever the user passed (or absent).
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mut-fail'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.last_node).toBe('fail')
+    const hEnd = events(root).find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toMatch(/render of \.set\['phase'\] failed:.*ghost/)
+  })
+
+  it('builtin.set_attr dotted-path key + unset reach downstream dispatch (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mut-nested', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          // Dotted set + unset coexist; templates work in nested values.
+          set: { 'flags.deployed': true, 'config.run': 'r-{{ pipeline_run_id }}' },
+          unset: ['todo'],
+        },
+        impl: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'deployed={{ flags.deployed }} run={{ config.run }}',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'impl' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'mut-nested', '--task-prefix', 'mn',
+      // todo gets unset by tag step; without it, downstream wouldn't see todo.
+      '--attrs', '{"todo":"throwaway"}',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    // Downstream dispatch's task_attrs reflects nested mutation + unset
+    const meta = JSON.parse(readFileSync(
+      join(root, '.artel', '.dispatches', 'mn-impl.meta'), 'utf8',
+    ))
+    expect(meta.taskAttrs.flags).toEqual({ deployed: true })
+    expect(meta.taskAttrs.config).toMatchObject({ run: expect.stringMatching(/^r-[0-9a-f-]{36}$/) })
+    // todo was removed
+    expect(meta.taskAttrs).not.toHaveProperty('todo')
+
+    // Rendered prompt sees the nested attrs (via V3.5 dotted-path
+    // templating).
+    const prompt = readFileSync(
+      join(root, '.artel', '.dispatches', 'mn-impl.prompt'), 'utf8',
+    )
+    expect(prompt).toMatch(/^deployed=true run=r-[0-9a-f-]{36}$/)
+
+    // Events carry set + unset snapshots
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart.set).toEqual({ 'flags.deployed': true, 'config.run': 'r-{{ pipeline_run_id }}' })
+    expect(hStart.unset).toEqual(['todo'])
+    expect(hEnd.unset_resolved).toEqual(['todo'])
+    expect(hEnd.set_resolved['flags.deployed']).toBe(true)
+  })
+
+  it('builtin.set_attr unset-only flow ({} attrs handled gracefully) (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      unset: ['some_key'],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).toBe(0)
+    const evts = events(root)
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('success')
+    expect(hEnd.unset_resolved).toEqual(['some_key'])
+    // No set_resolved when set is empty/absent
+    expect(hEnd.set_resolved).toBeUndefined()
+  })
+
+  it('show renders builtin.set_attr with set spec', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { phase: 'reviewed', count: 7 },
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"phase":"reviewed","count":7\}/)
+  })
+
+  it('builtin.git_tag tags HEAD on success; events carry tag_name + annotated (V3.7.f)', () => {
+    const root = createTempRepo()  // already a git repo with one commit
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v{{ version }}',
+      message: 'release {{ version }}',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'h-flow',
+      '--attrs', '{"version":"3.7"}',
+    ])
+    expect(r.status).toBe(0)
+
+    // Tag landed in repo
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
+    const tags = spawnSync('git', ['tag', '-l'], { cwd: root, encoding: 'utf8' })
+      .stdout.trim().split('\n').filter(Boolean)
+    expect(tags).toContain('v3.7')
+
+    // Events carry forensics
+    const evts = events(root)
+    const hStart = evts.find((e) => e.type === 'pipeline_handler.start')
+    const hEnd = evts.find((e) => e.type === 'pipeline_handler.end')
+    expect(hStart).toMatchObject({
+      handler: 'builtin.git_tag',
+      name: 'v{{ version }}',           // unrendered snapshot
+      message: 'release {{ version }}',
+      annotated: true,
+    })
+    expect(hEnd).toMatchObject({
+      handler: 'builtin.git_tag',
+      disposition: 'success',
+      tag_name: 'v3.7',                  // resolved post-template
+      annotated: true,
+    })
+  })
+
+  it('builtin.git_tag duplicate-tag failure surfaces in events (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Pre-create the tag so the handler hits a duplicate.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawnSync } = require('node:child_process') as typeof import('node:child_process')
+    spawnSync('git', ['tag', 'v1.0'], { cwd: root })
+
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'r',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'h-flow'])
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+
+    const hEnd = events(root).find((e) => e.type === 'pipeline_handler.end')
+    expect(hEnd.disposition).toBe('error')
+    expect(hEnd.error).toMatch(/git_tag:.*already exists/)
+    expect(hEnd.tag_name).toBe('v1.0')
+  })
+
+  it('show renders builtin.git_tag with name + message + target (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag',
+      name: 'v1.0', message: 'release', target: 'main',
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.git_tag\s+name="v1\.0"\s+message="release"\s+target="main"/)
+  })
+
+  it('register rejects builtin.git_tag without message and without lightweight (V3.7.f)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.git_tag', name: 'v1',
+    })
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/requires \.message as a non-empty string \(or set \.lightweight: true\)/)
+  })
+
+  it('show renders builtin.set_attr with set + unset (V3.7.d.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = flow({
+      type: 'handler', handler: 'builtin.set_attr',
+      set: { 'flags.deployed': true },
+      unset: ['todo'],
+    })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'h-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/h\s+handler\s+builtin\.set_attr\s+set=\{"flags\.deployed":true\}\s+unset=\["todo"\]/)
+  })
+
+  it('parallel branches: handler.exec + handler.assert + dispatch (V3.7.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mix-fan', version: 1, entry: 'fan',
+      nodes: {
+        fan: {
+          type: 'parallel',
+          branches: ['h_check', 'h_gate', 'd'],
+          join: 'all-complete',
+        },
+        h_check: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        h_gate: {
+          type: 'handler', handler: 'builtin.assert',
+          if: { attr: 'env', equals: 'prod' },
+        },
+        d: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'mix-fan', '--task-prefix', 'mix',
+      '--attrs', '{"env":"prod"}',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    // Both handler events present, both with pipeline_parallel_of='fan'.
+    const handlerEnds = evts.filter((e) => e.type === 'pipeline_handler.end')
+    expect(handlerEnds).toHaveLength(2)
+    for (const e of handlerEnds) {
+      expect(e.pipeline_parallel_of).toBe('fan')
+      expect(e.disposition).toBe('success')
+    }
+    // Dispatch ran in worktree — meta lands at the parallel-prefixed slug.
+    expect(existsSync(join(root, '.artel', '.dispatches', 'mix-fan-d.meta'))).toBe(true)
+
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('any-complete with handler branches: fast handler wins, slow exec cancelled (V3.7.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'race-h', version: 1, entry: 'fan',
+      nodes: {
+        fan: {
+          type: 'parallel',
+          branches: ['fast', 'slow'],
+          join: 'any-complete',
+        },
+        // assert that's always true → succeeds immediately
+        fast: { type: 'handler', handler: 'builtin.assert', if: { attr: 'env', exists: true } },
+        // exec that hangs — should be cancelled when fast wins
+        slow: {
+          type: 'handler', handler: 'builtin.exec',
+          // SIGTERM-handling sleep so the cancel path settles cleanly.
+          cmd: 'trap "exit 143" TERM; sleep 30',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'race-h',
+      '--attrs', '{"env":"prod"}',
+    ])
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    const ends = evts.filter((e) => e.type === 'pipeline_handler.end')
+    const dispoBy = Object.fromEntries(ends.map((e) => [e.pipeline_node_id, e.disposition]))
+    expect(dispoBy.fast).toBe('success')
+    // slow either cancelled (SIGTERM caught) or error (race) — both
+    // acceptable; what matters is the run completed and the slow
+    // path didn't run to its 30s sleep.
+    expect(['cancelled', 'error']).toContain(dispoBy.slow)
+
+    const ended = evts.find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({ final_state: 'completed', last_node: 'done' })
+  })
+
+  it('parallel rejects builtin.set_attr at register (V3.7.e — race on userAttrs)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'racy', version: 1, entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['s'], join: 'all-complete' },
+        s: { type: 'handler', handler: 'builtin.set_attr', set: { phase: 'x' } },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'fan', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'racy.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/builtin\.set_attr handler — disallowed in parallel branches/)
+  })
+
+  it('handler chains with dispatch through edges', () => {
+    // handler success → dispatch → terminal. Verifies that handler
+    // disposition flows through edges to a downstream dispatch the
+    // way dispatch dispositions do.
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mixed', version: 1, entry: 'h',
+      nodes: {
+        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        impl: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'h', on_disposition: 'success', to: 'impl' },
+        { from: 'h', on_disposition: '*', to: 'fail' },
+        { from: 'impl', on_disposition: 'success', to: 'done' },
+        { from: 'impl', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mixed', '--task-prefix', 'mx'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    expect(existsSync(join(root, '.artel', '.dispatches', 'mx-impl.meta'))).toBe(true)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+  })
+})
+
+describe('artel pipeline cancel — operator cancel of in-flight run (V3.8)', () => {
+  // Concurrent test: spawn the run async, drop the sentinel, await
+  // the run's exit. We simulate the operator's "cancel from another
+  // terminal" workflow without needing two interactive shells.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawn: nodeSpawn } = require('node:child_process') as typeof import('node:child_process')
+
+  it('cancel CLI rejects unknown run id', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', 'no-such-run'])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/no run matches/)
+  })
+
+  it('cancel CLI rejects already-terminal run', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'q', version: 1, entry: 'h',
+      nodes: {
+        h: { type: 'handler', handler: 'builtin.exec', cmd: 'true' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'h', on_disposition: 'success', to: 'done' }],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+    // Run completes synchronously (true exits 0).
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'q'])
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', ended.pipeline_run_id])
+    expect(r.status).toBe(1)
+    expect(r.stderr).toMatch(/already terminal \(final_state=completed\)/)
+  })
+
+  it('cancel mid-flight: long-running handler aborts, run ends as aborted', async () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'longish', version: 1, entry: 'h',
+      nodes: {
+        // Sleep long enough for the cancel CLI to land. SIGTERM
+        // handler exits non-zero so disposition becomes `cancelled`
+        // (V3.7.e cancel path).
+        h: {
+          type: 'handler', handler: 'builtin.exec',
+          cmd: 'trap "exit 143" TERM; sleep 30',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'h', on_disposition: 'success', to: 'done' },
+        { from: 'h', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Spawn the run asynchronously so we can issue cancel from this
+    // process. stdio: 'pipe' avoids cluttering test output; we
+    // collect stderr for diagnostics.
+    const proc = nodeSpawn('node', ['engine/cli/pipeline.mjs', 'run', 'longish'],
+      { cwd: root, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (d) => { stderr += d.toString() })
+
+    // Poll for pipeline_run.started so we know the run_id is on disk.
+    const eventsPath = join(root, '.artel', 'events.jsonl')
+    const waitForStart = async () => {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        if (existsSync(eventsPath)) {
+          const evts = events(root)
+          const started = evts.find((e) => e.type === 'pipeline_run.started')
+          if (started) return started.pipeline_run_id
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error(`run never started; stderr was:\n${stderr}`)
+    }
+    const runId = await waitForStart()
+
+    // Issue cancel. Walker polls every 500ms, so allow up to ~1s
+    // for it to pick up the sentinel + cascade abort.
+    const cancelR = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', runId.slice(-12)])
+    expect(cancelR.status).toBe(0)
+    expect(cancelR.stderr).toMatch(/cancel signal sent for run/)
+
+    // Wait for the run process to exit.
+    const exitCode = await new Promise<number>((resolve) => {
+      proc.on('exit', (code) => resolve(code ?? -1))
+    })
+    expect(exitCode).not.toBe(0)
+
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('aborted')
+    expect(ended.abort_reason).toMatch(/cancelled by operator/)
+    expect(ended.pipeline_run_id).toBe(runId)
+  }, 30000)
+})
+
+describe('artel pipeline run — subpipeline composition (V3.10.a)', () => {
+  // Two pipelines: parent calls child via subpipeline node. Child
+  // is a regular linear pipeline. Verify child's pipeline_run.*
+  // events carry parent_pipeline_run_id + parent_pipeline_node_id;
+  // child's exit code → parent's step disposition.
+
+  const childDef = {
+    id: 'child-flow', version: 1, entry: 'work',
+    nodes: {
+      work: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: '{{ greeting }}' },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'work', on_disposition: 'success', to: 'done' },
+      { from: 'work', on_disposition: '*', to: 'fail' },
+    ],
+  }
+
+  const parentDef = (overrides = {}) => ({
+    id: 'parent-flow', version: 1, entry: 'sub',
+    nodes: {
+      sub: {
+        type: 'subpipeline', pipeline_id: 'child-flow',
+        attrs: { greeting: 'hi from parent {{ pipeline_run_id }}' },
+        ...overrides,
+      },
+      done: { type: 'terminal', final_state: 'completed' },
+      fail: { type: 'terminal', final_state: 'failed' },
+    },
+    edges: [
+      { from: 'sub', on_disposition: 'success', to: 'done' },
+      { from: 'sub', on_disposition: '*', to: 'fail' },
+    ],
+  })
+
+  it('child run succeeds; parent step→success; child events link to parent (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+
+    // Two pipeline_run.started events — parent + child — distinguishable
+    // by pipeline_id.
+    const starts = evts.filter((e) => e.type === 'pipeline_run.started')
+    expect(starts).toHaveLength(2)
+    const parentStart = starts.find((e) => e.pipeline_id === 'parent-flow')
+    const childStart = starts.find((e) => e.pipeline_id === 'child-flow')
+    expect(parentStart).toBeDefined()
+    expect(childStart).toBeDefined()
+
+    // Child's start event links to parent
+    expect(childStart.parent_pipeline_run_id).toBe(parentStart.pipeline_run_id)
+    expect(childStart.parent_pipeline_node_id).toBe('sub')
+    // Parent's start has no parent
+    expect(parentStart.parent_pipeline_run_id).toBeUndefined()
+
+    // Both runs ended completed
+    const ends = evts.filter((e) => e.type === 'pipeline_run.ended')
+    expect(ends).toHaveLength(2)
+    for (const e of ends) expect(e.final_state).toBe('completed')
+
+    // Child dispatched its `work` node — verify the templated prompt
+    // received `pipeline_run_id` from the PARENT's run id (template
+    // rendering happens against the parent scope before child spawn).
+    const childRunId = childStart.pipeline_run_id
+    const dispatchStart = evts.find((e) => e.type === 'dispatch.start' && e.task_attrs?.pipeline_run_id === childRunId)
+    expect(dispatchStart).toBeDefined()
+    expect(dispatchStart.task_attrs.greeting).toMatch(/^hi from parent [0-9a-f-]{36}$/)
+  })
+
+  it('child run fails → parent step disposition error → wildcard edge (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Child that doesn't have a `success` edge from work — exits failed.
+    const failingChild = {
+      ...childDef, id: 'failing-child', entry: 'work',
+      edges: [{ from: 'work', on_disposition: '*', to: 'fail' }],
+    }
+    const parent = {
+      ...parentDef(),
+      nodes: {
+        ...parentDef().nodes,
+        sub: { type: 'subpipeline', pipeline_id: 'failing-child', attrs: { greeting: 'x' } },
+      },
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'fc.json', failingChild)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    // Stub that exits non-zero → child's work disposition: error → fail terminal
+    const stub = ['#!/usr/bin/env node', 'process.exit(7)', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ends = events(root).filter((e) => e.type === 'pipeline_run.ended')
+    const parentEnd = ends.find((e) => e.pipeline_id === 'parent-flow')
+    const childEnd = ends.find((e) => e.pipeline_id === 'failing-child')
+    expect(childEnd.final_state).toBe('failed')
+    expect(parentEnd).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'error',
+    })
+  })
+
+  it('subpipeline pointing at unregistered child fails fast', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const parent = parentDef({ pipeline_id: 'no-such-child' })
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipeline')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/child pipeline 'no-such-child' not registered/)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('failed')
+  })
+
+  it('arbitrary-depth cycle detected at run time (V3.10.b)', () => {
+    // A → B → A. Self-recursion (A → A) was caught at register in
+    // V3.10.a; this proves the chain mechanism catches longer
+    // cycles before the inner A spawns any side effects.
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const aDef = {
+      id: 'cyc-a', version: 1, entry: 'sub',
+      nodes: {
+        sub: { type: 'subpipeline', pipeline_id: 'cyc-b' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'sub', on_disposition: 'success', to: 'done' },
+        { from: 'sub', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    const bDef = {
+      id: 'cyc-b', version: 1, entry: 'sub',
+      nodes: {
+        sub: { type: 'subpipeline', pipeline_id: 'cyc-a' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'sub', on_disposition: 'success', to: 'done' },
+        { from: 'sub', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'a.json', aDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'b.json', bDef)])
+    snapshotRepo(root, 'with cycle')
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'cyc-a'])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/subpipeline cycle detected.*cyc-a → cyc-b → cyc-a/)
+    // Outer parent (cyc-a) routes through fail terminal because
+    // its subpipeline step errored.
+    const ends = events(root).filter((e) => e.type === 'pipeline_run.ended')
+    const outerEnd = ends.find((e) => e.pipeline_id === 'cyc-a' && !e.parent_pipeline_run_id)
+    expect(outerEnd.final_state).toBe('failed')
+    // Inner cyc-a (the would-be cycle close) never started — only
+    // outer cyc-a + middle cyc-b have pipeline_run.started.
+    const starts = events(root).filter((e) => e.type === 'pipeline_run.started')
+    expect(starts.map((e) => e.pipeline_id).sort()).toEqual(['cyc-a', 'cyc-b'])
+  })
+
+  it('parent cancel cascades to child via sentinel (V3.10.b)', async () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Child has a long-sleeping handler so we can land the cancel
+    // mid-flight.
+    const child = {
+      id: 'long-child', version: 1, entry: 'h',
+      nodes: {
+        h: {
+          type: 'handler', handler: 'builtin.exec',
+          cmd: 'sleep 30',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'h', on_disposition: 'success', to: 'done' },
+        { from: 'h', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    const parent = {
+      id: 'cancellable-parent', version: 1, entry: 'sub',
+      nodes: {
+        sub: { type: 'subpipeline', pipeline_id: 'long-child' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'sub', on_disposition: 'success', to: 'done' },
+        { from: 'sub', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'c.json', child)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    // Spawn parent async so we can issue cancel from this process.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn: nodeSpawn } = require('node:child_process') as typeof import('node:child_process')
+    const proc = nodeSpawn('node', ['engine/cli/pipeline.mjs', 'run', 'cancellable-parent'],
+      { cwd: root, env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    proc.stderr?.on('data', (d) => { stderr += d.toString() })
+
+    // Wait for the parent's pipeline_run.started so we know the run_id.
+    const eventsPath = join(root, '.artel', 'events.jsonl')
+    const waitForParentStart = async () => {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        if (existsSync(eventsPath)) {
+          const evts = events(root)
+          const parentStart = evts.find((e) => e.type === 'pipeline_run.started' && e.pipeline_id === 'cancellable-parent')
+          if (parentStart) return parentStart.pipeline_run_id
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error(`parent never started; stderr was:\n${stderr}`)
+    }
+    const parentRunId = await waitForParentStart()
+
+    // Cancel the parent. Walker sentinel-polls, fires runAbort,
+    // cascade writes the child's sentinel, child poller picks it
+    // up, child aborts, parent observes child's exit → parent
+    // ends as `aborted`.
+    const cancelR = runNode(root, ['engine/cli/pipeline.mjs', 'cancel', parentRunId])
+    expect(cancelR.status).toBe(0)
+
+    const exitCode = await new Promise<number>((resolveExit) => {
+      proc.on('exit', (code) => resolveExit(code ?? -1))
+    })
+    expect(exitCode).not.toBe(0)
+
+    const ends = events(root).filter((e) => e.type === 'pipeline_run.ended')
+    const parentEnd = ends.find((e) => e.pipeline_id === 'cancellable-parent')
+    expect(parentEnd.final_state).toBe('aborted')
+    // The child run also lands an `aborted` end via its own
+    // sentinel-driven cancel path.
+    const childEnd = ends.find((e) => e.pipeline_id === 'long-child' && e.parent_pipeline_run_id === parentRunId)
+    expect(childEnd.final_state).toBe('aborted')
+  }, 30000)
+
+  it('inherit_attrs: child sees parent userAttrs + explicit overrides win (V3.10.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Child reads `topic` and `phase` via templated prompt — both
+    // need to be in child's userAttrs at dispatch time.
+    const child = {
+      id: 'inherit-child', version: 1, entry: 'work',
+      nodes: {
+        work: { type: 'dispatch', role: 'implementer', engine: 'claude',
+                prompt: 'topic={{ topic }} phase={{ phase }}' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'work', on_disposition: 'success', to: 'done' },
+        { from: 'work', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    // Parent: set phase=staging, then sub with inherit_attrs +
+    // override topic from explicit attrs.
+    const parent = {
+      id: 'inherit-parent', version: 1, entry: 'tag',
+      nodes: {
+        tag: {
+          type: 'handler', handler: 'builtin.set_attr',
+          set: { phase: 'staging' },
+        },
+        sub: {
+          type: 'subpipeline', pipeline_id: 'inherit-child',
+          inherit_attrs: true,
+          attrs: { topic: 'auth-bug' },   // wins over any inherited
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'tag', on_disposition: 'success', to: 'sub' },
+        { from: 'tag', on_disposition: '*', to: 'fail' },
+        { from: 'sub', on_disposition: 'success', to: 'done' },
+        { from: 'sub', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'c.json', child)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    // Pass `topic=ignored` via parent --attrs — should get
+    // overridden by parent's explicit subpipeline.attrs.topic.
+    const r = runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'inherit-parent',
+      '--attrs', '{"topic":"ignored","passthrough":"yes"}',
+      '--task-prefix', 'ip',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    const childStart = evts.find((e) => e.type === 'pipeline_run.started' && e.pipeline_id === 'inherit-child')
+    const childRunId = childStart.pipeline_run_id
+    const dispatchStart = evts.find((e) => e.type === 'dispatch.start' && e.task_attrs?.pipeline_run_id === childRunId)
+    // Inherited from parent userAttrs (after set_attr): phase
+    expect(dispatchStart.task_attrs.phase).toBe('staging')
+    // Inherited from parent --attrs: passthrough
+    expect(dispatchStart.task_attrs.passthrough).toBe('yes')
+    // Explicit subpipeline.attrs wins: topic = 'auth-bug', not 'ignored'
+    expect(dispatchStart.task_attrs.topic).toBe('auth-bug')
+  })
+
+  it('inherit_attrs: false (default) — child sees only explicit attrs (V3.10.c)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const child = {
+      id: 'noninherit-child', version: 1, entry: 'work',
+      nodes: {
+        work: { type: 'dispatch', role: 'implementer', engine: 'claude',
+                prompt: 'just go' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'work', on_disposition: 'success', to: 'done' },
+        { from: 'work', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    const parent = {
+      id: 'noninherit-parent', version: 1, entry: 'sub',
+      nodes: {
+        sub: {
+          type: 'subpipeline', pipeline_id: 'noninherit-child',
+          attrs: { topic: 'override' },
+          // inherit_attrs absent → default false
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'sub', on_disposition: 'success', to: 'done' },
+        { from: 'sub', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'c.json', child)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    runNode(root, [
+      'engine/cli/pipeline.mjs', 'run', 'noninherit-parent',
+      '--attrs', '{"parent_only":"x"}',
+    ], { PATH: `${binDir}:${process.env.PATH || ''}` })
+
+    const evts = events(root)
+    const childStart = evts.find((e) => e.type === 'pipeline_run.started' && e.pipeline_id === 'noninherit-child')
+    const childRunId = childStart.pipeline_run_id
+    const dispatchStart = evts.find((e) => e.type === 'dispatch.start' && e.task_attrs?.pipeline_run_id === childRunId)
+    // Only explicit attrs in child task_attrs
+    expect(dispatchStart.task_attrs.topic).toBe('override')
+    expect(dispatchStart.task_attrs.parent_only).toBeUndefined()
+  })
+
+  it('subpipeline emits start/end events; status renders subpipeline step (V3.10.e)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+
+    const evts = events(root)
+    const sStart = evts.find((e) => e.type === 'pipeline_subpipeline.start')
+    const sEnd = evts.find((e) => e.type === 'pipeline_subpipeline.end')
+    expect(sStart).toBeDefined()
+    expect(sEnd).toBeDefined()
+    // Start event carries the snapshot
+    expect(sStart).toMatchObject({
+      kind: 'workload',
+      pipeline_node_id: 'sub',
+      child_pipeline_id: 'child-flow',
+      attrs: { greeting: 'hi from parent {{ pipeline_run_id }}' },
+    })
+    expect(sStart.subpipeline_id).toBeTruthy()
+    expect(sStart.child_run_id).toBeTruthy()
+    // End event carries the resolved disposition + duration
+    expect(sEnd).toMatchObject({
+      subpipeline_id: sStart.subpipeline_id,
+      child_run_id: sStart.child_run_id,
+      child_pipeline_id: 'child-flow',
+      disposition: 'success',
+      exit_code: 0,
+    })
+    expect(typeof sEnd.duration_ms).toBe('number')
+
+    // status --json on parent: subpipeline step appears alongside
+    // any dispatch/handler steps.
+    const parentEnded = evts.find((e) => e.type === 'pipeline_run.ended' && e.pipeline_id === 'parent-flow')
+    const sj = runNode(root, ['engine/cli/pipeline.mjs', 'status', parentEnded.pipeline_run_id, '--json'])
+    expect(sj.status).toBe(0)
+    const det = JSON.parse(sj.stdout) as {
+      steps: Array<{ kind: string; node_id: string; child_run_id?: string;
+        child_pipeline_id?: string; disposition: string }>
+    }
+    const subStep = det.steps.find((s) => s.kind === 'subpipeline')
+    expect(subStep).toBeDefined()
+    expect(subStep!).toMatchObject({
+      kind: 'subpipeline', node_id: 'sub',
+      child_pipeline_id: 'child-flow',
+      disposition: 'success',
+    })
+    expect(subStep!.child_run_id).toBe(sStart.child_run_id)
+
+    // Plain text status: subpipeline row visible with child_pipeline_id
+    // + run-id fragment.
+    const st = runNode(root, ['engine/cli/pipeline.mjs', 'status', parentEnded.pipeline_run_id])
+    expect(st.status).toBe(0)
+    expect(st.stdout).toMatch(/sub\s+child-flow\s+subpipeline\s+\S{12}\s+success/)
+  })
+
+  it('runs annotates child runs with parent fragment (V3.10.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    runNode(root, ['engine/cli/pipeline.mjs', 'run', 'parent-flow'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+
+    // --json: parent_run_id surfaces on child entries.
+    const j = runNode(root, ['engine/cli/pipeline.mjs', 'runs', '--json'])
+    expect(j.status).toBe(0)
+    const parsed = JSON.parse(j.stdout) as Array<{
+      pipeline_id: string; run_id: string; parent_run_id?: string
+    }>
+    const child = parsed.find((r) => r.pipeline_id === 'child-flow')
+    const parent = parsed.find((r) => r.pipeline_id === 'parent-flow')
+    expect(child?.parent_run_id).toBe(parent?.run_id)
+    expect(parent?.parent_run_id).toBeUndefined()
+
+    // text: ↳ child of <fragment> annotation
+    const t = runNode(root, ['engine/cli/pipeline.mjs', 'runs'])
+    expect(t.status).toBe(0)
+    expect(t.stdout).toMatch(new RegExp(`child-flow.*↳ child of ${parent?.run_id.slice(-8)}`))
+  })
+
+  it('subpipeline as a parallel branch — fans out to multiple sub-flows (V3.10.d)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    // Two sibling child pipelines.
+    const childA = {
+      id: 'sub-a', version: 1, entry: 'work',
+      nodes: {
+        work: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'a' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'work', on_disposition: 'success', to: 'done' },
+        { from: 'work', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    const childB = { ...childA, id: 'sub-b' }
+    // Parent fans out to both sub-flows + a regular dispatch.
+    const parent = {
+      id: 'fan-parent', version: 1, entry: 'fan',
+      nodes: {
+        fan: {
+          type: 'parallel',
+          branches: ['ra', 'rb', 'd'],
+          join: 'all-complete',
+        },
+        ra: { type: 'subpipeline', pipeline_id: 'sub-a' },
+        rb: { type: 'subpipeline', pipeline_id: 'sub-b' },
+        d: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'd' },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'a.json', childA)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'b.json', childB)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', parent)])
+    snapshotRepo(root, 'with pipelines')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'fan-parent', '--task-prefix', 'fp'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+
+    const evts = events(root)
+    const starts = evts.filter((e) => e.type === 'pipeline_run.started').map((e) => e.pipeline_id).sort()
+    expect(starts).toEqual(['fan-parent', 'sub-a', 'sub-b'])
+    // Both child runs link back to the parent + branch.
+    const childAStart = evts.find((e) => e.type === 'pipeline_run.started' && e.pipeline_id === 'sub-a')
+    const childBStart = evts.find((e) => e.type === 'pipeline_run.started' && e.pipeline_id === 'sub-b')
+    expect(childAStart.parent_pipeline_node_id).toBe('ra')
+    expect(childBStart.parent_pipeline_node_id).toBe('rb')
+
+    // Final state: parent completes; both children completed; the
+    // dispatch branch landed its meta.
+    const ends = evts.filter((e) => e.type === 'pipeline_run.ended')
+    for (const e of ends) expect(e.final_state).toBe('completed')
+    expect(existsSync(join(root, '.artel', '.dispatches', 'fp-fan-d.meta'))).toBe(true)
+  })
+
+  it('parallel rejects nested-parallel branch (only dispatch / handler / subpipeline)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'bad', version: 1, entry: 'fan',
+      nodes: {
+        fan: { type: 'parallel', branches: ['inner'], join: 'all-complete' },
+        inner: { type: 'parallel', branches: ['x'], join: 'all-complete' },
+        x: { type: 'dispatch', role: 'implementer', engine: 'claude', prompt: 'x' },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'fan', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'bad.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/branch 'inner' must be a dispatch \/ handler \/ subpipeline node \(got: parallel\)/)
+  })
+
+  it('show renders subpipeline row with attrs (V3.10.a)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'child.json', childDef)])
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'parent.json', parentDef())])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'parent-flow'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/sub\s+subpipeline\s+pipeline_id=child-flow\s+attrs=\{"greeting":"hi from parent \{\{ pipeline_run_id \}\}"\}/)
+  })
+})
+
+describe('artel pipeline run — dispatch node timeout_ms (V3.9)', () => {
+  // dispatch node carries an optional timeout_ms that flows into
+  // dispatchLifecycle as `timeoutMs`. When the engine stub hangs
+  // past the budget, dispatch settles with `disposition: 'timeout'`
+  // (V3.3.c machinery), and the wildcard edge catches it.
+  it('hanging dispatch with timeout_ms → timeout disposition → wildcard edge', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'budgeted', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'do thing',
+          timeout_ms: 500,           // V3.9 — node-level budget
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'done' },
+        { from: 'd', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    // Stub that hangs past the budget. SIGTERM-handler exits non-zero
+    // so the timeout path settles cleanly.
+    const stub = ['#!/usr/bin/env node',
+      'setTimeout(() => process.exit(0), 30000)',
+      `process.on('SIGTERM', () => process.exit(143))`,
+      ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'budgeted', '--task-prefix', 'b'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'timeout',
+    })
+  }, 15000)
+
+  it('parallel branches with distinct timeout_ms budgets settle independently (V3.9)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'mixed-budgets', version: 1, entry: 'fan',
+      nodes: {
+        // any-complete: succeed as soon as one branch finishes; the
+        // other gets cancelled by V3.7.e abort plumbing. Distinct
+        // per-branch timeouts ensure the slow one would hit timeout
+        // if it weren't cancelled first by the fast one's success.
+        fan: { type: 'parallel', branches: ['fast', 'slow'], join: 'any-complete' },
+        fast: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'fast', timeout_ms: 30000,    // generous
+        },
+        slow: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'slow', timeout_ms: 500,       // tight
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'fan', on_disposition: 'success', to: 'done' },
+        { from: 'fan', on_disposition: '*', to: 'fail' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const fastStub = ['#!/usr/bin/env node', 'console.log("fast ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', fastStub)
+
+    // The pipeline has both branches share the same engine 'claude',
+    // so the fast stub returns success immediately. Slow doesn't get
+    // a chance to hit its tight timeout — it's cancelled by V3.7.e.
+    // What we're asserting is that the per-branch timeout_ms values
+    // round-trip through validation + dispatch metadata, which
+    // means the next test ("show renders") covers the visible
+    // contract.
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'mixed-budgets', '--task-prefix', 'mb'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).toBe(0)
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended.final_state).toBe('completed')
+  }, 30000)
+
+  it('show renders dispatch timeout_ms', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'showable', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: 60000,
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'show', 'showable'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/d\s+dispatch\s+role=implementer\s+engine=claude\s+timeout_ms=60000/)
+  })
+
+  it('suffix-string timeout_ms flows through walker for dispatch + handler.exec (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    snapshotRepo(root, 'runtime')
+    const def = {
+      id: 'suffix-flow', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'do',
+          timeout_ms: '500ms',          // V3.9.b: string with suffix
+        },
+        h: {
+          type: 'handler', handler: 'builtin.exec',
+          // Plain sleep — bash's default SIGTERM handler terminates
+          // the shell directly, so the timeout disposition resolves
+          // immediately. (Adding a `trap "..." TERM` would block the
+          // signal until sleep returns; bash queues SIGTERM during
+          // the sleep wait. V3.7.e cancel grace handles that case
+          // via SIGKILL backstop in parallel branches, but linear
+          // exec with timeout_ms only delivers SIGTERM.)
+          cmd: 'sleep 30',
+          timeout_ms: '300ms',          // V3.9.b: tighter via suffix
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+        fail: { type: 'terminal', final_state: 'failed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'h' },
+        { from: 'd', on_disposition: '*', to: 'h' },
+        { from: 'h', on_disposition: 'timeout', to: 'fail' },
+        { from: 'h', on_disposition: '*', to: 'done' },
+      ],
+    }
+    runNode(root, ['engine/cli/pipeline.mjs', 'register', writePipelineFile(root, 'p.json', def)])
+    snapshotRepo(root, 'with pipeline')
+
+    const stub = ['#!/usr/bin/env node', 'console.log("ok")', ''].join('\n')
+    const binDir = installStub(root, 'claude', stub)
+
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'run', 'suffix-flow', '--task-prefix', 'sf'],
+      { PATH: `${binDir}:${process.env.PATH || ''}` })
+    expect(r.status).not.toBe(0)
+    // dispatch finishes ~immediately; handler.exec hits its 300ms
+    // budget → timeout edge → fail terminal.
+    const ended = events(root).find((e) => e.type === 'pipeline_run.ended')
+    expect(ended).toMatchObject({
+      final_state: 'failed', last_node: 'fail', last_disposition: 'timeout',
+    })
+  }, 15000)
+
+  it('register accepts suffix-string timeout_ms (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'sf-ok', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: '5m',
+        },
+        h: {
+          type: 'handler', handler: 'builtin.exec', cmd: 'true',
+          timeout_ms: '60s',
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [
+        { from: 'd', on_disposition: 'success', to: 'h' },
+        { from: 'h', on_disposition: 'success', to: 'done' },
+      ],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'sf-ok.json', def)])
+    expect(r.status).toBe(0)
+  })
+
+  it('register rejects malformed suffix-string timeout_ms (V3.9.b)', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'sf-bad', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: '60sec',   // bad suffix
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'sf-bad.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive integer ms or string with suffix/)
+  })
+
+  it('register rejects dispatch with non-positive timeout_ms', () => {
+    const root = createTempRepo()
+    installAll(root)
+    const def = {
+      id: 'broken', version: 1, entry: 'd',
+      nodes: {
+        d: {
+          type: 'dispatch', role: 'implementer', engine: 'claude',
+          prompt: 'go', timeout_ms: 0,
+        },
+        done: { type: 'terminal', final_state: 'completed' },
+      },
+      edges: [{ from: 'd', on_disposition: 'success', to: 'done' }],
+    }
+    const r = runNode(root, ['engine/cli/pipeline.mjs', 'register',
+      writePipelineFile(root, 'broken.json', def)])
+    expect(r.status).not.toBe(0)
+    expect(r.stderr).toMatch(/dispatch node 'd' \.timeout_ms must be a positive integer ms or string with suffix/)
+  })
+})

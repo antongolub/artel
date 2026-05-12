@@ -12,36 +12,34 @@
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { join, basename } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { dirname } from 'node:path'
 import * as claudeDriver from '../drivers/claude.mjs'
 import * as codexDriver from '../drivers/codex.mjs'
 import * as copilotDriver from '../drivers/copilot.mjs'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { listDispatches } from '../core/dispatches.mjs'
+import { QUEUE_SECTIONS as SECTIONS, readQueueMd, flattenItem } from '../core/queue_md.mjs'
+import { tryGit } from '../git/git.mjs'
+import { readJson, readJsonl } from '../util/fs.mjs'
+import { formatDuration } from '../util/proc.mjs'
+import { parseFrontmatter } from '../agents/frontmatter.mjs'
+import { chalk } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-// `here` is engine/cli/, so platform root is two levels up.
-const PLATFORM_DIR = dirname(dirname(here))
-// Project paths: each consuming repo holds its own .artel/ runtime. Resolve
-// from cwd (or env override) — never from `here`, since one platform serves
-// many projects.
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
+// Platform layout (agentsDir) + project-local runtime (artelDir,
+// dispatchesDir, eventsPath, queuePath, dispatcherStatePath, project
+// dir for the heading). All resolved in config/env.mjs — one platform
+// serves many projects.
+const {
+  projectDir: PROJECT_DIR,
+  agentsDir: AGENTS_DIR,
+  artelDir: PROJECT_ARTEL,
+  dispatchesDir: DISPATCHES_DIR,
+  eventsPath: EVENTS_PATH,
+  queuePath: QUEUE_PATH,
+  dispatcherStatePath: DISPATCHER_STATE_PATH,
+} = config
 const PROJECT_NAME = basename(PROJECT_DIR)
-const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
-const DISPATCHER_STATE_PATH = join(PROJECT_ARTEL, 'dispatcher_state.json')
 const DAYS = 7
-
-// --- formatting ---
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const bold = (s) => c('1', s)
-const dim = (s) => c('2', s)
-const cyan = (s) => c('36', s)
-const yellow = (s) => c('33', s)
-const green = (s) => c('32', s)
-const red = (s) => c('31', s)
 
 const fmt = (n) => {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -66,14 +64,6 @@ const sparkChar = (val, max) => {
 const cutoff = (days) => Date.now() - days * 86400000
 const dayKey = (ts) => new Date(ts).toISOString().slice(0, 10)
 
-const formatDuration = (ms) => {
-  if (!Number.isFinite(ms) || ms < 0) return null
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
-  return `${(ms / 3600000).toFixed(1)}h`
-}
-
 const relativeTime = (iso) => {
   const ms = Date.now() - Date.parse(iso.replace(' ', 'T') + (iso.endsWith('Z') ? '' : 'Z'))
   if (isNaN(ms)) return '?'
@@ -93,46 +83,14 @@ const dayLabel = (iso) => {
 
 // --- QUEUE parsing ---
 
-const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
-
+// Empty `.artel/QUEUE.md` shows up after `artel init` before the user
+// populates the queue; the `_missing` flag lets renderQueue surface a
+// hint instead of a misleading "0". Items are flattened to single
+// strings — status only renders, never round-trips.
 const parseQueue = () => {
-  const out = Object.fromEntries(SECTIONS.map((s) => [s, []]))
-  const path = join(PROJECT_ARTEL, 'QUEUE.md')
-  // Empty fallback when QUEUE.md doesn't exist yet — happens after `artel
-  // init` and before the user populates the queue, or when running
-  // `artel status` from a directory without artel runtime. Status should
-  // still render a meaningful skeleton in those cases. The `_missing`
-  // flag lets renderQueue surface a hint instead of a misleading "0".
-  if (!existsSync(path)) {
-    Object.defineProperty(out, '_missing', { value: true })
-    return out
-  }
-  const text = readFileSync(path, 'utf8')
-  let cur = null
-  let item = null
-  const flush = () => {
-    if (item && cur) out[cur].push(item)
-    item = null
-  }
-  for (const line of text.split('\n')) {
-    const sec = line.match(/^## (.+)$/)
-    if (sec) {
-      flush()
-      cur = SECTIONS.includes(sec[1]) ? sec[1] : null
-      continue
-    }
-    if (!cur) continue
-    const li = line.match(/^- (.+)$/)
-    if (li) {
-      flush()
-      item = li[1]
-      continue
-    }
-    const cont = line.match(/^  (.+)$/)
-    if (cont && item) item += ' ' + cont[1]
-  }
-  flush()
-  for (const k of SECTIONS) out[k] = out[k].filter((s) => !s.startsWith('(none)'))
+  const { sections, missing } = readQueueMd(QUEUE_PATH)
+  const out = Object.fromEntries(SECTIONS.map((s) => [s, sections[s].map(flattenItem)]))
+  if (missing) Object.defineProperty(out, '_missing', { value: true })
   return out
 }
 
@@ -143,25 +101,11 @@ const parseQueue = () => {
 // projection (see engine/cli/state_gen.mjs), not a source of truth, and
 // keeping the dashboard live means staying close to the event stream.
 
-const readDispatcherState = () => {
-  if (!existsSync(DISPATCHER_STATE_PATH)) return null
-  try {
-    return JSON.parse(readFileSync(DISPATCHER_STATE_PATH, 'utf8'))
-  } catch {
-    return null
-  }
-}
+const readDispatcherState = () => readJson(DISPATCHER_STATE_PATH)
 
-const readEvents = () => {
-  if (!existsSync(EVENTS_PATH)) return []
-  return readFileSync(EVENTS_PATH, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      try { return JSON.parse(line) } catch { return null }
-    })
-    .filter((e) => e && e.type !== 'schema')
-}
+// Drop schema-marker events — they're file headers, not telemetry the
+// dashboard surfaces.
+const dashboardEvents = () => readJsonl(EVENTS_PATH).filter((e) => e.type !== 'schema')
 
 const summarizeEvent = (e) => {
   // dispatch.start / dispatch.end are canonical (DESIGN.md §4.5); legacy
@@ -199,7 +143,7 @@ const summarizeEvent = (e) => {
 }
 
 const getSharedFeed = (n = 5) =>
-  readEvents()
+  dashboardEvents()
     .map((e) => ({ ts: e.at, role: e.owner_role || e.from_role || e.type, text: summarizeEvent(e) }))
     .filter((x) => x.ts && x.text)
     .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
@@ -226,7 +170,6 @@ const getDispatcherStatus = () => {
 // Roles are project-defined; the platform discovers them from the
 // agents/ directory at runtime. Fallback only — when meta sidecar
 // is missing we try to detect role from filename `<role>-<task>.out`.
-const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
 const knownRoles = () =>
   existsSync(AGENTS_DIR)
     ? readdirSync(AGENTS_DIR)
@@ -235,7 +178,7 @@ const knownRoles = () =>
     : []
 
 const getRecentDispatches = (n = 5) => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
+  const dir = DISPATCHES_DIR
   if (!existsSync(dir)) return []
   return readdirSync(dir)
     .filter((f) => f.endsWith('.out'))
@@ -260,23 +203,20 @@ const getRecentDispatches = (n = 5) => {
       let traceId = null
       let durationMs = null
       let delta = null
-      const metaPath = join(dir, `${base}.meta`)
-      if (existsSync(metaPath)) {
-        try {
-          const meta = JSON.parse(readFileSync(metaPath, 'utf8'))
-          role = meta.role
-          engine = meta.engine
-          task = meta.task
-          usage = meta.usage || null
-          retryCount = meta.retryCount || 0
-          dispatchId = meta.dispatchId || null
-          traceId = meta.traceId || null
-          delta = meta.delta || null
-          if (meta.dispatchedAt && meta.completedAt) {
-            const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
-            if (Number.isFinite(d) && d >= 0) durationMs = d
-          }
-        } catch {}
+      const meta = readJson(join(dir, `${base}.meta`))
+      if (meta) {
+        role = meta.role
+        engine = meta.engine
+        task = meta.task
+        usage = meta.usage || null
+        retryCount = meta.retryCount || 0
+        dispatchId = meta.dispatchId || null
+        traceId = meta.traceId || null
+        delta = meta.delta || null
+        if (meta.dispatchedAt && meta.completedAt) {
+          const d = Date.parse(meta.completedAt) - Date.parse(meta.dispatchedAt)
+          if (Number.isFinite(d) && d >= 0) durationMs = d
+        }
       }
       // Legacy fallback: detect from filename (`<role>-<task>.out`) and content
       if (!role) role = knownRoles().find((r) => f.startsWith(r + '-')) || '?'
@@ -298,28 +238,17 @@ const getRecentDispatches = (n = 5) => {
 
 // --- Parked dispatches (recoverable tail markers) ---
 
-const getParked = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.parked && meta.completedAt) out.push(meta)
-    } catch {}
-  }
-  return out
+const getParked = () =>
+  listDispatches(DISPATCHES_DIR)
+    .map(({ meta }) => meta)
+    .filter((m) => m.parked && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
     .slice(0, 10)
-}
 
 // Aggregate activity over the last `days` days from .dispatches/*.meta:
 // disposition counts, role/engine breakdown, summed delta. Returns null
 // when there are no dispatches in the window — render skips the panel.
 const getActivity = (days = DAYS) => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return null
   const cutoffMs = cutoff(days)
   let total = 0
   const dispositions = {}
@@ -328,10 +257,7 @@ const getActivity = (days = DAYS) => {
   let linesAdded = 0
   let linesRemoved = 0
   let filesChanged = 0
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    let m
-    try { m = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+  for (const { meta: m } of listDispatches(DISPATCHES_DIR)) {
     if (!m.completedAt) continue
     const ts = Date.parse(m.completedAt)
     if (!ts || ts < cutoffMs) continue
@@ -350,21 +276,12 @@ const getActivity = (days = DAYS) => {
   return { total, dispositions, byRole, byEngine, linesAdded, linesRemoved, filesChanged }
 }
 
-const getTimedOut = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return []
-  const out = []
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.status === 'timed-out' && meta.completedAt) out.push(meta)
-    } catch {}
-  }
-  return out
+const getTimedOut = () =>
+  listDispatches(DISPATCHES_DIR)
+    .map(({ meta }) => meta)
+    .filter((m) => m.status === 'timed-out' && m.completedAt)
     .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
     .slice(0, 10)
-}
 
 // --- Running subprocesses ---
 
@@ -410,29 +327,19 @@ const parseRunArgs = (command) => {
 
 const roleEngineFromFile = (role) => {
   try {
-    const text = readFileSync(join(PLATFORM_DIR, 'agents', `${role}.md`), 'utf8')
-    const fm = text.match(/^---\n([\s\S]*?)\n---/)
-    if (!fm) return null
-    const eng = fm[1].match(/^engine:\s*(\S+)/m)
-    return eng ? eng[1] : null
+    return parseFrontmatter(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8')).meta.engine || null
   } catch {
     return null
   }
 }
 
-const readMetaByPid = () => {
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  if (!existsSync(dir)) return new Map()
-  const m = new Map()
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    try {
-      const meta = JSON.parse(readFileSync(join(dir, f), 'utf8'))
-      if (meta.pid && !meta.completedAt) m.set(String(meta.pid), meta)
-    } catch {}
-  }
-  return m
-}
+const readMetaByPid = () =>
+  new Map(
+    listDispatches(DISPATCHES_DIR)
+      .map(({ meta }) => meta)
+      .filter((m) => m.pid && !m.completedAt)
+      .map((m) => [String(m.pid), m]),
+  )
 
 const getRunning = () => {
   try {
@@ -457,7 +364,8 @@ const getRunning = () => {
         const engine = (meta && meta.engine) || cliEngine || roleEngineFromFile(role) || 'claude'
         const version = probeEngineVersion(engine)
         const task = meta ? meta.task : null
-        return { pid: m[1], etime: m[2], role, engine, version, task }
+        const lastHeartbeatAt = meta ? meta.lastHeartbeatAt : null
+        return { pid: m[1], etime: m[2], role, engine, version, task, lastHeartbeatAt }
       })
       .filter(Boolean)
   } catch {
@@ -480,20 +388,10 @@ const getClusterContext = () => {
   }
 }
 
-const gitOf = (cwd, args) => {
-  try {
-    return execSync(`git ${args}`, {
-      cwd, encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-  } catch {
-    return null
-  }
-}
-
 const getGitContext = () => {
-  const branch = gitOf(PROJECT_DIR, 'rev-parse --abbrev-ref HEAD')
+  const branch = tryGit(PROJECT_DIR, ['rev-parse', '--abbrev-ref', 'HEAD'])
   if (!branch) return null
-  const porcelain = gitOf(PROJECT_DIR, 'status --porcelain')
+  const porcelain = tryGit(PROJECT_DIR, ['status', '--porcelain'])
   const dirty = porcelain ? porcelain.split('\n').filter(Boolean).length : 0
   return { branch, dirty }
 }
@@ -505,32 +403,19 @@ const getGitContext = () => {
 // recent success → ✓; nothing on record → ?.
 const getAuthHealth = (engine) => {
   const window = Date.now() - 86400000
-  const dir = join(PROJECT_ARTEL, '.dispatches')
-  let recentAuthFail = false
-  let recentSuccess = false
   let latestFailAt = 0
   let latestSuccessAt = 0
-  if (!existsSync(dir)) return { mark: '?', color: dim }
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith('.meta')) continue
-    let meta
-    try { meta = JSON.parse(readFileSync(join(dir, f), 'utf8')) } catch { continue }
+  for (const { meta } of listDispatches(DISPATCHES_DIR)) {
     if (meta.engine !== engine) continue
     const ts = Date.parse(meta.completedAt || '') || 0
     if (!ts || ts < window) continue
-    if (meta.parked?.reason === 'auth-expired' && ts > latestFailAt) {
-      recentAuthFail = true
-      latestFailAt = ts
-    }
-    if (meta.disposition === 'success' && ts > latestSuccessAt) {
-      recentSuccess = true
-      latestSuccessAt = ts
-    }
+    if (meta.parked?.reason === 'auth-expired' && ts > latestFailAt) latestFailAt = ts
+    if (meta.disposition === 'success' && ts > latestSuccessAt) latestSuccessAt = ts
   }
   // If success post-dates the failure, treat as recovered.
-  if (recentAuthFail && latestFailAt > latestSuccessAt) return { mark: '⚠', color: yellow }
-  if (recentSuccess) return { mark: '✓', color: green }
-  return { mark: '?', color: dim }
+  if (latestFailAt && latestFailAt > latestSuccessAt) return { mark: '⚠', color: chalk.yellow }
+  if (latestSuccessAt) return { mark: '✓', color: chalk.green }
+  return { mark: '?', color: chalk.dim }
 }
 
 // --- Token aggregates (delegated to drivers) ---
@@ -548,52 +433,61 @@ const getCopilotTokens = (days = DAYS) =>
 // --- render ---
 
 const renderFeed = (items) => {
-  let out = `\n${bold('FEED')} ${dim('(shared telemetry, last 5 events)')}\n`
-  if (!items.length) return out + `  ${dim('(none)')}\n`
+  let out = `\n${chalk.bold('FEED')} ${chalk.dim('(shared telemetry, last 5 events)')}\n`
+  if (!items.length) return out + `  ${chalk.dim('(none)')}\n`
   const cols = process.stdout.columns || 120
   const trunc = Math.min(140, cols - 18)
   for (const t of items) {
     const time = new Date(t.ts).toISOString().slice(11, 16)
-    const role = (t.role === 'the owner' ? yellow(t.role.padEnd(12)) : cyan(String(t.role).padEnd(12)))
+    const role = (t.role === 'the owner' ? chalk.yellow(t.role.padEnd(12)) : chalk.cyan(String(t.role).padEnd(12)))
     const text = t.text.replace(/\s+/g, ' ')
-    out += `  ${dim(time)}  ${role}  ${truncate(text, trunc)}\n`
+    out += `  ${chalk.dim(time)}  ${role}  ${truncate(text, trunc)}\n`
   }
   return out
 }
 
 const renderRunning = (dispatcher, procs) => {
-  let out = `\n${bold('RUNNING')} ${dim('(background subprocesses)')}\n`
+  let out = `\n${chalk.bold('RUNNING')} ${chalk.dim('(background subprocesses)')}\n`
   // Empty-state: dispatcher_state.json missing → show a friendly hint
   // instead of a row full of "null"/"unknown".
   if (!dispatcher.role) {
     if (procs.length) {
       for (const p of procs) {
-        const role = cyan(p.role.padEnd(13))
+        const role = chalk.cyan(p.role.padEnd(13))
         const exec = `${p.engine} ${p.version}`
-        const task = p.task ? truncate(p.task, 28) : dim('—')
-        out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}\n`
+        const task = p.task ? truncate(p.task, 28) : chalk.dim('—')
+        out += `  ${role}  ${task.padEnd(30)}  ${chalk.dim(exec.padEnd(18))}  ${chalk.dim('pid')} ${p.pid}  ${chalk.dim(p.etime)}\n`
       }
     } else {
-      out += `  ${dim('(no dispatcher_state.json — no active dispatcher session)')}\n`
+      out += `  ${chalk.dim('(no dispatcher_state.json — no active dispatcher session)')}\n`
     }
     return out
   }
-  const status = dispatcher.controlStatus === 'active' ? yellow(dispatcher.controlStatus) : dim(dispatcher.controlStatus)
+  const status = dispatcher.controlStatus === 'active' ? chalk.yellow(dispatcher.controlStatus) : chalk.dim(dispatcher.controlStatus)
   const last = dispatcher.lastActionAt ? relativeTime(dispatcher.lastActionAt) : '?'
   const orch = `${dispatcher.orchestratorEngine}/${dispatcher.orchestratorSessionId ? truncate(dispatcher.orchestratorSessionId, 12) : 'unknown'}`
-  out += `  ${cyan(String(dispatcher.role).padEnd(13))}  ${truncate('(shared control actor)', 30).padEnd(30)}  ${dim(`${dispatcher.provider} / ${dispatcher.session}`.padEnd(18))}  ${dim('status')} ${status}  ${dim('last')} ${last}\n`
-  out += `  ${dim(' '.repeat(15) + `orchestrator ${orch}`)}`
+  out += `  ${chalk.cyan(String(dispatcher.role).padEnd(13))}  ${truncate('(shared control actor)', 30).padEnd(30)}  ${chalk.dim(`${dispatcher.provider} / ${dispatcher.session}`.padEnd(18))}  ${chalk.dim('status')} ${status}  ${chalk.dim('last')} ${last}\n`
+  out += `  ${chalk.dim(' '.repeat(15) + `orchestrator ${orch}`)}`
   if (dispatcher.lastActionTask || dispatcher.lastActionKind) {
-    out += `${dim(' · ')}${dispatcher.lastActionKind || 'unknown'}`
+    out += `${chalk.dim(' · ')}${dispatcher.lastActionKind || 'unknown'}`
     if (dispatcher.lastActionTask) out += ` → ${dispatcher.lastActionTask}`
   }
   out += '\n'
   if (!procs.length) return out
   for (const p of procs) {
-    const role = cyan(p.role.padEnd(13))
+    const role = chalk.cyan(p.role.padEnd(13))
     const exec = `${p.engine} ${p.version}`
-    const task = p.task ? truncate(p.task, 28) : dim('—')
-    out += `  ${role}  ${task.padEnd(30)}  ${dim(exec.padEnd(18))}  ${dim('pid')} ${p.pid}  ${dim(p.etime)}\n`
+    const task = p.task ? truncate(p.task, 28) : chalk.dim('—')
+    // V9: heartbeat freshness — green when recent (≤90s), yellow when
+    // stale (≤5m), red when older (likely stuck). Threshold tuned around
+    // default 60s heartbeat interval.
+    let heartbeat = ''
+    if (p.lastHeartbeatAt) {
+      const ageMs = Date.now() - Date.parse(p.lastHeartbeatAt)
+      const colour = ageMs <= 90000 ? chalk.green : ageMs <= 300000 ? chalk.yellow : chalk.red
+      heartbeat = `  ${chalk.dim('hb')} ${colour(relativeTime(p.lastHeartbeatAt))}`
+    }
+    out += `  ${role}  ${task.padEnd(30)}  ${chalk.dim(exec.padEnd(18))}  ${chalk.dim('pid')} ${p.pid}  ${chalk.dim(p.etime)}${heartbeat}\n`
   }
   return out
 }
@@ -601,11 +495,11 @@ const renderRunning = (dispatcher, procs) => {
 const renderRecent = (items) => {
   const cols = process.stdout.columns || 120
   const trunc = Math.min(110, cols - 100)
-  let out = `\n${bold('RECENT')} ${dim('(last 5 dispatches)')}\n`
-  if (!items.length) return out + `  ${dim('(none)')}\n`
+  let out = `\n${chalk.bold('RECENT')} ${chalk.dim('(last 5 dispatches)')}\n`
+  if (!items.length) return out + `  ${chalk.dim('(none)')}\n`
   for (const item of items) {
     const age = relativeTime(new Date(item.mtime).toISOString())
-    const role = cyan(item.role.padEnd(13))
+    const role = chalk.cyan(item.role.padEnd(13))
     const dur = formatDuration(item.durationMs)
     const exec = dur ? `${item.engine} ${item.version} (${dur})` : `${item.engine} ${item.version}`
     const task = item.task ? truncate(item.task, 28).padEnd(30) : ' '.repeat(30)
@@ -616,12 +510,12 @@ const renderRecent = (items) => {
     }
     if (item.delta && (item.delta.lines_added || item.delta.lines_removed || item.delta.files_changed)) {
       const d = item.delta
-      annot.push(`${green('+' + (d.lines_added || 0))}/${red('-' + (d.lines_removed || 0))}`)
+      annot.push(`${chalk.green('+' + (d.lines_added || 0))}/${chalk.red('-' + (d.lines_removed || 0))}`)
     }
-    if (item.retryCount > 0) annot.push(yellow(`r${item.retryCount}`))
-    const annotStr = annot.length ? `${dim('[')}${annot.join(' ')}${dim(']')} ` : ''
+    if (item.retryCount > 0) annot.push(chalk.yellow(`r${item.retryCount}`))
+    const annotStr = annot.length ? `${chalk.dim('[')}${annot.join(' ')}${chalk.dim(']')} ` : ''
     const summary = truncate(item.summary.replace(/\s+/g, ' '), trunc)
-    out += `  ${dim(age.padEnd(9))} ${role} ${dim(exec.padEnd(24))} ${task} ${annotStr}${summary}\n`
+    out += `  ${chalk.dim(age.padEnd(9))} ${role} ${chalk.dim(exec.padEnd(24))} ${task} ${annotStr}${summary}\n`
   }
   return out
 }
@@ -630,16 +524,16 @@ const renderParked = (items) => {
   if (!items.length) return ''
   const cols = process.stdout.columns || 120
   const trunc = Math.min(80, cols - 90)
-  let out = `\n${bold('PARKED')} ${dim('(recoverable dispatch failures)')}\n`
+  let out = `\n${chalk.bold('PARKED')} ${chalk.dim('(recoverable dispatch failures)')}\n`
   for (const p of items) {
-    const role = cyan((p.role || '?').padEnd(13))
+    const role = chalk.cyan((p.role || '?').padEnd(13))
     const exec = `${p.engine || 'claude'} ${probeEngineVersion(p.engine || 'claude')}`
     const task = p.task ? truncate(p.task, 28).padEnd(30) : ' '.repeat(30)
     const reset = p.parked.reason === 'auth-expired'
       ? 'relogin required'
-      : p.parked.resetAt ? `resets ${p.parked.resetAt}` : dim('no reset time')
+      : p.parked.resetAt ? `resets ${p.parked.resetAt}` : chalk.dim('no reset time')
     const raw = truncate((p.parked.raw || '').replace(/\s+/g, ' '), Math.max(20, trunc))
-    out += `  ${role}  ${dim(exec.padEnd(18))}  ${task}  ${reset.padEnd(20)}  ${dim(raw)}\n`
+    out += `  ${role}  ${chalk.dim(exec.padEnd(18))}  ${task}  ${reset.padEnd(20)}  ${chalk.dim(raw)}\n`
   }
   return out
 }
@@ -647,10 +541,10 @@ const renderParked = (items) => {
 const renderActivity = (stats) => {
   if (!stats) return ''
   const dispoOrder = [
-    ['success', green('✓')],
-    ['parked', yellow('⚠')],
-    ['timeout', red('⏱')],
-    ['error', red('✗')],
+    ['success', chalk.green('✓')],
+    ['parked', chalk.yellow('⚠')],
+    ['timeout', chalk.red('⏱')],
+    ['error', chalk.red('✗')],
   ]
   const dispoChunks = dispoOrder
     .filter(([d]) => stats.dispositions[d])
@@ -658,16 +552,16 @@ const renderActivity = (stats) => {
     .join(' ')
   const sortedRoles = Object.entries(stats.byRole).sort(([, a], [, b]) => b - a).slice(0, 5)
   const sortedEngines = Object.entries(stats.byEngine).sort(([, a], [, b]) => b - a)
-  const roleStr = sortedRoles.map(([r, n]) => `${r} ${n}`).join(dim(' · '))
-  const engineStr = sortedEngines.map(([e, n]) => `${e} ${n}`).join(dim(' · '))
-  let out = `\n${bold('ACTIVITY')} ${dim(`(last ${DAYS}d)`)}\n`
+  const roleStr = sortedRoles.map(([r, n]) => `${r} ${n}`).join(chalk.dim(' · '))
+  const engineStr = sortedEngines.map(([e, n]) => `${e} ${n}`).join(chalk.dim(' · '))
+  let out = `\n${chalk.bold('ACTIVITY')} ${chalk.dim(`(last ${DAYS}d)`)}\n`
   out += `  ${stats.total} dispatches  ${dispoChunks}`
   if (stats.filesChanged) {
-    out += `  ${dim('·')}  ${green('+' + stats.linesAdded)}/${red('-' + stats.linesRemoved)} ${dim(`across ${stats.filesChanged} files`)}`
+    out += `  ${chalk.dim('·')}  ${chalk.green('+' + stats.linesAdded)}/${chalk.red('-' + stats.linesRemoved)} ${chalk.dim(`across ${stats.filesChanged} files`)}`
   }
   out += '\n'
-  if (sortedRoles.length) out += `  ${dim('by role:  ')}${roleStr}\n`
-  if (sortedEngines.length) out += `  ${dim('by engine:')} ${engineStr}\n`
+  if (sortedRoles.length) out += `  ${chalk.dim('by role:  ')}${roleStr}\n`
+  if (sortedEngines.length) out += `  ${chalk.dim('by engine:')} ${engineStr}\n`
   return out
 }
 
@@ -675,9 +569,9 @@ const renderTimedOut = (items) => {
   if (!items.length) return ''
   const cols = process.stdout.columns || 120
   const trunc = Math.min(80, cols - 90)
-  let out = `\n${bold('TIMED-OUT')} ${dim('(dispatch timeout releases)')}\n`
+  let out = `\n${chalk.bold('TIMED-OUT')} ${chalk.dim('(dispatch timeout releases)')}\n`
   for (const p of items) {
-    const role = cyan((p.role || '?').padEnd(13))
+    const role = chalk.cyan((p.role || '?').padEnd(13))
     const exec = `${p.engine || 'claude'} ${probeEngineVersion(p.engine || 'claude')}`
     const task = p.task ? truncate(p.task, 28).padEnd(30) : ' '.repeat(30)
     const timeout = p.timeout?.timeoutMs ? `timeout ${p.timeout.timeoutMs}ms` : 'timeout'
@@ -685,7 +579,7 @@ const renderTimedOut = (items) => {
       [`exit ${p.exitCode ?? '?'}`, p.timeout?.signal].filter(Boolean).join(' · '),
       Math.max(20, trunc),
     )
-    out += `  ${role}  ${dim(exec.padEnd(18))}  ${task}  ${timeout.padEnd(20)}  ${dim(raw)}\n`
+    out += `  ${role}  ${chalk.dim(exec.padEnd(18))}  ${task}  ${timeout.padEnd(20)}  ${chalk.dim(raw)}\n`
   }
   return out
 }
@@ -694,35 +588,35 @@ const renderQueue = (q) => {
   const cols = process.stdout.columns || 120
   const trunc = Math.min(120, cols - 4)
   if (q._missing) {
-    return `\n${bold('QUEUE')} ${dim('(no .artel/QUEUE.md — create one to start tracking work)')}\n`
+    return `\n${chalk.bold('QUEUE')} ${chalk.dim('(no .artel/QUEUE.md — create one to start tracking work)')}\n`
   }
   const counts = SECTIONS.map((s) => {
     const n = q[s].length
     const v = `${s}: ${n}`
-    return s === 'For Owner' && n > 0 ? yellow(v) : v
+    return s === 'For Owner' && n > 0 ? chalk.yellow(v) : v
   }).join('    ')
-  let out = `\n${bold('QUEUE')}\n  ${counts}\n`
+  let out = `\n${chalk.bold('QUEUE')}\n  ${counts}\n`
   if (q['For Owner'].length) {
-    out += `\n${bold('FOR ANTON')}\n`
-    for (const it of q['For Owner']) out += `  ${yellow('•')} ${truncate(it, trunc)}\n`
+    out += `\n${chalk.bold('FOR ANTON')}\n`
+    for (const it of q['For Owner']) out += `  ${chalk.yellow('•')} ${truncate(it, trunc)}\n`
   }
   if (q['In progress'].length) {
-    out += `\n${bold('ACTIVE')} ${dim('(in progress)')}\n`
+    out += `\n${chalk.bold('ACTIVE')} ${chalk.dim('(in progress)')}\n`
     for (const it of q['In progress']) {
       const m = it.match(/\[since ([^\]]+)\]/)
       const since = m ? m[1].trim() : null
       const cleaned = m ? it.replace(/\s*\[since [^\]]+\]/, '').trim() : it
-      const prefix = since ? dim(relativeTime(since).padEnd(9)) : ' '.repeat(9)
+      const prefix = since ? chalk.dim(relativeTime(since).padEnd(9)) : ' '.repeat(9)
       out += `  ${prefix}${truncate(cleaned, trunc - 11)}\n`
     }
   }
   if (q['Blocked'].length) {
-    out += `\n${bold('BLOCKED')} ${dim('(needs attention)')}\n`
-    for (const it of q['Blocked']) out += `  ${yellow('!')} ${truncate(it, trunc - 4)}\n`
+    out += `\n${chalk.bold('BLOCKED')} ${chalk.dim('(needs attention)')}\n`
+    for (const it of q['Blocked']) out += `  ${chalk.yellow('!')} ${truncate(it, trunc - 4)}\n`
   }
   if (q['Pending'].length) {
-    out += `\n${bold('PENDING')}\n`
-    for (const it of q['Pending']) out += `  ${dim('•')} ${truncate(it, trunc - 4)}\n`
+    out += `\n${chalk.bold('PENDING')}\n`
+    for (const it of q['Pending']) out += `  ${chalk.dim('•')} ${truncate(it, trunc - 4)}\n`
   }
   return out
 }
@@ -752,13 +646,13 @@ const renderTokens = (claude, codex, copilot) => {
     },
   ]
   const max = Math.max(...rows.map((x) => x.output), 1)
-  let out = `\n${bold('TOKENS')} ${dim(`(last ${DAYS}d, project-scoped)`)} ${dim('· health: ✓ recent success / ⚠ recent auth fail / ? unknown')}\n`
+  let out = `\n${chalk.bold('TOKENS')} ${chalk.dim(`(last ${DAYS}d, project-scoped)`)} ${chalk.dim('· health: ✓ recent success / ⚠ recent auth fail / ? unknown')}\n`
   for (const x of rows) {
     const cachePct = x.input > 0 ? Math.round((x.cached / x.input) * 100) : 0
     const health = getAuthHealth(x.engine)
     out +=
       `  ${health.color(health.mark)} ${x.label.padEnd(8)} ${bar(x.output, max)}   ` +
-      `out: ${fmt(x.output).padEnd(6)} ${dim('·')} in: ${fmt(x.input)} ${dim(`(${cachePct}% cached)`)}\n`
+      `out: ${fmt(x.output).padEnd(6)} ${chalk.dim('·')} in: ${fmt(x.input)} ${chalk.dim(`(${cachePct}% cached)`)}\n`
   }
   return out
 }
@@ -776,7 +670,7 @@ const renderPerDay = (claude, codex, copilot) => {
   const spark = merged.map((x) => sparkChar(x.out, max)).join('')
   const peak = merged.reduce((p, x) => (x.out > p.out ? x : p), merged[0])
   const peakLabel = peak.out > 0 ? `peak ${dayLabel(peak.date)}: ${fmt(peak.out)}` : 'no activity'
-  return `\n${bold('PER DAY')} ${dim(`(${DAYS}d output, today rightmost)`)}  ${spark}   ${dim(peakLabel)}\n`
+  return `\n${chalk.bold('PER DAY')} ${chalk.dim(`(${DAYS}d output, today rightmost)`)}  ${spark}   ${chalk.dim(peakLabel)}\n`
 }
 
 // --- main ---
@@ -821,21 +715,21 @@ const render = () => {
   const copilot = getCopilotTokens()
   const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ')
   if (watchSec) process.stdout.write('\x1b[H\x1b[2J')
-  console.log(`${bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${dim(stamp + ' UTC')}`)
+  console.log(`${chalk.bold(`=== ${PROJECT_NAME} artel status ===`)}                       ${chalk.dim(stamp + ' UTC')}`)
   const cluster = getClusterContext()
   const git = getGitContext()
   const ctx = []
   if (cluster) {
-    const id = cluster.shortId ? cyan(cluster.shortId) : '?'
+    const id = cluster.shortId ? chalk.cyan(cluster.shortId) : '?'
     ctx.push(cluster.name && cluster.name !== PROJECT_NAME
-      ? `${dim('cluster')} ${id} ${dim('·')} ${dim(cluster.name)}`
-      : `${dim('cluster')} ${id}`)
+      ? `${chalk.dim('cluster')} ${id} ${chalk.dim('·')} ${chalk.dim(cluster.name)}`
+      : `${chalk.dim('cluster')} ${id}`)
   }
   if (git) {
-    const dirty = git.dirty > 0 ? yellow(`${git.dirty} modified`) : green('clean')
-    ctx.push(`${dim('branch')} ${cyan(git.branch)} ${dim('·')} ${dirty}`)
+    const dirty = git.dirty > 0 ? chalk.yellow(`${git.dirty} modified`) : chalk.green('clean')
+    ctx.push(`${chalk.dim('branch')} ${chalk.cyan(git.branch)} ${chalk.dim('·')} ${dirty}`)
   }
-  if (ctx.length) console.log(`  ${ctx.join(`  ${dim('·')}  `)}`)
+  if (ctx.length) console.log(`  ${ctx.join(`  ${chalk.dim('·')}  `)}`)
   process.stdout.write(renderFeed(feed))
   process.stdout.write(renderRunning(dispatcher, running))
   process.stdout.write(renderRecent(recent))
@@ -845,7 +739,7 @@ const render = () => {
   process.stdout.write(renderQueue(queue))
   process.stdout.write(renderTokens(claude, codex, copilot))
   process.stdout.write(renderPerDay(claude, codex, copilot))
-  if (watchSec) console.log(dim(`\nrefreshing every ${watchSec}s · q or ctrl+c to exit`))
+  if (watchSec) console.log(chalk.dim(`\nrefreshing every ${watchSec}s · q or ctrl+c to exit`))
 }
 
 render()

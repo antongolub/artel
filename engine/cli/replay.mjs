@@ -12,17 +12,18 @@
 // Or: rerun on the same engine to see if the failure is sticky.
 //   artel replay broken-task
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
+import { listDispatches } from '../core/dispatches.mjs'
+import { config } from '../config/env.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const SPAWN_PATH = join(here, 'spawn.mjs')
 
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-const DISPATCHES_DIR = join(PROJECT_DIR, '.artel', '.dispatches')
+const DISPATCHES_DIR = config.dispatchesDir
 
 const usage = (code = 2) => {
   console.error(`\
@@ -76,25 +77,17 @@ const target = positionals[0]
 const isUuidV7 = (s) => /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 
 const resolveTarget = (arg) => {
-  if (!existsSync(DISPATCHES_DIR)) return null
   const lookupByDispatchId = isUuidV7(arg)
-  const candidates = []
-  for (const f of readdirSync(DISPATCHES_DIR)) {
-    if (!f.endsWith('.meta')) continue
-    let meta
-    try { meta = JSON.parse(readFileSync(join(DISPATCHES_DIR, f), 'utf8')) } catch { continue }
-    const stem = f.replace(/\.meta$/, '')
-    if (lookupByDispatchId && meta.dispatchId === arg) return { meta, stem }
-    if (!lookupByDispatchId && meta.task === arg) {
-      candidates.push({ meta, stem, mtime: statSync(join(DISPATCHES_DIR, f)).mtimeMs })
-    }
+  const all = listDispatches(DISPATCHES_DIR)
+  if (lookupByDispatchId) {
+    const hit = all.find(({ meta }) => meta.dispatchId === arg)
+    return hit ? { meta: hit.meta, stem: hit.stem } : null
   }
-  if (candidates.length) {
-    candidates.sort((a, b) => b.mtime - a.mtime)
-    const c = candidates[0]
-    return { meta: c.meta, stem: c.stem }
-  }
-  return null
+  const candidates = all
+    .filter(({ meta }) => meta.task === arg)
+    .map(({ meta, stem, path }) => ({ meta, stem, mtime: statSync(path).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime)
+  return candidates[0] ? { meta: candidates[0].meta, stem: candidates[0].stem } : null
 }
 
 const found = resolveTarget(target)

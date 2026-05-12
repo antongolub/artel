@@ -9,76 +9,32 @@
 // CLI dashboard in status.mjs) read the same canonical inputs directly,
 // not state.md.
 
-import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { execSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { writeFileSync } from 'node:fs'
 import { readClusterIdentity } from '../core/cluster.mjs'
+import { listDispatches } from '../core/dispatches.mjs'
+import { QUEUE_SECTIONS as SECTIONS, readQueueMd } from '../core/queue_md.mjs'
+import { tryGit } from '../git/git.mjs'
+import { listDirBy, readJson, readJsonl } from '../util/fs.mjs'
+import { config } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-// `here` is engine/cli/, so platform root is two levels up.
-const platformDir = dirname(dirname(here))
-const agentsDir = join(platformDir, 'agents')
-const driversDir = join(platformDir, 'engine', 'drivers')
-const projectDir = process.env.ARTEL_PROJECT_DIR || process.cwd()
-const projectArtelDir = join(projectDir, '.artel')
-const queuePath = join(projectArtelDir, 'QUEUE.md')
-const dispatchDir = join(projectArtelDir, '.dispatches')
-const eventsPath = join(projectArtelDir, 'events.jsonl')
-const dispatcherStatePath = join(projectArtelDir, 'dispatcher_state.json')
-const outPath = join(projectArtelDir, 'state.md')
+const {
+  projectDir,
+  agentsDir,
+  platformDriversDir: driversDir,
+  artelDir: projectArtelDir,
+  queuePath,
+  dispatchesDir: dispatchDir,
+  eventsPath,
+  dispatcherStatePath,
+  statePath: outPath,
+} = config
 
-const SECTIONS = ['For Owner', 'In progress', 'Pending', 'Blocked', 'Recently done']
+const knownRoles = () => listDirBy(agentsDir, '.md').filter((n) => n !== 'README')
+const knownEngines = () => listDirBy(driversDir, '.mjs')
 
-const listDir = (dir, ext) =>
-  existsSync(dir)
-    ? readdirSync(dir).filter((f) => f.endsWith(ext)).map((f) => f.slice(0, -ext.length))
-    : []
-const knownRoles = () => listDir(agentsDir, '.md').filter((n) => n !== 'README')
-const knownEngines = () => listDir(driversDir, '.mjs')
+const loadMetas = () => listDispatches(dispatchDir).map(({ meta }) => meta)
 
-// --- input loaders ---
-
-const parseQueue = (text) => {
-  const out = Object.fromEntries(SECTIONS.map((s) => [s, []]))
-  let cur = null
-  let item = null
-  const flush = () => { if (item && cur) out[cur].push(item); item = null }
-  for (const line of text.split('\n')) {
-    const sec = line.match(/^## (.+)$/)
-    if (sec) { flush(); cur = SECTIONS.includes(sec[1]) ? sec[1] : null; continue }
-    if (!cur) continue
-    const bullet = line.match(/^- (.+)$/)
-    if (bullet) { flush(); item = { text: bullet[1], details: [] }; continue }
-    const cont = line.match(/^  (.+)$/)
-    if (cont && item) item.details.push(cont[1])
-  }
-  flush()
-  return out
-}
-
-const loadJson = (path) => {
-  if (!existsSync(path)) return null
-  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
-}
-
-const loadMetas = () =>
-  existsSync(dispatchDir)
-    ? readdirSync(dispatchDir).filter((n) => n.endsWith('.meta'))
-        .map((n) => loadJson(join(dispatchDir, n))).filter(Boolean)
-    : []
-
-const loadEvents = () =>
-  existsSync(eventsPath)
-    ? readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
-        try { return [JSON.parse(line)] } catch { return [] }
-      })
-    : []
-
-const gitOut = (cmd) => {
-  try { return execSync(cmd, { cwd: projectDir, encoding: 'utf8' }).trim() || 'unknown' }
-  catch { return 'unknown' }
-}
+const gitOut = (args) => tryGit(projectDir, args) || 'unknown'
 
 // --- derivations ---
 
@@ -166,12 +122,10 @@ const yamlList = (xs, indent = '  ') =>
 const yamlObj = (entries, indent = '  ') =>
   '\n' + entries.map(([k, v]) => `${indent}${k}: ${yamlEscape(v ?? null)}`).join('\n')
 
-const queue = existsSync(queuePath)
-  ? parseQueue(readFileSync(queuePath, 'utf8'))
-  : Object.fromEntries(SECTIONS.map((s) => [s, []]))
+const queue = readQueueMd(queuePath).sections
 const metas = loadMetas()
-const events = loadEvents()
-const dispatcherState = loadJson(dispatcherStatePath)
+const events = readJsonl(eventsPath)
+const dispatcherState = readJson(dispatcherStatePath)
 const cluster = readClusterIdentity(projectArtelDir)
 const tasks = activeTasks(queue, metas, events)
 
@@ -190,8 +144,8 @@ cluster:${yamlObj([
   ['name', cluster?.name ?? null],
 ])}
 repo:${yamlObj([
-  ['branch', gitOut('git branch --show-current')],
-  ['commit', gitOut('git rev-parse HEAD')],
+  ['branch', gitOut(['branch', '--show-current'])],
+  ['commit', gitOut(['rev-parse', 'HEAD'])],
 ])}
 dispatcher:${yamlObj([
   ['role', dispatcherState?.role ?? null],

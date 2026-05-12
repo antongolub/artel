@@ -8,20 +8,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { parseArgs } from 'node:util'
+import { readJson, readJsonl } from '../util/fs.mjs'
+import { formatDuration } from '../util/proc.mjs'
+import { chalk } from '../util/chalk.mjs'
+import { config } from '../config/env.mjs'
 
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-const PROJECT_ARTEL = join(PROJECT_DIR, '.artel')
-const DISPATCHES_DIR = join(PROJECT_ARTEL, '.dispatches')
-const EVENTS_PATH = join(PROJECT_ARTEL, 'events.jsonl')
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const bold = (s) => c('1', s)
-const dim = (s) => c('2', s)
-const cyan = (s) => c('36', s)
-const yellow = (s) => c('33', s)
-const green = (s) => c('32', s)
-const red = (s) => c('31', s)
+const { dispatchesDir: DISPATCHES_DIR, eventsPath: EVENTS_PATH } = config
 
 const usage = (code = 2) => {
   console.error(`\
@@ -98,10 +90,7 @@ if (!files) {
   process.exit(1)
 }
 
-let meta = null
-if (files.metaPath) {
-  try { meta = JSON.parse(readFileSync(files.metaPath, 'utf8')) } catch {}
-}
+const meta = files.metaPath ? readJson(files.metaPath) : null
 
 const promptText = files.promptPath ? safeRead(files.promptPath) : null
 const outText = files.outPath ? safeRead(files.outPath) : null
@@ -112,18 +101,9 @@ function safeRead (path) {
 
 // ---- events for this task ----
 
-const matchedEvents = []
-if (existsSync(EVENTS_PATH)) {
-  for (const line of readFileSync(EVENTS_PATH, 'utf8').split('\n')) {
-    if (!line) continue
-    try {
-      const e = JSON.parse(line)
-      if (e.task === taskSlug || (meta && e.dispatch_id === meta.dispatchId)) {
-        matchedEvents.push(e)
-      }
-    } catch {}
-  }
-}
+const matchedEvents = readJsonl(EVENTS_PATH).filter(
+  (e) => e.task === taskSlug || (meta && e.dispatch_id === meta.dispatchId),
+)
 
 // ---- render ----
 
@@ -139,64 +119,57 @@ if (values.json) {
 }
 
 const fmtDate = (iso) => {
-  if (!iso) return dim('—')
+  if (!iso) return chalk.dim('—')
   return iso.replace('T', ' ').replace(/\.\d{3}Z?$/, ' UTC')
 }
 
-const fmtDuration = (start, end) => {
-  if (!start || !end) return null
-  const ms = Date.parse(end) - Date.parse(start)
-  if (!Number.isFinite(ms) || ms < 0) return null
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3600000) return `${Math.round(ms / 60000)}m`
-  return `${(ms / 3600000).toFixed(1)}h`
-}
+const fmtDuration = (start, end) =>
+  start && end ? formatDuration(Date.parse(end) - Date.parse(start)) : null
 
 const dispoColor = (d) =>
-  d === 'success' ? green(d)
-    : d === 'parked' ? yellow(d)
-    : d === 'timeout' ? red(d)
-    : d === 'error' ? red(d)
-    : dim(d || '—')
+  d === 'success' ? chalk.green(d)
+    : d === 'parked' ? chalk.yellow(d)
+    : d === 'timeout' ? chalk.red(d)
+    : d === 'error' ? chalk.red(d)
+    : chalk.dim(d || '—')
 
-console.log(`\n${bold('artel logs')} ${cyan(taskSlug)}\n`)
+console.log(`\n${chalk.bold('artel logs')} ${chalk.cyan(taskSlug)}\n`)
 
 if (meta) {
   const dur = fmtDuration(meta.dispatchedAt, meta.completedAt)
   const lines = [
     ['task', meta.task || taskSlug],
-    ['role', meta.role || dim('—')],
-    ['engine', meta.engine ? `${meta.engine}${meta.model ? ` · ${dim(meta.model)}` : ''}` : dim('—')],
-    ['branch', meta.branch || dim('—')],
-    ['status', meta.status || dim('—')],
+    ['role', meta.role || chalk.dim('—')],
+    ['engine', meta.engine ? `${meta.engine}${meta.model ? ` · ${chalk.dim(meta.model)}` : ''}` : chalk.dim('—')],
+    ['branch', meta.branch || chalk.dim('—')],
+    ['status', meta.status || chalk.dim('—')],
     ['disposition', dispoColor(meta.disposition)],
-    ['dispatched', `${fmtDate(meta.dispatchedAt)}${meta.completedAt ? `  ${dim('→')} completed ${fmtDate(meta.completedAt)}` : ''}${dur ? `  ${dim(`(${dur})`)}` : ''}`],
+    ['dispatched', `${fmtDate(meta.dispatchedAt)}${meta.completedAt ? `  ${chalk.dim('→')} completed ${fmtDate(meta.completedAt)}` : ''}${dur ? `  ${chalk.dim(`(${dur})`)}` : ''}`],
   ]
   if (meta.git) {
-    lines.push(['git', `${cyan((meta.git.commit_sha || '').slice(0, 8))} ${dim('·')} ${meta.git.repo_name || ''} ${dim('·')} ${meta.git.branch || ''}`])
+    lines.push(['git', `${chalk.cyan((meta.git.commit_sha || '').slice(0, 8))} ${chalk.dim('·')} ${meta.git.repo_name || ''} ${chalk.dim('·')} ${meta.git.branch || ''}`])
   }
   if (meta.delta) {
     const d = meta.delta
-    lines.push(['delta', `${green('+' + (d.lines_added || 0))}/${red('-' + (d.lines_removed || 0))} ${dim(`(${d.files_changed || 0} files)`)}`])
+    lines.push(['delta', `${chalk.green('+' + (d.lines_added || 0))}/${chalk.red('-' + (d.lines_removed || 0))} ${chalk.dim(`(${d.files_changed || 0} files)`)}`])
   }
   if (meta.usage && (meta.usage.tokens_in || meta.usage.tokens_out)) {
-    lines.push(['usage', `${meta.usage.tokens_in || 0} in / ${meta.usage.tokens_out || 0} out${meta.usage.cache_read ? ` ${dim(`(${meta.usage.cache_read} cached)`)}` : ''}`])
+    lines.push(['usage', `${meta.usage.tokens_in || 0} in / ${meta.usage.tokens_out || 0} out${meta.usage.cache_read ? ` ${chalk.dim(`(${meta.usage.cache_read} cached)`)}` : ''}`])
   }
-  if (meta.dispatchId) lines.push(['dispatch_id', dim(meta.dispatchId)])
-  if (meta.traceId && meta.traceId !== meta.dispatchId) lines.push(['trace_id', dim(meta.traceId)])
-  if (meta.parked) lines.push(['parked', `${yellow(meta.parked.reason || '?')} ${dim('·')} ${dim(meta.parked.raw || '')}`])
-  if (meta.timeout) lines.push(['timeout', `${red('hit')} ${dim('·')} ${meta.timeout.timeoutMs}ms ${meta.timeout.signal ? dim(`(${meta.timeout.signal})`) : ''}`])
-  if (meta.error) lines.push(['error', red(meta.error)])
+  if (meta.dispatchId) lines.push(['dispatch_id', chalk.dim(meta.dispatchId)])
+  if (meta.traceId && meta.traceId !== meta.dispatchId) lines.push(['trace_id', chalk.dim(meta.traceId)])
+  if (meta.parked) lines.push(['parked', `${chalk.yellow(meta.parked.reason || '?')} ${chalk.dim('·')} ${chalk.dim(meta.parked.raw || '')}`])
+  if (meta.timeout) lines.push(['timeout', `${chalk.red('hit')} ${chalk.dim('·')} ${meta.timeout.timeoutMs}ms ${meta.timeout.signal ? chalk.dim(`(${meta.timeout.signal})`) : ''}`])
+  if (meta.error) lines.push(['error', chalk.red(meta.error)])
 
-  console.log(bold('Meta'))
-  for (const [k, v] of lines) console.log(`  ${dim(k.padEnd(13))} ${v}`)
+  console.log(chalk.bold('Meta'))
+  for (const [k, v] of lines) console.log(`  ${chalk.dim(k.padEnd(13))} ${v}`)
   console.log()
 }
 
-console.log(bold(`Events  ${dim(`(${matchedEvents.length})`)}`))
+console.log(chalk.bold(`Events  ${chalk.dim(`(${matchedEvents.length})`)}`))
 if (!matchedEvents.length) {
-  console.log(`  ${dim('(none in events.jsonl)')}`)
+  console.log(`  ${chalk.dim('(none in events.jsonl)')}`)
 } else {
   for (const e of matchedEvents) {
     const t = e.at ? new Date(e.at).toISOString().slice(11, 19) : '?'
@@ -209,14 +182,14 @@ if (!matchedEvents.length) {
     if (e.last_completed_step) extras.push(`done=${JSON.stringify(e.last_completed_step)}`)
     if (e.next_safe_step) extras.push(`next=${JSON.stringify(e.next_safe_step)}`)
     if (e.reason) extras.push(`reason=${e.reason}`)
-    console.log(`  ${dim(t)}  ${cyan(type)} ${role ? dim(role.padEnd(12)) : ' '.repeat(12)} ${dim(extras.join(' '))}`)
+    console.log(`  ${chalk.dim(t)}  ${chalk.cyan(type)} ${role ? chalk.dim(role.padEnd(12)) : ' '.repeat(12)} ${chalk.dim(extras.join(' '))}`)
   }
 }
 console.log()
 
 if (!values['events-only']) {
   if (promptText !== null) {
-    console.log(bold('Prompt'))
+    console.log(chalk.bold('Prompt'))
     console.log(indent(promptText.trim(), '  '))
     console.log()
   }
@@ -226,8 +199,8 @@ if (!values['events-only']) {
     const lines = outText.replace(/\n$/, '').split('\n')
     const shown = all ? lines : lines.slice(-linesArg)
     const hidden = all ? 0 : Math.max(0, lines.length - shown.length)
-    const head = `Out  ${dim(`(${all ? 'full' : `last ${shown.length} lines${hidden ? ` of ${lines.length}` : ''}`}, ${files.outPath})`)}`
-    console.log(bold(head))
+    const head = `Out  ${chalk.dim(`(${all ? 'full' : `last ${shown.length} lines${hidden ? ` of ${lines.length}` : ''}`}, ${files.outPath})`)}`
+    console.log(chalk.bold(head))
     console.log(indent(shown.join('\n'), '  '))
     console.log()
   }

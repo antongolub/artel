@@ -7,11 +7,12 @@
 //   ARTEL_TASK, ARTEL_ROLE, ARTEL_DISPATCH_ID, ARTEL_TRACE_ID
 
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 import { SCHEMA_VERSION, validateEventType } from '../core/schema.mjs'
 import { ensureClusterIdentity, instanceId } from '../core/cluster.mjs'
 import { uuidv7 } from '../util/ids.mjs'
+import { config, dispatchEnv } from '../config/env.mjs'
 
 const usage = (code = 2) => {
   console.error(`\
@@ -43,13 +44,8 @@ if (!values.completed || !values.next) {
   usage(2)
 }
 
-const env = {
-  task: process.env.ARTEL_TASK,
-  role: process.env.ARTEL_ROLE,
-  dispatchId: process.env.ARTEL_DISPATCH_ID,
-  traceId: process.env.ARTEL_TRACE_ID,
-}
-if (!env.task || !env.role || !env.dispatchId) {
+const ctx = dispatchEnv()
+if (!ctx.task || !ctx.role || !ctx.dispatchId) {
   console.error(`\
 checkpoint: required env vars missing (ARTEL_TASK / ARTEL_ROLE / ARTEL_DISPATCH_ID).
 Are you running inside a dispatched sub-role? 'artel checkpoint' is meant to
@@ -57,9 +53,8 @@ be invoked from within a dispatch.`)
   process.exit(2)
 }
 
-const projectArtelDir = join(process.env.ARTEL_PROJECT_DIR || process.cwd(), '.artel')
-const eventsPath = join(projectArtelDir, 'events.jsonl')
-const cluster = ensureClusterIdentity(projectArtelDir)
+const eventsPath = config.eventsPath
+const cluster = ensureClusterIdentity(config.artelDir)
 
 const event = {
   schema: SCHEMA_VERSION,
@@ -69,11 +64,11 @@ const event = {
   at: new Date().toISOString(),
   cluster_id: cluster.cluster_id,
   instance_id: instanceId(),
-  task: env.task,
-  dispatch_id: env.dispatchId,
-  trace_id: env.traceId || env.dispatchId,
+  task: ctx.task,
+  dispatch_id: ctx.dispatchId,
+  trace_id: ctx.traceId || ctx.dispatchId,
   fence_token: 0,
-  owner_role: env.role,
+  owner_role: ctx.role,
   last_completed_step: values.completed,
   next_safe_step: values.next,
   ...(values.artefact ? { artefact: values.artefact } : {}),
@@ -83,4 +78,4 @@ validateEventType(event.kind, event.type)
 
 mkdirSync(dirname(eventsPath), { recursive: true })
 appendFileSync(eventsPath, JSON.stringify(event) + '\n')
-console.log(`checkpoint: ${env.task} → ${values.next}`)
+console.log(`checkpoint: ${ctx.task} → ${values.next}`)

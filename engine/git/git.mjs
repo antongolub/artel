@@ -10,7 +10,11 @@ import { basename } from 'node:path'
 
 const GIT_TIMEOUT_MS = 1000
 
-const tryGit = (cwd, args) => {
+// Run `git <args>` in `cwd`; return trimmed stdout, or `null` on any
+// error (non-git tree, command not found, non-zero exit, timeout). Used
+// by gitContext / gitDelta and re-exported for status / state_gen which
+// need the same "best-effort git read" surface.
+export const tryGit = (cwd, args) => {
   try {
     return execFileSync('git', args, {
       cwd,

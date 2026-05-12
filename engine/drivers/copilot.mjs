@@ -21,18 +21,15 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { execSync } from 'node:child_process'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { uuidv7 } from '../util/ids.mjs'
 import { mtimeMs, readJsonl } from '../util/fs.mjs'
 import { runWithTimeout } from '../util/proc.mjs'
+import { createConfig } from '../config/env.mjs'
 
 export const id = 'copilot'
 export const command = 'gh'
 export const api_version = 1
-
-const sessionDir = () =>
-  process.env.ARTEL_COPILOT_SESSION_DIR || join(homedir(), '.copilot/session-state')
 
 export function args (meta, promptParts) {
   const sys = (meta.body || '').trim()
@@ -157,7 +154,7 @@ export function sessionTokens ({ projectName, sinceMs = 0 } = {}) {
   const perDay = {}
   if (!projectName) return { totals, perDay }
 
-  const root = sessionDir()
+  const root = createConfig().copilotSessionDir
   if (!existsSync(root)) return { totals, perDay }
 
   for (const sid of readdirSync(root)) {

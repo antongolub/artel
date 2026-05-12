@@ -10,15 +10,8 @@
 // Exit code: 0 if every engine is fully ready, 1 if any has problems.
 
 import { parseArgs } from 'node:util'
-import { discoverDrivers } from '../util/drivers.mjs'
-
-const tty = process.stdout.isTTY
-const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s)
-const dim = (s) => c('2', s)
-const bold = (s) => c('1', s)
-const green = (s) => c('32', s)
-const yellow = (s) => c('33', s)
-const red = (s) => c('31', s)
+import { discoverDrivers } from '../drivers/loader.mjs'
+import { chalk } from '../util/chalk.mjs'
 
 const usage = (code = 0) => {
   console.log(`\
@@ -159,23 +152,23 @@ if (values.json) {
 
 // --- text mode ---
 
-const mark = (state) => state === 'ok' ? green('✓') : state === 'unknown' ? yellow('?') : red('✗')
+const mark = (state) => state === 'ok' ? chalk.green('✓') : state === 'unknown' ? chalk.yellow('?') : chalk.red('✗')
 const stateWord = (probe) =>
   probe.authState === 'ok'
-    ? green('ready')
+    ? chalk.green('ready')
     : probe.authState === 'unknown'
-      ? yellow('unknown')
-      : red(probe.installed ? 'no auth' : 'not installed')
+      ? chalk.yellow('unknown')
+      : chalk.red(probe.installed ? 'no auth' : 'not installed')
 
-console.log(`\n${bold('artel probe')} ${dim('— engine readiness')}\n`)
+console.log(`\n${chalk.bold('artel probe')} ${chalk.dim('— engine readiness')}\n`)
 for (const { probe, source } of probes) {
-  const ver = probe.version ? probe.version.padEnd(10) : dim('—'.padEnd(10))
-  const overlay = source && source !== 'platform' ? dim(` (${source})`) : ''
-  const hint = probe.hint ? `${dim('·')} ${dim(probe.hint)}` : ''
+  const ver = probe.version ? probe.version.padEnd(10) : chalk.dim('—'.padEnd(10))
+  const overlay = source && source !== 'platform' ? chalk.dim(` (${source})`) : ''
+  const hint = probe.hint ? `${chalk.dim('·')} ${chalk.dim(probe.hint)}` : ''
   console.log(`  ${mark(probe.authState)} ${probe.engine.padEnd(8)}${overlay} ${ver} ${stateWord(probe).padEnd(15)} ${hint}`)
 }
 const ready = probes.filter(({ probe }) => probe.authState === 'ok').length
-console.log(`\n${dim(`${ready}/${probes.length} engines ready`)}${dim(' · pass --json for detailed checks + live roundtrip')}\n`)
+console.log(`\n${chalk.dim(`${ready}/${probes.length} engines ready`)}${chalk.dim(' · pass --json for detailed checks + live roundtrip')}\n`)
 
 const allOk = probes.every(({ probe }) => probe.authState === 'ok')
 process.exit(allOk ? 0 : 1)

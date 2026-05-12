@@ -380,3 +380,89 @@ describe('dispatchLifecycle: usage merge from driver', () => {
     expect(meta.usage).toEqual(expectedUsage)
   })
 })
+
+describe('dispatchLifecycle: heartbeat (V9)', () => {
+  // The interval is configured via env; saving + restoring across each
+  // test keeps cases isolated.
+  const withInterval = async <T>(ms: string | undefined, fn: () => Promise<T>): Promise<T> => {
+    const saved = process.env.ARTEL_HEARTBEAT_INTERVAL_MS
+    if (ms !== undefined) process.env.ARTEL_HEARTBEAT_INTERVAL_MS = ms
+    else delete process.env.ARTEL_HEARTBEAT_INTERVAL_MS
+    try {
+      return await fn()
+    } finally {
+      if (saved !== undefined) process.env.ARTEL_HEARTBEAT_INTERVAL_MS = saved
+      else delete process.env.ARTEL_HEARTBEAT_INTERVAL_MS
+    }
+  }
+
+  it('emits heartbeat events at configured interval until child exits', async () => {
+    const root = createTempRepo()
+    const events = await withInterval('40', async () => {
+      const child = fakeChild(0, 200) // exits after ~200ms
+      await dispatchLifecycle(
+        baseDispatch(root, { task: 'hb-emit' }),
+        { spawnProcess: () => child as never, log: () => {} },
+      )
+      return readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
+        .trim().split('\n').map((l) => JSON.parse(l))
+    })
+    const heartbeats = events.filter((e) => e.type === 'heartbeat')
+    expect(heartbeats.length).toBeGreaterThanOrEqual(2)
+    expect(heartbeats.length).toBeLessThanOrEqual(8)
+    for (const hb of heartbeats) {
+      expect(hb.kind).toBe('workload')
+      expect(hb.pid_alive).toBe(true)
+      expect(hb.dispatch_id).toBeTruthy()
+      expect(hb.task).toBe('hb-emit')
+    }
+  })
+
+  it('records lastHeartbeatAt + pidAlive in .meta', async () => {
+    const root = createTempRepo()
+    await withInterval('40', async () => {
+      const child = fakeChild(0, 150)
+      await dispatchLifecycle(
+        baseDispatch(root, { task: 'hb-meta' }),
+        { spawnProcess: () => child as never, log: () => {} },
+      )
+    })
+    const meta = JSON.parse(readFileSync(join(root, '.artel', '.dispatches', 'hb-meta.meta'), 'utf8'))
+    expect(meta.lastHeartbeatAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(meta.pidAlive).toBe(true)
+  })
+
+  it('honours ARTEL_HEARTBEAT_INTERVAL_MS=0 to disable', async () => {
+    const root = createTempRepo()
+    const events = await withInterval('0', async () => {
+      const child = fakeChild(0, 100)
+      await dispatchLifecycle(
+        baseDispatch(root, { task: 'hb-off' }),
+        { spawnProcess: () => child as never, log: () => {} },
+      )
+      return readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
+        .trim().split('\n').map((l) => JSON.parse(l))
+    })
+    expect(events.filter((e) => e.type === 'heartbeat')).toHaveLength(0)
+  })
+
+  it('clears the interval on settle so heartbeats stop after exit', async () => {
+    const root = createTempRepo()
+    const beforeExitCount = await withInterval('30', async () => {
+      const child = fakeChild(0, 80)
+      await dispatchLifecycle(
+        baseDispatch(root, { task: 'hb-stop' }),
+        { spawnProcess: () => child as never, log: () => {} },
+      )
+      const events = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
+        .trim().split('\n').map((l) => JSON.parse(l))
+      return events.filter((e) => e.type === 'heartbeat').length
+    })
+    // Wait past several would-have-been-heartbeats
+    await new Promise((r) => setTimeout(r, 150))
+    const afterCount = readFileSync(join(root, '.artel', 'events.jsonl'), 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l))
+      .filter((e) => e.type === 'heartbeat').length
+    expect(afterCount).toBe(beforeExitCount)
+  })
+})

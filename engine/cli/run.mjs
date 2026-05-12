@@ -6,30 +6,22 @@
 // Universal terms (DESIGN.md §5): runner speaks model / effort / sandbox /
 // tools / permission-mode. Drivers translate to engine-native flags.
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { buildTaskContextBlock, parseJsonObject } from '../core/dispatch_api.mjs'
-import { parseFrontmatter, normaliseFrontmatter } from '../util/frontmatter.mjs'
-import { expandSkills } from '../util/skills.mjs'
-import { validateRoleFrontmatter } from '../util/contract.mjs'
-import { listDrivers, loadDriver } from '../util/drivers.mjs'
+import { parseFrontmatter, normaliseFrontmatter } from '../agents/frontmatter.mjs'
+import { expandSkills } from '../agents/skills.mjs'
+import { validateRoleFrontmatter } from '../agents/contract.mjs'
+import { listDrivers, loadDriver } from '../drivers/loader.mjs'
+import { listDirBy } from '../util/fs.mjs'
+import { die } from '../util/chalk.mjs'
+import { config, dispatchEnv } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-const PLATFORM_DIR = join(here, '..', '..')
-const AGENTS_DIR = join(PLATFORM_DIR, 'agents')
-const PLATFORM_SKILLS_DIR = join(PLATFORM_DIR, 'skills')
-const PROJECT_DIR = process.env.ARTEL_PROJECT_DIR || process.cwd()
-const PROJECT_SKILLS_DIR = join(PROJECT_DIR, '.artel', 'skills')
+const { agentsDir: AGENTS_DIR, platformSkillsDir: PLATFORM_SKILLS_DIR, skillsDir: PROJECT_SKILLS_DIR } = config
 
-const listDir = (dir, ext) =>
-  existsSync(dir)
-    ? readdirSync(dir).filter((f) => f.endsWith(ext)).map((f) => f.slice(0, -ext.length))
-    : []
-
-const listRoles = () => listDir(AGENTS_DIR, '.md').filter((n) => n !== 'README')
+const listRoles = () => listDirBy(AGENTS_DIR, '.md').filter((n) => n !== 'README')
 
 const usage = (code = 2) => {
   const roles = listRoles()
@@ -51,8 +43,6 @@ ${roles.length ? `Roles: ${roles.join(', ')}\n` : ''}\
 ${engines.length ? `Engines: ${engines.join(', ')}` : ''}`)
   process.exit(code)
 }
-
-const die = (msg, code = 1) => { console.error(msg); process.exit(code) }
 
 const OPTIONS = {
   engine: { type: 'string' },
@@ -95,11 +85,12 @@ if (values['codex-effort'] && !values.effort) {
 }
 
 const [role, ...promptParts] = positionals
-const task = values.task || process.env.ARTEL_TASK || null
+const dEnv = dispatchEnv()
+const task = values.task || dEnv.task
 const taskAttrs = values['task-attrs']
   ? parseJsonObject(values['task-attrs'], '--task-attrs')
-  : process.env.ARTEL_TASK_ATTRS
-    ? parseJsonObject(process.env.ARTEL_TASK_ATTRS, 'ARTEL_TASK_ATTRS')
+  : dEnv.taskAttrs
+    ? parseJsonObject(dEnv.taskAttrs, 'ARTEL_TASK_ATTRS')
     : null
 
 const rolePath = join(AGENTS_DIR, `${role}.md`)

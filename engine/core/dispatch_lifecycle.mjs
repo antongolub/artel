@@ -11,87 +11,55 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createDispatchApi } from './dispatch_api.mjs'
 import { ensureClusterIdentity, instanceId as getInstanceId } from './cluster.mjs'
 import { detectParked } from './parked.mjs'
+import { findLastJsonl } from '../util/fs.mjs'
+import { parseFrontmatter } from '../agents/frontmatter.mjs'
 import { uuidv7 } from '../util/ids.mjs'
-import { gitContext, gitDelta } from '../util/git.mjs'
-import { listDrivers } from '../util/drivers.mjs'
+import { gitContext, gitDelta } from '../git/git.mjs'
+import { listDrivers } from '../drivers/loader.mjs'
+import { identityEnv, resolveIdentity, resolveRequires } from '../trust/trust.mjs'
+import { createWorktreeForBranch, removeWorktree } from '../git/worktree.mjs'
+import { parseDuration } from '../util/proc.mjs'
+import { createConfig, dispatchEnv, pathsFor, platformPathsFor } from '../config/env.mjs'
 
-const here = dirname(fileURLToPath(import.meta.url))
-// Platform dir holds the role+engine skeleton (agents/, engine/, AGENTS.md).
-// `here` is engine/core/, so platform root is two levels up.
-const DEFAULT_PLATFORM_DIR = join(here, '..', '..')
 // Project dir is per-project: each consuming repo holds its own `.artel/`
 // runtime (.dispatches/, .sessions/, events.jsonl, dispatcher_state.json,
-// state.md, JOURNAL/QUEUE). Resolve from cwd (or env override) — never from
-// `here`, since a single platform serves many projects.
-const projectDirOf = () => process.env.ARTEL_PROJECT_DIR || process.cwd()
-const projectArtelDirOf = (projectDir = projectDirOf()) => join(projectDir, '.artel')
+// state.md, JOURNAL/QUEUE). Resolve via createConfig() so test-time env
+// mutations between calls (ARTEL_PROJECT_DIR / ARTEL_PLATFORM_DIR) take
+// effect; one platform serves many projects.
+const projectArtelDirOf = (projectDir = createConfig().projectDir) => pathsFor(projectDir).artelDir
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000
 const TERMINATION_GRACE_MS = 10 * 1000
 const DEFAULT_BACKOFF_THRESHOLD = 3
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 60 * 1000
 
-// Find the dispatch.start event (or legacy 'claim') with matching dispatch_id
-// in events.jsonl. Used by retry-counter to compare engine+model against the
-// previous dispatch in this chain.
-const findDispatchStart = (eventsPath, dispatchId) => {
-  if (!dispatchId || !existsSync(eventsPath)) return null
-  const lines = readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean)
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let event
-    try { event = JSON.parse(lines[i]) } catch { continue }
-    if (event.dispatch_id === dispatchId && (event.type === 'dispatch.start' || event.type === 'claim')) {
-      return event
-    }
-  }
-  return null
-}
-
-// Find the dispatch.end event matching dispatchId — used to derive retry_reason
-// (= previous dispatch's disposition).
-const findDispatchEnd = (eventsPath, dispatchId) => {
-  if (!dispatchId || !existsSync(eventsPath)) return null
-  const lines = readFileSync(eventsPath, 'utf8').split('\n').filter(Boolean)
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let event
-    try { event = JSON.parse(lines[i]) } catch { continue }
-    if (event.dispatch_id === dispatchId && (event.type === 'dispatch.end' || event.type === 'release')) {
-      return event
-    }
-  }
-  return null
-}
-
-const frontmatterOf = (text) => {
-  const match = text.match(/^---\n([\s\S]*?)\n---/)
-  if (!match) return {}
-  const out = {}
-  for (const line of match[1].split('\n')) {
-    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/)
-    if (kv) out[kv[1]] = kv[2].trim()
-  }
-  return out
-}
+// Most-recent event for `dispatchId` matching one of `types`. dispatch.start
+// + dispatch.end are canonical; 'claim' / 'release' are accepted as one-cycle
+// back-compat aliases (DESIGN.md §4.5).
+const findDispatchEvent = (eventsPath, dispatchId, types) =>
+  dispatchId
+    ? findLastJsonl(eventsPath, (e) => e.dispatch_id === dispatchId && types.includes(e.type))
+    : null
+const findDispatchStart = (eventsPath, dispatchId) =>
+  findDispatchEvent(eventsPath, dispatchId, ['dispatch.start', 'claim'])
+const findDispatchEnd = (eventsPath, dispatchId) =>
+  findDispatchEvent(eventsPath, dispatchId, ['dispatch.end', 'release'])
 
 const dispatchPathsOf = ({
-  platformDir = DEFAULT_PLATFORM_DIR,
-  projectDir = projectDirOf(),
+  platformDir = createConfig().platformDir,
+  projectDir = createConfig().projectDir,
   projectArtelDir = projectArtelDirOf(projectDir),
 } = {}) => {
-  const engineDir = join(platformDir, 'engine')
+  const { agentsDir, platformDriversDir: driversDir, runPath } = platformPathsFor(platformDir)
+  const { dispatchesDir, sessionsDir, eventsPath } = pathsFor(projectDir)
   return {
-    platformDir,
-    projectDir,
-    projectArtelDir,
-    agentsDir: join(platformDir, 'agents'),
-    driversDir: join(engineDir, 'drivers'),
-    runPath: join(engineDir, 'cli', 'run.mjs'),
-    dispatchesDir: join(projectArtelDir, '.dispatches'),
-    sessionsDir: join(projectArtelDir, '.sessions'),
-    eventsPath: join(projectArtelDir, 'events.jsonl'),
+    platformDir, projectDir, projectArtelDir,
+    agentsDir, driversDir, runPath,
+    dispatchesDir, sessionsDir, eventsPath,
   }
 }
 
@@ -105,7 +73,7 @@ const readRoleMeta = (role, agentsDir) => {
   if (!existsSync(rolePath)) {
     throw new Error(`Role not found: ${rolePath}`)
   }
-  return frontmatterOf(readFileSync(rolePath, 'utf8'))
+  return parseFrontmatter(readFileSync(rolePath, 'utf8')).meta
 }
 
 // Parse dispatch policy from a role's frontmatter:
@@ -132,7 +100,7 @@ const checkDispatchPolicy = (parentRoleName, requestedRole, agentsDir) => {
   if (!parentRoleName) return
   const parentPath = join(agentsDir, `${parentRoleName}.md`)
   if (!existsSync(parentPath)) return // unknown parent — fail open
-  const parentMeta = frontmatterOf(readFileSync(parentPath, 'utf8'))
+  const parentMeta = parseFrontmatter(readFileSync(parentPath, 'utf8')).meta
   const policy = parseDispatchPolicy(parentMeta)
   if (policy.allow !== 'all' && !policy.allow.includes(requestedRole)) {
     throw new Error(
@@ -148,17 +116,12 @@ const checkDispatchPolicy = (parentRoleName, requestedRole, agentsDir) => {
   }
 }
 
-const parseTimeoutMs = (raw, label) => {
-  if (raw === undefined || raw === null || raw === '') return null
-  const value = Number(raw)
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${label} must be a positive integer, got: ${raw}`)
-  }
-  return value
-}
+// V3.9.b — delegate to the shared parser so number + suffix-string
+// values are handled identically here and in pipelines / handlers.
+const parseTimeoutMs = (raw, label) => parseDuration(raw, label)
 
 const normalizeTimeoutMs = (timeoutMs) =>
-  parseTimeoutMs(timeoutMs ?? process.env.ARTEL_DISPATCH_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
+  parseTimeoutMs(timeoutMs ?? createConfig().dispatchTimeoutMs ?? DEFAULT_TIMEOUT_MS, 'dispatch timeout')
 
 const signalExitCode = (signal) => {
   if (!signal) return null
@@ -212,17 +175,28 @@ const preparePersistentSession = ({ role, engineId, persistent, sessionsDir }) =
   return { sessionFlag, sessionId, sessionIdPath, captureCodexSession }
 }
 
-const prepareBranch = ({ role, task, persistent, protectedBranch, gitImpl, log }) => {
-  if (persistent) return null
+// V3.3.a: when `useWorktree` is set, the dispatch runs in its own
+// `.artel/.worktrees/<branch>/` checkout — main working tree is left
+// alone. Returns `{ branch, cwd, worktree }` where `cwd` is what to
+// pass as the child's working directory and `worktree` is the path to
+// remove on success (null when not in worktree mode).
+const prepareBranch = ({ role, task, persistent, protectedBranch, useWorktree, projectDir, gitImpl, log }) => {
+  if (persistent) return { branch: null, cwd: projectDir, worktree: null }
 
   const branch = `${role}/${task}`
-  const dirty = gitText(gitImpl, ['status', '--porcelain']).stdout
-  if (dirty.trim().length > 0) {
-    throw new Error(
-      `spawn: refusing to dispatch — working tree is dirty.\n` +
-        `Commit, stash, or discard changes before dispatching '${branch}':\n` +
-        dirty,
-    )
+  // Dirty-tree guard only applies when we'd `git checkout -B` the main
+  // working tree. With useWorktree the operator's checkout is left
+  // alone — siblings can run concurrently and the operator can keep
+  // editing in main while a dispatch is in flight.
+  if (!useWorktree) {
+    const dirty = gitText(gitImpl, ['status', '--porcelain']).stdout
+    if (dirty.trim().length > 0) {
+      throw new Error(
+        `spawn: refusing to dispatch — working tree is dirty.\n` +
+          `Commit, stash, or discard changes before dispatching '${branch}':\n` +
+          dirty,
+      )
+    }
   }
 
   const branchRef = `refs/heads/${branch}`
@@ -247,13 +221,18 @@ const prepareBranch = ({ role, task, persistent, protectedBranch, gitImpl, log }
     }
   }
 
+  if (useWorktree) {
+    const wtPath = createWorktreeForBranch(projectDir, branch, gitImpl)
+    log(`spawn: branch=${branch} worktree=${wtPath} (${branchExists ? 'reset' : 'created'})`)
+    return { branch, cwd: wtPath, worktree: wtPath }
+  }
+
   const checkout = gitText(gitImpl, ['checkout', '-B', branch])
   if (!gitOk(checkout)) {
     throw new Error(`spawn: git checkout ${branch} failed:\n${checkout.stderr}`)
   }
-
   log(`spawn: branch=${branch} (${branchExists ? 'reset' : 'created'})`)
-  return branch
+  return { branch, cwd: projectDir, worktree: null }
 }
 
 const truthyFlag = (raw) =>
@@ -281,8 +260,12 @@ export async function dispatchLifecycle(
     backoffThreshold = DEFAULT_BACKOFF_THRESHOLD,
     timeoutMs = null,
     terminationGraceMs = TERMINATION_GRACE_MS,
-    platformDir = DEFAULT_PLATFORM_DIR,
-    projectDir = projectDirOf(),
+    identity = null,
+    useWorktree = false,
+    keepWorktreeOnSuccess = false,
+    abortSignal = null,
+    platformDir = createConfig().platformDir,
+    projectDir = createConfig().projectDir,
     projectArtelDir = projectArtelDirOf(projectDir),
   } = {},
   {
@@ -301,9 +284,14 @@ export async function dispatchLifecycle(
   const repoDir = projectDir
   const gitImpl = spawnGit || ((args) => spawnSync('git', args, { cwd: repoDir, encoding: 'utf8' }))
 
+  // Parent → child envelope (per-call read; tests mutate process.env
+  // between calls). Used both for the role-policy guard below and for
+  // tracing further down.
+  const dEnv = dispatchEnv()
+
   // Role policy guard — DESIGN.md §8. Throws BEFORE any side-effects (no
   // branch creation, no file writes) so denied dispatches leave no trace.
-  checkDispatchPolicy(process.env.ARTEL_ROLE || null, role, paths.agentsDir)
+  checkDispatchPolicy(dEnv.role, role, paths.agentsDir)
 
   const roleMeta = readRoleMeta(role, paths.agentsDir)
   const engineId = engine || roleMeta.engine || 'claude'
@@ -316,7 +304,9 @@ export async function dispatchLifecycle(
   const protectedBranch = truthyFlag(roleMeta.protected_branch)
   const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs)
   const effectiveGraceMs = parseTimeoutMs(terminationGraceMs, 'dispatch termination grace')
-  const branch = prepareBranch({ role, task, persistent, protectedBranch, gitImpl, log })
+  const { branch, cwd: dispatchCwd, worktree } = prepareBranch({
+    role, task, persistent, protectedBranch, useWorktree, projectDir, gitImpl, log,
+  })
   const { sessionFlag, sessionId: initialSessionId, sessionIdPath, captureCodexSession } = preparePersistentSession({
     role,
     engineId,
@@ -341,10 +331,10 @@ export async function dispatchLifecycle(
   // (dispatch_id, parent_dispatch_id, trace_id) tuples. Top-level dispatch
   // (no parent in env) defines the trace root. Nested dispatches inherit
   // trace_id from env and record the parent.
-  const parentDispatchId = process.env.ARTEL_DISPATCH_ID || null
-  const parentRole = process.env.ARTEL_ROLE || null
+  const parentDispatchId = dEnv.dispatchId
+  const parentRole = dEnv.role
   const dispatchId = uuidv7()
-  const traceId = process.env.ARTEL_TRACE_ID || dispatchId
+  const traceId = dEnv.traceId || dispatchId
 
   const promptPath = join(paths.dispatchesDir, `${task}.prompt`)
   const outPath = join(paths.dispatchesDir, `${task}.out`)
@@ -407,17 +397,40 @@ export async function dispatchLifecycle(
   if (taskAttrs) runArgs.push('--task-attrs', JSON.stringify(taskAttrs))
   runArgs.push(role, prompt)
 
+  // V11.1 — agent identity injection. Per-dispatch CLI override beats
+  // role frontmatter; absent both, no identity is set and the child
+  // inherits the operator's git config.
+  const identityName = identity || roleMeta.identity || null
+  const identityRecord = resolveIdentity(paths.projectDir, identityName)
+  const identityEnvVars = identityEnv(identityRecord)
+
+  // V11.2 — credential injection. Strict: role declares `requires:` of
+  // env-var names; lifecycle resolves each from .artel/trust/credentials.json
+  // and merges into spawn env. Missing names throw before the child
+  // starts, so dispatches don't get partway through and then 401.
+  const credentialEnvVars = resolveRequires(paths.projectDir, roleMeta.requires)
+
   const outFd = openSync(outPath, 'w')
   let child
   try {
     child = spawnProcess('node', [paths.runPath, ...runArgs], {
+      // V3.3.a: when running in a worktree, the child's cwd is the
+      // worktree path so file edits land there instead of the
+      // operator's main checkout. Without a worktree, cwd defaults
+      // to projectDir (existing behaviour).
+      cwd: dispatchCwd,
       stdio: ['ignore', outFd, outFd],
       env: {
         ...process.env,
+        ...identityEnvVars,
+        ...credentialEnvVars,
         ARTEL_TASK: task,
         ARTEL_ROLE: role,
         ARTEL_DISPATCH_ID: dispatchId,
         ARTEL_TRACE_ID: traceId,
+        ARTEL_PROJECT_DIR: projectDir,           // child resolves .artel from here
+        ...(worktree ? { ARTEL_WORKTREE: worktree } : {}),
+        ...(identityName ? { ARTEL_IDENTITY: identityName } : {}),
         ...(taskAttrs ? { ARTEL_TASK_ATTRS: JSON.stringify(taskAttrs) } : {}),
       },
     })
@@ -427,7 +440,10 @@ export async function dispatchLifecycle(
 
   // V10: capture git context at dispatch start. `gitContext` returns null if
   // the project isn't a git repo or git is unavailable — skip the field then.
-  const git = gitContext(paths.projectDir)
+  // V3.3.a: when in a worktree, capture git context from the worktree's
+  // own checkout — that's where the dispatch's commits + working-tree
+  // changes will land, so deltas should diff against the worktree HEAD.
+  const git = gitContext(dispatchCwd)
   dispatchApi.markRunning({
     pid: child.pid,
     branch,
@@ -463,15 +479,23 @@ export async function dispatchLifecycle(
   return await new Promise((resolve) => {
     let settled = false
     let timedOut = false
+    let cancelled = false
     let timeoutAt = null
     let graceAt = null
+    let cancelAt = null
     let finalTimeoutSignal = null
     let timeoutHandle = null
     let graceHandle = null
+    let heartbeatHandle = null
+    let abortHandler = null
 
     const cleanupTimers = () => {
       if (timeoutHandle) clearTimeout(timeoutHandle)
       if (graceHandle) clearTimeout(graceHandle)
+      if (heartbeatHandle) clearInterval(heartbeatHandle)
+      if (abortSignal && abortHandler) {
+        try { abortSignal.removeEventListener('abort', abortHandler) } catch {}
+      }
     }
 
     const maybeCaptureCodexSession = () => {
@@ -516,7 +540,13 @@ export async function dispatchLifecycle(
       let disposition = 'error'
       let parked = null
       let timeout = null
-      if (timedOut) {
+      if (cancelled) {
+        // V3.3.c — pipeline parallel cancelled this branch via
+        // AbortSignal (quorum already met or impossible). Distinct
+        // from timeout: cancellation was intentional, not a failure
+        // mode worth surfacing as parked/error.
+        disposition = 'cancelled'
+      } else if (timedOut) {
         disposition = 'timeout'
         timeout = {
           timeoutMs: effectiveTimeoutMs,
@@ -534,7 +564,7 @@ export async function dispatchLifecycle(
 
       // V10: compute working-tree delta against the dispatch-start commit.
       // gitDelta tolerates missing git / unreachable sha → null.
-      const delta = git ? gitDelta(paths.projectDir, git.commit_sha) : null
+      const delta = git ? gitDelta(dispatchCwd, git.commit_sha) : null
       dispatchApi.markReleased({
         exitCode,
         exitSignal: signal,
@@ -551,7 +581,53 @@ export async function dispatchLifecycle(
             ? `timeout after ${effectiveTimeoutMs}ms${graceAt ? '; SIGKILL after grace' : '; SIGTERM delivered'}`
             : error?.message || null,
       })
+
+      // V3.3.a — worktree cleanup. Remove on success so happy paths
+      // don't leak `.artel/.worktrees/<branch>/`. Keep on
+      // parked/timeout/error so the operator can `cd` in to debug.
+      // `--keep-worktree-on-success` overrides the success branch when
+      // someone wants to inspect even successful runs.
+      if (worktree) {
+        // V3.3.c — `cancelled` is treated like `success` for cleanup:
+        // the cancellation was intentional (quorum met / sibling won
+        // the race), not a failure to investigate. `parked`/`timeout`/
+        // `error` keep the worktree by default for forensics.
+        const cleanupOk = disposition === 'success' || disposition === 'cancelled'
+        const keep = keepWorktreeOnSuccess || !cleanupOk
+        if (keep) {
+          log(`spawn: worktree kept at ${worktree} (disposition=${disposition})`)
+        } else {
+          const r = removeWorktree(worktree, gitImpl)
+          if (r && r.ok === false) {
+            log(`spawn: worktree cleanup at ${worktree} failed: ${r.stderr.trim()}`)
+          } else {
+            log(`spawn: worktree removed at ${worktree}`)
+          }
+        }
+      }
+
       resolve({ exitCode, exitSignal: signal, disposition, branch, sessionId, timedOut })
+    }
+
+    // V9 — mid-run heartbeats. Emits a `heartbeat` event every
+    // `ARTEL_HEARTBEAT_INTERVAL_MS` (default 60s) and updates `.meta`'s
+    // `lastHeartbeatAt`/`pidAlive` so `artel status` can show "alive Ns ago"
+    // without scanning events.jsonl. Cleared on settle / timeout / error.
+    const heartbeatIntervalMs = Number(createConfig().heartbeatIntervalMs) || DEFAULT_HEARTBEAT_INTERVAL_MS
+    if (heartbeatIntervalMs > 0) {
+      heartbeatHandle = setInterval(() => {
+        if (settled || child.killed) return
+        try {
+          const at = new Date().toISOString()
+          dispatchApi.appendEvent('heartbeat', { pid_alive: true })
+          dispatchApi.writeMeta({ lastHeartbeatAt: at, pidAlive: true }, 'heartbeat')
+        } catch (err) {
+          log(`heartbeat emit failed: ${err.message}`)
+        }
+      }, heartbeatIntervalMs)
+      // unref so a stuck heartbeat interval doesn't keep node alive past
+      // settle (defence in depth — cleanupTimers should always clear it).
+      if (heartbeatHandle.unref) heartbeatHandle.unref()
     }
 
     timeoutHandle = setTimeout(() => {
@@ -572,6 +648,30 @@ export async function dispatchLifecycle(
         } catch {}
       }, effectiveGraceMs)
     }, effectiveTimeoutMs)
+
+    // V3.3.c — external cancellation via AbortSignal. Used by
+    // pipeline parallel quorum joins (`any-complete` / `k-of-n`) to
+    // stop sibling branches once enough have succeeded. Same SIGTERM
+    // → SIGKILL grace as timeout, but disposition is 'cancelled'.
+    if (abortSignal) {
+      const triggerAbort = () => {
+        if (settled || cancelled) return
+        cancelled = true
+        cancelAt = new Date().toISOString()
+        log(`spawn: cancelled (AbortSignal); sending SIGTERM to ${child.pid}`)
+        try { child.kill('SIGTERM') } catch {}
+        graceHandle = graceHandle || setTimeout(() => {
+          if (settled) return
+          log(`spawn: cancel grace ${effectiveGraceMs}ms elapsed for ${task}; sending SIGKILL to ${child.pid}`)
+          try { child.kill('SIGKILL') } catch {}
+        }, effectiveGraceMs)
+      }
+      if (abortSignal.aborted) triggerAbort()
+      else {
+        abortHandler = triggerAbort
+        abortSignal.addEventListener('abort', abortHandler, { once: true })
+      }
+    }
 
     child.on('exit', (code, signal) => settle({ code, signal }))
     child.on('error', (error) => {
