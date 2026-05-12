@@ -1,3 +1,8 @@
+## [0.4.0](https://github.com/antongolub/artel/compare/v0.3.0...v0.4.0) (2026-05-12)
+
+### Features
+* feat: introduce pipeline api (#5) ([10a0458](https://github.com/antongolub/artel/commit/10a045828816c300e6e383895f185402817bf645))
+
 ## [0.3.0](https://github.com/antongolub/artel/compare/v0.2.0...v0.3.0) (2026-05-04)
 
 ### Features
